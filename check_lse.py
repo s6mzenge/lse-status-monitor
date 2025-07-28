@@ -45,17 +45,7 @@ def load_status():
         with open(STATUS_FILE, 'r') as f:
             return json.load(f)
     except:
-        return {
-            "last_date": "10 July",
-            "last_check": None,
-            "phase": "tracking_applications",
-            "phase_2_start_date": None,  # Datum an dem Phase 2 gestartet wurde
-            "phase_2_target_date": None,  # Datum das Pre-CAS erreichen muss
-            "last_precas_date": None,
-            "phase_3_start_date": None,  # Datum an dem Phase 3 gestartet wurde
-            "phase_3_target_date": None,  # Datum das CAS erreichen muss
-            "last_cas_date": None
-        }
+        return {"last_date": "10 July", "last_check": None}
 
 def save_status(status):
     with open(STATUS_FILE, 'w') as f:
@@ -66,7 +56,7 @@ def load_history():
         with open(HISTORY_FILE, 'r') as f:
             return json.load(f)
     except:
-        return {"changes": [], "precas_changes": [], "cas_changes": []}
+        return {"changes": []}
 
 def save_history(history):
     with open(HISTORY_FILE, 'w') as f:
@@ -75,6 +65,7 @@ def save_history(history):
 def date_to_days(date_str):
     """Konvertiert ein Datum wie '10 July' in Tage seit dem 1. Januar"""
     try:
+        # Füge das aktuelle Jahr hinzu
         current_year = datetime.now().year
         date_obj = datetime.strptime(f"{date_str} {current_year}", "%d %B %Y")
         jan_first = datetime(current_year, 1, 1)
@@ -89,29 +80,16 @@ def days_to_date(days):
     target_date = jan_first + timedelta(days=int(days))
     return target_date.strftime("%d %B").lstrip("0")
 
-def date_str_to_datetime(date_str):
-    """Konvertiert '12 August' zu einem datetime Objekt"""
-    try:
-        current_year = datetime.now().year
-        return datetime.strptime(f"{date_str} {current_year}", "%d %B %Y")
-    except:
-        return None
-
-def calculate_regression_forecast(history, target_type="application"):
-    """Berechnet eine lineare Regression und Prognose"""
-    changes_key = {
-        "application": "changes",
-        "precas": "precas_changes", 
-        "cas": "cas_changes"
-    }[target_type]
-    
-    if len(history.get(changes_key, [])) < 2:
+def calculate_regression_forecast(history):
+    """Berechnet eine lineare Regression und Prognose basierend auf der Historie"""
+    if len(history["changes"]) < 2:
         return None
     
+    # Extrahiere Datenpunkte (Zeit in Tagen seit erstem Eintrag, Datum in Tagen seit 1. Januar)
     data_points = []
     first_timestamp = None
     
-    for entry in history[changes_key]:
+    for entry in history["changes"]:
         timestamp = datetime.fromisoformat(entry["timestamp"])
         date_days = date_to_days(entry["date"])
         
@@ -121,83 +99,54 @@ def calculate_regression_forecast(history, target_type="application"):
         if first_timestamp is None:
             first_timestamp = timestamp
             
-        days_elapsed = (timestamp - first_timestamp).total_seconds() / 86400
+        days_elapsed = (timestamp - first_timestamp).total_seconds() / 86400  # Tage seit erstem Eintrag
         data_points.append((days_elapsed, date_days))
     
     if len(data_points) < 2:
         return None
     
+    # Lineare Regression
     x = np.array([p[0] for p in data_points])
     y = np.array([p[1] for p in data_points])
     
+    # Berechne Steigung und y-Achsenabschnitt
     n = len(x)
     slope = (n * np.sum(x * y) - np.sum(x) * np.sum(y)) / (n * np.sum(x**2) - np.sum(x)**2)
     intercept = (np.sum(y) - slope * np.sum(x)) / n
     
+    # Berechne R² für Qualität der Regression
     y_pred = slope * x + intercept
     ss_res = np.sum((y - y_pred)**2)
     ss_tot = np.sum((y - np.mean(y))**2)
     r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
     
-    # Berechne aktuelle Position und Prognosen
+    # Prognose für July 25 und July 28
+    target_25_days = date_to_days("25 July")
+    target_28_days = date_to_days("28 July")
+    
+    if target_25_days is None or target_28_days is None:
+        return None
+    
+    # Berechne wann diese Daten erreicht werden
     current_days_elapsed = (datetime.now() - first_timestamp).total_seconds() / 86400
     current_predicted_days = slope * current_days_elapsed + intercept
     
-    if target_type == "application":
-        target_25_days = date_to_days("25 July")
-        target_28_days = date_to_days("28 July")
-        
-        days_until_25 = (target_25_days - current_predicted_days) / slope if slope > 0 else None
-        days_until_28 = (target_28_days - current_predicted_days) / slope if slope > 0 else None
-        
-        return {
-            "slope": slope,
-            "r_squared": r_squared,
-            "days_until_25_july": days_until_25,
-            "days_until_28_july": days_until_28,
-            "data_points": len(data_points)
-        }
-    else:
-        return {
-            "slope": slope,
-            "r_squared": r_squared,
-            "current_predicted_days": current_predicted_days,
-            "data_points": len(data_points),
-            "days_per_day": slope
-        }
-
-def calculate_target_forecast(history, target_date, changes_key):
-    """Berechnet wann ein bestimmtes Zieldatum erreicht wird"""
-    if len(history.get(changes_key, [])) < 2:
-        return None
-    
-    # Nutze die Regression
-    forecast_type = {
-        "precas_changes": "precas",
-        "cas_changes": "cas"
-    }[changes_key]
-    
-    regression = calculate_regression_forecast(history, forecast_type)
-    if not regression or regression['slope'] <= 0:
-        return None
-    
-    target_days = date_to_days(target_date)
-    if not target_days:
-        return None
-    
-    days_until_target = (target_days - regression['current_predicted_days']) / regression['slope']
+    days_until_25 = (target_25_days - current_predicted_days) / slope if slope > 0 else None
+    days_until_28 = (target_28_days - current_predicted_days) / slope if slope > 0 else None
     
     return {
-        "target_date": target_date,
-        "days_until": days_until_target,
-        "expected_date": datetime.now() + timedelta(days=days_until_target) if days_until_target > 0 else None,
-        "progress_rate": regression['slope'],
-        "r_squared": regression['r_squared']
+        "slope": slope,
+        "r_squared": r_squared,
+        "current_trend_days": current_predicted_days,
+        "days_until_25_july": days_until_25,
+        "days_until_28_july": days_until_28,
+        "data_points": len(data_points)
     }
 
 def extract_all_other_date(text):
     """Extrahiert nur das Datum für 'all other graduate applicants'"""
     text = ' '.join(text.split())
+    
     date_pattern = r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))\b'
     all_dates = re.findall(date_pattern, text, re.IGNORECASE)
     
@@ -208,141 +157,62 @@ def extract_all_other_date(text):
     
     return None
 
-def extract_date_from_cell(text):
-    """Extrahiert ein einzelnes Datum aus Text"""
-    date_pattern = r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))\b'
-    match = re.search(date_pattern, text, re.IGNORECASE)
-    return match.group(1).strip() if match else None
-
-def fetch_all_dates(soup):
-    """Extrahiert alle relevanten Daten aus der Webseite - VERBESSERTE VERSION"""
-    dates = {
-        "all_other_date": None,
-        "precas_date": None,
-        "cas_date": None
-    }
-    
-    # Hole den gesamten Text und bereinige ihn
-    page_text = soup.get_text()
-    # Entferne mehrfache Leerzeichen und Zeilenumbrüche
-    page_text = ' '.join(page_text.split())
-    
-    # Debug-Ausgabe
-    print("\nDEBUG: Suche nach Datumsmustern...")
-    
-    # Pattern 1: Suche nach "all other graduate applicants"
-    # Das Pattern berücksichtigt jetzt auch mögliche Sternchen und Leerzeichen
-    all_other_pattern = r'all\s+other\s+graduate\s+applicants\s+on\*?\s*\*?\s*(?:\([^)]*\))?\s*\*?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-    match = re.search(all_other_pattern, page_text, re.IGNORECASE)
-    if match:
-        dates["all_other_date"] = match.group(1).strip()
-        print(f"DEBUG: Gefunden all_other_date = {dates['all_other_date']}")
-    else:
-        # Alternativer Pattern für den Fall, dass das Datum in einer separaten Zelle steht
-        # Suche zuerst nach dem Text und dann nach dem nächsten Datum
-        if 'all other graduate applicants' in page_text.lower():
-            # Finde die Position des Textes
-            pos = page_text.lower().find('all other graduate applicants')
-            # Suche nach dem nächsten Datum nach dieser Position
-            remaining_text = page_text[pos:]
-            date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-            date_matches = re.finditer(date_pattern, remaining_text, re.IGNORECASE)
-            
-            # Nimm das erste Datum nach "all other graduate applicants"
-            for i, match in enumerate(date_matches):
-                if i == 0:  # Erstes Datum nach dem Text
-                    dates["all_other_date"] = match.group(1).strip()
-                    print(f"DEBUG: Gefunden all_other_date (Alternative) = {dates['all_other_date']}")
-                    break
-    
-    # Pattern 2: Suche nach Pre-CAS
-    precas_pattern = r'issuing\s+\*?\*?Pre-CAS\*?\*?\s+[^:]*:\s*(?:[^:]*:)?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-    match = re.search(precas_pattern, page_text, re.IGNORECASE)
-    if match:
-        dates["precas_date"] = match.group(1).strip()
-        print(f"DEBUG: Gefunden precas_date = {dates['precas_date']}")
-    else:
-        # Alternative: Suche nach "issuing Pre-CAS" und dann dem nächsten Datum
-        if 'issuing' in page_text.lower() and 'pre-cas' in page_text.lower():
-            # Finde die Position von "Pre-CAS"
-            pos = page_text.lower().find('pre-cas')
-            if pos != -1:
-                remaining_text = page_text[pos:]
-                date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-                match = re.search(date_pattern, remaining_text, re.IGNORECASE)
-                if match:
-                    dates["precas_date"] = match.group(1).strip()
-                    print(f"DEBUG: Gefunden precas_date (Alternative) = {dates['precas_date']}")
-    
-    # Pattern 3: Suche nach CAS (aber nicht Pre-CAS)
-    cas_pattern = r'issuing\s+\*?\*?CAS\*?\*?\s+to\s+[^:]*:\s*(?:[^:]*:)?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-    match = re.search(cas_pattern, page_text, re.IGNORECASE)
-    if match:
-        dates["cas_date"] = match.group(1).strip()
-        print(f"DEBUG: Gefunden cas_date = {dates['cas_date']}")
-    else:
-        # Alternative: Suche nach "issuing CAS to" und dann dem nächsten Datum
-        cas_text_pattern = r'issuing\s+\*?\*?CAS\*?\*?\s+to\s+offer\s+holders'
-        match = re.search(cas_text_pattern, page_text, re.IGNORECASE)
-        if match:
-            # Position nach dem gefundenen Text
-            pos = match.end()
-            remaining_text = page_text[pos:]
-            date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-            date_match = re.search(date_pattern, remaining_text, re.IGNORECASE)
-            if date_match:
-                dates["cas_date"] = date_match.group(1).strip()
-                print(f"DEBUG: Gefunden cas_date (Alternative) = {dates['cas_date']}")
-    
-    # Zusätzliche Strategie: Suche in Tabellen
-    tables = soup.find_all('table')
-    if tables and not all(dates.values()):
-        print(f"\nDEBUG: Durchsuche {len(tables)} Tabellen...")
+def fetch_processing_date():
+    try:
+        response = requests.get(URL, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        response.raise_for_status()
         
-        for table in tables:
-            # Hole alle Zeilen
-            rows = table.find_all('tr')
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        for element in soup.find_all(text=re.compile(r'all other graduate applicants', re.IGNORECASE)):
+            parent = element.parent
+            while parent and parent.name not in ['td', 'th', 'tr']:
+                parent = parent.parent
             
-            for i in range(len(rows)):
-                row_text = rows[i].get_text(separator=' ', strip=True)
-                
-                # Prüfe ob diese Zeile einen der gesuchten Texte enthält
-                if 'all other graduate applicants' in row_text.lower() and not dates["all_other_date"]:
-                    # Schaue in der gleichen Zeile und den nächsten Zeilen nach einem Datum
-                    for j in range(i, min(i+3, len(rows))):
-                        check_text = rows[j].get_text(separator=' ', strip=True)
-                        date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-                        match = re.search(date_pattern, check_text, re.IGNORECASE)
-                        if match:
-                            dates["all_other_date"] = match.group(1).strip()
-                            print(f"DEBUG: Gefunden in Tabelle all_other_date = {dates['all_other_date']}")
-                            break
-                
-                if 'issuing' in row_text.lower() and 'pre-cas' in row_text.lower() and not dates["precas_date"]:
-                    for j in range(i, min(i+3, len(rows))):
-                        check_text = rows[j].get_text(separator=' ', strip=True)
-                        date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-                        match = re.search(date_pattern, check_text, re.IGNORECASE)
-                        if match:
-                            dates["precas_date"] = match.group(1).strip()
-                            print(f"DEBUG: Gefunden in Tabelle precas_date = {dates['precas_date']}")
-                            break
-                
-                if 'issuing' in row_text.lower() and 'cas' in row_text.lower() and 'pre-cas' not in row_text.lower() and not dates["cas_date"]:
-                    for j in range(i, min(i+3, len(rows))):
-                        check_text = rows[j].get_text(separator=' ', strip=True)
-                        date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-                        match = re.search(date_pattern, check_text, re.IGNORECASE)
-                        if match:
-                            dates["cas_date"] = match.group(1).strip()
-                            print(f"DEBUG: Gefunden in Tabelle cas_date = {dates['cas_date']}")
-                            break
-    
-    print(f"\nDEBUG: Finale Ergebnisse: {dates}")
-    return dates
-    
+            if parent:
+                if parent.name == 'tr':
+                    cells = parent.find_all(['td', 'th'])
+                    for cell in cells:
+                        cell_text = cell.get_text()
+                        date = extract_all_other_date(cell_text)
+                        if date:
+                            print(f"Gefundene Daten in Zelle: {cell_text.strip()}")
+                            print(f"Extrahiertes Datum für 'all other graduate applicants': {date}")
+                            return date
+                else:
+                    row = parent.find_parent('tr')
+                    if row:
+                        cells = row.find_all(['td', 'th'])
+                        for cell in cells:
+                            cell_text = cell.get_text()
+                            date = extract_all_other_date(cell_text)
+                            if date:
+                                print(f"Gefundene Daten in Zelle: {cell_text.strip()}")
+                                print(f"Extrahiertes Datum für 'all other graduate applicants': {date}")
+                                return date
+        
+        full_text = soup.get_text()
+        pattern = r'all other graduate applicants[^0-9]*?((?:\d{1,2}\s+\w+\s*)+)'
+        match = re.search(pattern, full_text, re.IGNORECASE | re.DOTALL)
+        
+        if match:
+            dates_text = match.group(1)
+            date = extract_all_other_date(dates_text)
+            if date:
+                print(f"Datum durch Textsuche gefunden: {date}")
+                return date
+        
+        print("WARNUNG: Konnte das Datum nicht finden!")
+        return None
+        
+    except Exception as e:
+        print(f"Fehler beim Abrufen der Webseite: {e}")
+        return None
+
 def create_forecast_text(forecast):
-    """Erstellt einen Prognosetext für Phase 1"""
+    """Erstellt einen Prognosetext basierend auf der Regression"""
     if not forecast:
         return "\n📊 Prognose: Noch nicht genügend Daten für eine zuverlässige Vorhersage."
     
@@ -354,48 +224,22 @@ def create_forecast_text(forecast):
     else:
         text += f"📈 Durchschnittlicher Fortschritt: {forecast['slope']:.1f} Tage pro Tag\n\n"
         
-        if forecast.get('days_until_25_july') and forecast['days_until_25_july'] > 0:
+        if forecast['days_until_25_july'] is not None and forecast['days_until_25_july'] > 0:
             date_25 = datetime.now() + timedelta(days=forecast['days_until_25_july'])
             text += f"📅 25 July wird voraussichtlich erreicht:\n"
             text += f"   • In {forecast['days_until_25_july']:.0f} Tagen\n"
             text += f"   • Am {date_25.strftime('%d. %B %Y')}\n\n"
         
-        if forecast.get('days_until_28_july') and forecast['days_until_28_july'] > 0:
+        if forecast['days_until_28_july'] is not None and forecast['days_until_28_july'] > 0:
             date_28 = datetime.now() + timedelta(days=forecast['days_until_28_july'])
             text += f"📅 28 July wird voraussichtlich erreicht:\n"
             text += f"   • In {forecast['days_until_28_july']:.0f} Tagen\n"
             text += f"   • Am {date_28.strftime('%d. %B %Y')}\n\n"
-            text += "⚠️ Bei 28 July wechselt der Monitor zu Pre-CAS Tracking!\n"
         
         if forecast['r_squared'] < 0.5:
-            text += "\n⚠️ Hinweis: Die Vorhersage ist unsicher (niedrige Korrelation).\n"
+            text += "⚠️ Hinweis: Die Vorhersage ist unsicher (niedrige Korrelation).\n"
         elif forecast['r_squared'] > 0.8:
-            text += "\n✅ Die Vorhersage basiert auf einem stabilen Trend.\n"
-    
-    return text
-
-def create_target_forecast_text(forecast, phase):
-    """Erstellt Prognosetext für Phase 2 oder 3"""
-    if not forecast:
-        return "\n📊 Prognose: Noch nicht genügend Daten."
-    
-    phase_name = "Pre-CAS" if phase == 2 else "CAS"
-    
-    text = f"\n📊 {phase_name.upper()} PROGNOSE:\n"
-    text += f"Zieldatum: {forecast['target_date']}\n"
-    
-    if forecast['days_until'] and forecast['days_until'] > 0:
-        text += f"\n📈 Fortschrittsrate: {forecast['progress_rate']:.1f} Tage/Tag\n"
-        text += f"📅 {phase_name} für dich wird voraussichtlich erreicht:\n"
-        text += f"   • In {forecast['days_until']:.0f} Tagen\n"
-        text += f"   • Am {forecast['expected_date'].strftime('%d. %B %Y')}\n"
-        
-        if forecast['r_squared'] < 0.5:
-            text += "\n⚠️ Vorhersage unsicher (R²={:.2f})".format(forecast['r_squared'])
-        elif forecast['r_squared'] > 0.8:
-            text += "\n✅ Stabile Vorhersage (R²={:.2f})".format(forecast['r_squared'])
-    else:
-        text += f"\n✅ {phase_name} sollte bereits für dich ausgestellt sein!"
+            text += "✅ Die Vorhersage basiert auf einem stabilen Trend.\n"
     
     return text
 
@@ -449,381 +293,141 @@ def main():
     conditional_notify = [email for email in [email_main, email_2, email_3] if email and 'engelquast' in email.lower()]
     
     print(f"Immer benachrichtigen: {', '.join(always_notify)}")
-    print(f"Nur bei Phasenwechsel: {', '.join(conditional_notify)}")
+    print(f"Nur bei 25/28 July: {', '.join(conditional_notify)}")
     
     # Lade Status und Historie
     status = load_status()
     history = load_history()
+    print(f"Letztes bekanntes Datum: {status['last_date']}")
     
-    # Stelle sicher, dass neue Felder existieren
-    if "phase" not in status:
-        status["phase"] = "tracking_applications"
-    if "precas_changes" not in history:
-        history["precas_changes"] = []
-    if "cas_changes" not in history:
-        history["cas_changes"] = []
-    
-    print(f"\nAktuelle Phase: {status['phase']}")
-    print("="*30)
-    
-    # Hole Daten von der Webseite
+    # Hole aktuelles Datum
     print("\nRufe LSE-Webseite ab...")
-    try:
-        response = requests.get(URL, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        dates = fetch_all_dates(soup)
-        
-        print(f"Gefundene Daten:")
-        print(f"  All other graduates: {dates['all_other_date']}")
-        print(f"  Pre-CAS: {dates['precas_date']}")
-        print(f"  CAS: {dates['cas_date']}")
-        
-    except Exception as e:
-        print(f"Fehler beim Abrufen der Webseite: {e}")
-        
-        # Sende Warnung
-        subject = "LSE Monitor WARNUNG: Webseite nicht erreichbar"
-        body = f"""WARNUNG: Der LSE Monitor konnte die Webseite nicht abrufen!
-
-Fehler: {str(e)}
-Zeit: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
-
-Link: {URL}"""
-        
-        if always_notify:
-            send_gmail(subject, body, always_notify)
-        
-        telegram_warning = f"""<b>⚠️ LSE Monitor WARNUNG</b>
-
-Webseite nicht erreichbar!
-Fehler: {str(e)}
-
-<a href="{URL}">📄 Webseite manuell prüfen</a>"""
-        
-        send_telegram(telegram_warning)
-        return
+    current_date = fetch_processing_date()
     
-    # PHASE 1: Tracking Applications
-    if status["phase"] == "tracking_applications":
-        print(f"\n--- PHASE 1: Application Tracking ---")
-        print(f"Letztes bekanntes Datum: {status['last_date']}")
-        print(f"Aktuelles Datum: {dates['all_other_date']}")
+    if current_date:
+        print(f"Aktuelles Datum für 'all other graduate applicants': {current_date}")
         
-        if dates['all_other_date'] and dates['all_other_date'] != status['last_date']:
+        if current_date != status['last_date']:
             print("\n🔔 ÄNDERUNG ERKANNT!")
             
             # Speichere in Historie
             history["changes"].append({
                 "timestamp": datetime.now().isoformat(),
-                "date": dates['all_other_date'],
+                "date": current_date,
                 "from": status['last_date']
             })
             save_history(history)
             
             # Berechne Prognose
-            forecast = calculate_regression_forecast(history, "application")
+            forecast = calculate_regression_forecast(history)
             forecast_text = create_forecast_text(forecast)
             
-            # E-Mail an Hauptempfänger (immer)
-            subject = f"LSE Status Update: Neues Datum {dates['all_other_date']}"
+            # Erstelle E-Mail-Inhalt
+            subject = f"LSE Status Update: Neues Datum {current_date}"
+            
+            # Basis-E-Mail für alle
             base_body = f"""Das Verarbeitungsdatum für "all other graduate applicants" hat sich geändert!
 
 ÄNDERUNG:
 Von: {status['last_date']}
-Auf: {dates['all_other_date']}
+Auf: {current_date}
 
-Zeitpunkt: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
+Zeitpunkt der Erkennung: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
 
-Link: {URL}"""
+Link zur Seite: {URL}"""
             
-            body_with_forecast = base_body + f"\n{forecast_text}"
+            # E-Mail mit Prognose für Hauptempfänger
+            body_with_forecast = base_body + f"\n{forecast_text}\n\nDiese E-Mail wurde automatisch von deinem GitHub Actions Monitor generiert."
             
-            if always_notify:
-                send_gmail(subject, body_with_forecast, always_notify)
+            # E-Mail ohne Prognose für bedingte Empfänger
+            body_simple = base_body + "\n\nDiese E-Mail wurde automatisch von deinem GitHub Actions Monitor generiert."
             
-            # Telegram immer
+            # Telegram-Nachricht formatieren
             telegram_msg = f"""<b>🔔 LSE Status Update</b>
 
 <b>ÄNDERUNG ERKANNT!</b>
 Von: {status['last_date']}
-Auf: <b>{dates['all_other_date']}</b>
+Auf: <b>{current_date}</b>
 
+Zeit: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
 {forecast_text}
 
-<a href="{URL}">📄 LSE Webseite</a>"""
+<a href="{URL}">📄 LSE Webseite öffnen</a>"""
             
-            send_telegram(telegram_msg)
+            # Sende E-Mails
+            emails_sent = False
             
-            # Spezialbehandlung für 25/28 July für Ulli
-            if conditional_notify and dates['all_other_date'] in ["25 July", "28 July"]:
-                special_subject = f"LSE: Wichtiges Datum {dates['all_other_date']} erreicht"
-                special_body = base_body + "\n\nDies ist eines der wichtigen Zieldaten."
-                send_gmail(special_subject, special_body, conditional_notify)
-            
-            # Prüfe ob wir zu Phase 2 wechseln müssen
-            # Wenn morgen 29 July erreicht wird, starte Phase 2 heute
-            if dates['all_other_date'] == "28 July":
-                print("\n🎯 28 JULY ERREICHT! Phase 2 startet HEUTE!")
-                status["phase"] = "tracking_precas"
-                status["phase_2_start_date"] = datetime.now().strftime("%d %B")
-                # Das Zieldatum für Pre-CAS ist das Datum an dem 29 July erscheinen wird (morgen)
-                tomorrow = datetime.now() + timedelta(days=1)
-                status["phase_2_target_date"] = tomorrow.strftime("%d %B").lstrip("0")
-                status["last_precas_date"] = dates['precas_date']
-                
-                phase_msg = f"""<b>🎉 PHASE 2 BEGINNT!</b>
-
-28 July wurde erreicht. Morgen wird 29 July angezeigt.
-
-Ab jetzt trackt der Monitor das <b>Pre-CAS</b> Datum.
-
-Ziel: Pre-CAS muss <b>{status['phase_2_target_date']}</b> erreichen.
-Aktueller Pre-CAS Stand: <b>{dates['precas_date']}</b>
-
-Dies bedeutet, dass deine Dokumente morgen fertig bearbeitet sein werden und du dann für Pre-CAS berechtigt bist."""
-                
-                send_telegram(phase_msg)
-                
-                # Benachrichtige auch Ulli über Phasenwechsel
-                phase_email_subject = "LSE Monitor: Phase 2 (Pre-CAS Tracking) beginnt"
-                phase_email_body = f"""Der LSE Monitor wechselt zu Phase 2!
-
-28 July wurde bei "all other graduate applicants" erreicht.
-Morgen (29 July) werden deine Dokumente fertig bearbeitet sein.
-
-Der Monitor trackt nun den Pre-CAS Fortschritt.
-Zieldatum: {status['phase_2_target_date']}
-Aktueller Stand: {dates['precas_date']}
-
-Link: {URL}"""
-                
-                all_recipients = list(set(always_notify + conditional_notify))
-                if all_recipients:
-                    send_gmail(phase_email_subject, phase_email_body, all_recipients)
-            
-            # Update Status
-            status['last_date'] = dates['all_other_date']
-            status['last_check'] = datetime.now().isoformat()
-            save_status(status)
-            
-        else:
-            print("✅ Keine Änderung.")
-            status['last_check'] = datetime.now().isoformat()
-            save_status(status)
-    
-    # PHASE 2: Tracking Pre-CAS
-    elif status["phase"] == "tracking_precas":
-        print(f"\n--- PHASE 2: Pre-CAS Tracking ---")
-        print(f"Phase 2 gestartet am: {status['phase_2_start_date']}")
-        print(f"Pre-CAS Zieldatum: {status['phase_2_target_date']}")
-        print(f"Letztes Pre-CAS: {status.get('last_precas_date', 'Unbekannt')}")
-        print(f"Aktuelles Pre-CAS: {dates['precas_date']}")
-        
-        if dates['precas_date'] and dates['precas_date'] != status.get('last_precas_date'):
-            print("\n🔔 PRE-CAS ÄNDERUNG!")
-            
-            # Speichere Änderung
-            history["precas_changes"].append({
-                "timestamp": datetime.now().isoformat(),
-                "date": dates['precas_date'],
-                "from": status.get('last_precas_date', 'Unbekannt')
-            })
-            save_history(history)
-            
-            # Berechne Prognose
-            precas_forecast = calculate_target_forecast(history, status['phase_2_target_date'], "precas_changes")
-            forecast_text = create_target_forecast_text(precas_forecast, 2)
-            
-            # Benachrichtigungen an Hauptempfänger
-            subject = f"LSE Pre-CAS Update: {dates['precas_date']}"
-            body = f"""Pre-CAS Fortschritt!
-
-ÄNDERUNG:
-Von: {status.get('last_precas_date', 'Unbekannt')}
-Auf: {dates['precas_date']}
-
-Zieldatum: {status['phase_2_target_date']} (dann bist du Pre-CAS berechtigt)
-{forecast_text}
-
-Link: {URL}"""
-            
+            # Immer benachrichtigen (mit Prognose)
             if always_notify:
-                send_gmail(subject, body, always_notify)
+                if send_gmail(subject, body_with_forecast, always_notify):
+                    emails_sent = True
             
-            # Telegram
-            telegram_msg = f"""<b>📋 Pre-CAS Update</b>
-
-<b>Fortschritt!</b>
-Von: {status.get('last_precas_date', 'Unbekannt')}
-Auf: <b>{dates['precas_date']}</b>
-
-Ziel: <b>{status['phase_2_target_date']}</b>
-{forecast_text}
-
-<a href="{URL}">📄 LSE Webseite</a>"""
-            
+            # Telegram-Nachricht senden
             send_telegram(telegram_msg)
             
-            # Prüfe ob wir das Zieldatum fast erreicht haben
-            target_date_obj = date_str_to_datetime(status['phase_2_target_date'])
-            current_precas_obj = date_str_to_datetime(dates['precas_date'])
-            
-            if target_date_obj and current_precas_obj:
-                days_diff = (target_date_obj - current_precas_obj).days
+            # Bedingt benachrichtigen (nur bei 25 oder 28 July)
+            if conditional_notify and current_date in ["25 July", "28 July"]:
+                print(f"\n🎯 Zieldatum {current_date} erreicht! Benachrichtige zusätzliche Empfänger.")
+                if send_gmail(subject, body_simple, conditional_notify):
+                    emails_sent = True
                 
-                if days_diff == 1:
-                    # Morgen wird das Zieldatum erreicht, starte Phase 3 heute
-                    print("\n🎯 PRE-CAS FAST AM ZIEL! Phase 3 startet HEUTE!")
-                    status["phase"] = "tracking_cas"
-                    status["phase_3_start_date"] = datetime.now().strftime("%d %B")
-                    status["phase_3_target_date"] = status["phase_3_start_date"]  # CAS muss heute's Datum erreichen
-                    status["last_cas_date"] = dates['cas_date']
-                    
-                    phase_msg = f"""<b>🎊 PHASE 3 BEGINNT!</b>
+                # Spezielle Telegram-Nachricht für Zieldatum
+                telegram_special = f"""<b>🎯 ZIELDATUM ERREICHT!</b>
 
-Pre-CAS wird morgen dein Zieldatum ({status['phase_2_target_date']}) erreichen!
+Das Datum <b>{current_date}</b> wurde erreicht!
 
-Das bedeutet: <b>Dein Pre-CAS wird morgen ausgestellt!</b>
+Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
 
-Ab jetzt trackt der Monitor das <b>CAS</b> Datum.
-
-Ziel: CAS muss <b>{status['phase_3_target_date']}</b> erreichen.
-Aktueller CAS Stand: <b>{dates['cas_date']}</b>"""
-                    
-                    send_telegram(phase_msg)
-                    
-                    # Benachrichtige alle über Phasenwechsel
-                    phase_email_subject = "LSE Monitor: Phase 3 (CAS Tracking) beginnt - Pre-CAS kommt morgen!"
-                    phase_email_body = f"""Großartige Neuigkeiten!
-
-Dein Pre-CAS wird morgen ausgestellt!
-
-Der Monitor wechselt zu Phase 3 (CAS Tracking).
-CAS Zieldatum: {status['phase_3_target_date']}
-Aktueller Stand: {dates['cas_date']}
-
-Link: {URL}"""
-                    
-                    all_recipients = list(set(always_notify + conditional_notify))
-                    if all_recipients:
-                        send_gmail(phase_email_subject, phase_email_body, all_recipients)
+<a href="{URL}">📄 Jetzt zur LSE Webseite</a>"""
+                send_telegram(telegram_special)
             
-            # Update Status
-            status['last_precas_date'] = dates['precas_date']
-            status['last_check'] = datetime.now().isoformat()
-            save_status(status)
-            
-        else:
-            print("✅ Keine Pre-CAS Änderung.")
-            status['last_check'] = datetime.now().isoformat()
-            save_status(status)
-    
-    # PHASE 3: Tracking CAS
-    elif status["phase"] == "tracking_cas":
-        print(f"\n--- PHASE 3: CAS Tracking ---")
-        print(f"Phase 3 gestartet am: {status['phase_3_start_date']}")
-        print(f"CAS Zieldatum: {status['phase_3_target_date']}")
-        print(f"Letztes CAS: {status.get('last_cas_date', 'Unbekannt')}")
-        print(f"Aktuelles CAS: {dates['cas_date']}")
-        
-        if dates['cas_date'] and dates['cas_date'] != status.get('last_cas_date'):
-            print("\n🔔 CAS ÄNDERUNG!")
-            
-            # Speichere Änderung
-            history["cas_changes"].append({
-                "timestamp": datetime.now().isoformat(),
-                "date": dates['cas_date'],
-                "from": status.get('last_cas_date', 'Unbekannt')
-            })
-            save_history(history)
-            
-            # Berechne Prognose
-            cas_forecast = calculate_target_forecast(history, status['phase_3_target_date'], "cas_changes")
-            forecast_text = create_target_forecast_text(cas_forecast, 3)
-            
-            # Prüfe ob CAS das Zieldatum erreicht hat
-            if dates['cas_date'] == status['phase_3_target_date']:
-                print("\n🎉🎉🎉 DEIN CAS IST DA! 🎉🎉🎉")
-                
-                celebration_msg = f"""<b>🎉🎉🎉 DEIN CAS IST DA! 🎉🎉🎉</b>
-
-CAS hat dein Zieldatum erreicht: <b>{status['phase_3_target_date']}</b>
-
-<b>HERZLICHEN GLÜCKWUNSCH!</b>
-
-Du kannst jetzt dein Visum beantragen!
-
-Der gesamte Prozess ist abgeschlossen:
-✅ Dokumente bearbeitet (29 July)
-✅ Pre-CAS erhalten
-✅ CAS erhalten
-
-<a href="{URL}">📄 LSE Webseite</a>"""
-                
-                send_telegram(celebration_msg)
-                
-                # Sende an ALLE
-                celebration_subject = "🎉 LSE CAS IST DA! 🎉"
-                celebration_body = f"""FANTASTISCHE NEUIGKEITEN!
-
-Dein CAS wurde ausgestellt!
-
-Der komplette Prozess ist abgeschlossen:
-✅ Dokumente bearbeitet
-✅ Pre-CAS erhalten  
-✅ CAS erhalten
-
-Du kannst jetzt dein Visum beantragen!
-
-HERZLICHEN GLÜCKWUNSCH! 🎊
-
-Link: {URL}"""
-                
-                all_recipients = list(set(always_notify + conditional_notify))
-                if all_recipients:
-                    send_gmail(celebration_subject, celebration_body, all_recipients)
+            if emails_sent or os.environ.get('TELEGRAM_BOT_TOKEN'):
+                # Update Status nur bei erfolgreicher Benachrichtigung
+                status['last_date'] = current_date
+                status['last_check'] = datetime.now().isoformat()
+                save_status(status)
+                print("✅ Status wurde aktualisiert.")
             else:
-                # Normale Update-Benachrichtigung
-                subject = f"LSE CAS Update: {dates['cas_date']}"
-                body = f"""CAS Fortschritt!
-
-ÄNDERUNG:
-Von: {status.get('last_cas_date', 'Unbekannt')}
-Auf: {dates['cas_date']}
-
-Zieldatum: {status['phase_3_target_date']} (dann erhältst du dein CAS)
-{forecast_text}
-
-Link: {URL}"""
-                
-                if always_notify:
-                    send_gmail(subject, body, always_notify)
-                
-                telegram_msg = f"""<b>🎫 CAS Update</b>
-
-<b>Fortschritt!</b>
-Von: {status.get('last_cas_date', 'Unbekannt')}
-Auf: <b>{dates['cas_date']}</b>
-
-Ziel: <b>{status['phase_3_target_date']}</b>
-{forecast_text}
-
-<a href="{URL}">📄 LSE Webseite</a>"""
-                
-                send_telegram(telegram_msg)
-            
-            # Update Status
-            status['last_cas_date'] = dates['cas_date']
-            status['last_check'] = datetime.now().isoformat()
-            save_status(status)
-            
+                print("⚠️  Status wurde NICHT aktualisiert (keine Benachrichtigung erfolgreich)")
         else:
-            print("✅ Keine CAS Änderung.")
+            print("✅ Keine Änderung - alles beim Alten.")
             status['last_check'] = datetime.now().isoformat()
             save_status(status)
+    else:
+        print("\n⚠️  WARNUNG: Konnte das Datum nicht von der Webseite extrahieren!")
+        
+        # Sende Warnung per E-Mail
+        subject = "LSE Monitor WARNUNG: Datum nicht gefunden"
+        body = f"""WARNUNG: Der LSE Monitor konnte das Datum nicht von der Webseite extrahieren!
+
+Zeitpunkt: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
+Letztes bekanntes Datum: {status['last_date']}
+
+Bitte überprüfe:
+1. Ist die Webseite erreichbar? {URL}
+2. Hat sich die Struktur der Seite geändert?
+
+Der Monitor wird weiterhin prüfen."""
+        
+        if always_notify:
+            send_gmail(subject, body, always_notify)
+        
+        # Telegram-Warnung
+        telegram_warning = f"""<b>⚠️ LSE Monitor WARNUNG</b>
+
+Konnte das Datum nicht von der Webseite extrahieren!
+
+Letztes bekanntes Datum: <b>{status['last_date']}</b>
+Zeit: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
+
+Mögliche Gründe:
+• Webseite nicht erreichbar
+• Struktur hat sich geändert
+• Netzwerkfehler
+
+<a href="{URL}">📄 Webseite manuell prüfen</a>"""
+        
+        send_telegram(telegram_warning)
     
     print("\n" + "="*50)
 
