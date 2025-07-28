@@ -215,55 +215,132 @@ def extract_date_from_cell(text):
     return match.group(1).strip() if match else None
 
 def fetch_all_dates(soup):
-    """Extrahiert alle relevanten Daten aus der Webseite"""
+    """Extrahiert alle relevanten Daten aus der Webseite - VERBESSERTE VERSION"""
     dates = {
         "all_other_date": None,
         "precas_date": None,
         "cas_date": None
     }
     
-    # Suche all other graduate applicants
-    for element in soup.find_all(string=re.compile(r'all other graduate applicants', re.IGNORECASE)):
-        parent = element.parent
-        while parent and parent.name not in ['td', 'th', 'tr']:
-            parent = parent.parent
-        
-        if parent and parent.name == 'tr':
-            cells = parent.find_all(['td', 'th'])
-            for cell in cells:
-                date = extract_all_other_date(cell.get_text())
-                if date:
-                    dates["all_other_date"] = date
+    # Hole den gesamten Text und bereinige ihn
+    page_text = soup.get_text()
+    # Entferne mehrfache Leerzeichen und Zeilenumbrüche
+    page_text = ' '.join(page_text.split())
+    
+    # Debug-Ausgabe
+    print("\nDEBUG: Suche nach Datumsmustern...")
+    
+    # Pattern 1: Suche nach "all other graduate applicants"
+    # Das Pattern berücksichtigt jetzt auch mögliche Sternchen und Leerzeichen
+    all_other_pattern = r'all\s+other\s+graduate\s+applicants\s+on\*?\s*\*?\s*(?:\([^)]*\))?\s*\*?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+    match = re.search(all_other_pattern, page_text, re.IGNORECASE)
+    if match:
+        dates["all_other_date"] = match.group(1).strip()
+        print(f"DEBUG: Gefunden all_other_date = {dates['all_other_date']}")
+    else:
+        # Alternativer Pattern für den Fall, dass das Datum in einer separaten Zelle steht
+        # Suche zuerst nach dem Text und dann nach dem nächsten Datum
+        if 'all other graduate applicants' in page_text.lower():
+            # Finde die Position des Textes
+            pos = page_text.lower().find('all other graduate applicants')
+            # Suche nach dem nächsten Datum nach dieser Position
+            remaining_text = page_text[pos:]
+            date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+            date_matches = re.finditer(date_pattern, remaining_text, re.IGNORECASE)
+            
+            # Nimm das erste Datum nach "all other graduate applicants"
+            for i, match in enumerate(date_matches):
+                if i == 0:  # Erstes Datum nach dem Text
+                    dates["all_other_date"] = match.group(1).strip()
+                    print(f"DEBUG: Gefunden all_other_date (Alternative) = {dates['all_other_date']}")
                     break
     
-    # Suche Pre-CAS
-    for element in soup.find_all(string=re.compile(r'issuing\s+\*\*Pre-CAS\*\*', re.IGNORECASE)):
-        parent = element.parent
-        while parent and parent.name not in ['td', 'th', 'tr']:
-            parent = parent.parent
-        
-        if parent and parent.name == 'tr':
-            cells = parent.find_all(['td', 'th'])
-            if len(cells) >= 2:
-                date = extract_date_from_cell(cells[1].get_text())
-                if date:
-                    dates["precas_date"] = date
+    # Pattern 2: Suche nach Pre-CAS
+    precas_pattern = r'issuing\s+\*?\*?Pre-CAS\*?\*?\s+[^:]*:\s*(?:[^:]*:)?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+    match = re.search(precas_pattern, page_text, re.IGNORECASE)
+    if match:
+        dates["precas_date"] = match.group(1).strip()
+        print(f"DEBUG: Gefunden precas_date = {dates['precas_date']}")
+    else:
+        # Alternative: Suche nach "issuing Pre-CAS" und dann dem nächsten Datum
+        if 'issuing' in page_text.lower() and 'pre-cas' in page_text.lower():
+            # Finde die Position von "Pre-CAS"
+            pos = page_text.lower().find('pre-cas')
+            if pos != -1:
+                remaining_text = page_text[pos:]
+                date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+                match = re.search(date_pattern, remaining_text, re.IGNORECASE)
+                if match:
+                    dates["precas_date"] = match.group(1).strip()
+                    print(f"DEBUG: Gefunden precas_date (Alternative) = {dates['precas_date']}")
     
-    # Suche CAS
-    for element in soup.find_all(string=re.compile(r'issuing\s+\*\*CAS\*\*', re.IGNORECASE)):
-        parent = element.parent
-        while parent and parent.name not in ['td', 'th', 'tr']:
-            parent = parent.parent
-        
-        if parent and parent.name == 'tr':
-            cells = parent.find_all(['td', 'th'])
-            if len(cells) >= 2:
-                date = extract_date_from_cell(cells[1].get_text())
-                if date:
-                    dates["cas_date"] = date
+    # Pattern 3: Suche nach CAS (aber nicht Pre-CAS)
+    cas_pattern = r'issuing\s+\*?\*?CAS\*?\*?\s+to\s+[^:]*:\s*(?:[^:]*:)?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+    match = re.search(cas_pattern, page_text, re.IGNORECASE)
+    if match:
+        dates["cas_date"] = match.group(1).strip()
+        print(f"DEBUG: Gefunden cas_date = {dates['cas_date']}")
+    else:
+        # Alternative: Suche nach "issuing CAS to" und dann dem nächsten Datum
+        cas_text_pattern = r'issuing\s+\*?\*?CAS\*?\*?\s+to\s+offer\s+holders'
+        match = re.search(cas_text_pattern, page_text, re.IGNORECASE)
+        if match:
+            # Position nach dem gefundenen Text
+            pos = match.end()
+            remaining_text = page_text[pos:]
+            date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+            date_match = re.search(date_pattern, remaining_text, re.IGNORECASE)
+            if date_match:
+                dates["cas_date"] = date_match.group(1).strip()
+                print(f"DEBUG: Gefunden cas_date (Alternative) = {dates['cas_date']}")
     
+    # Zusätzliche Strategie: Suche in Tabellen
+    tables = soup.find_all('table')
+    if tables and not all(dates.values()):
+        print(f"\nDEBUG: Durchsuche {len(tables)} Tabellen...")
+        
+        for table in tables:
+            # Hole alle Zeilen
+            rows = table.find_all('tr')
+            
+            for i in range(len(rows)):
+                row_text = rows[i].get_text(separator=' ', strip=True)
+                
+                # Prüfe ob diese Zeile einen der gesuchten Texte enthält
+                if 'all other graduate applicants' in row_text.lower() and not dates["all_other_date"]:
+                    # Schaue in der gleichen Zeile und den nächsten Zeilen nach einem Datum
+                    for j in range(i, min(i+3, len(rows))):
+                        check_text = rows[j].get_text(separator=' ', strip=True)
+                        date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+                        match = re.search(date_pattern, check_text, re.IGNORECASE)
+                        if match:
+                            dates["all_other_date"] = match.group(1).strip()
+                            print(f"DEBUG: Gefunden in Tabelle all_other_date = {dates['all_other_date']}")
+                            break
+                
+                if 'issuing' in row_text.lower() and 'pre-cas' in row_text.lower() and not dates["precas_date"]:
+                    for j in range(i, min(i+3, len(rows))):
+                        check_text = rows[j].get_text(separator=' ', strip=True)
+                        date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+                        match = re.search(date_pattern, check_text, re.IGNORECASE)
+                        if match:
+                            dates["precas_date"] = match.group(1).strip()
+                            print(f"DEBUG: Gefunden in Tabelle precas_date = {dates['precas_date']}")
+                            break
+                
+                if 'issuing' in row_text.lower() and 'cas' in row_text.lower() and 'pre-cas' not in row_text.lower() and not dates["cas_date"]:
+                    for j in range(i, min(i+3, len(rows))):
+                        check_text = rows[j].get_text(separator=' ', strip=True)
+                        date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+                        match = re.search(date_pattern, check_text, re.IGNORECASE)
+                        if match:
+                            dates["cas_date"] = match.group(1).strip()
+                            print(f"DEBUG: Gefunden in Tabelle cas_date = {dates['cas_date']}")
+                            break
+    
+    print(f"\nDEBUG: Finale Ergebnisse: {dates}")
     return dates
-
+    
 def create_forecast_text(forecast):
     """Erstellt einen Prognosetext für Phase 1"""
     if not forecast:
