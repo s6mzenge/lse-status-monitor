@@ -21,6 +21,24 @@ def save_status(status):
     with open(STATUS_FILE, 'w') as f:
         json.dump(status, f, indent=2)
 
+def extract_all_other_date(text):
+    """Extrahiert nur das Datum für 'all other graduate applicants'"""
+    # Entferne überflüssige Whitespaces und Zeilenumbrüche
+    text = ' '.join(text.split())
+    
+    # Suche nach allen Datumsangaben in der Form "DD Month"
+    date_pattern = r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))\b'
+    all_dates = re.findall(date_pattern, text, re.IGNORECASE)
+    
+    # Wenn wir genau 3 Daten haben, nehmen wir das letzte (für "all other graduate applicants")
+    if len(all_dates) >= 3:
+        return all_dates[-1].strip()
+    elif len(all_dates) > 0:
+        # Falls weniger als 3 Daten, nehme das letzte verfügbare
+        return all_dates[-1].strip()
+    
+    return None
+
 def fetch_processing_date():
     try:
         response = requests.get(URL, headers={
@@ -29,32 +47,51 @@ def fetch_processing_date():
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
-        text_content = soup.get_text()
         
-        # Suche nach "all other graduate applicants on" und dem folgenden Datum
-        pattern = r'all other graduate applicants on[:\s]*([0-9]{1,2}\s+\w+)'
-        match = re.search(pattern, text_content, re.IGNORECASE)
+        # Suche nach der relevanten Tabellenzelle
+        # Methode 1: Suche nach dem Text "all other graduate applicants"
+        for element in soup.find_all(text=re.compile(r'all other graduate applicants', re.IGNORECASE)):
+            # Finde das übergeordnete TD/TH Element
+            parent = element.parent
+            while parent and parent.name not in ['td', 'th', 'tr']:
+                parent = parent.parent
+            
+            if parent:
+                # Suche in der gleichen Zeile nach der Datumszelle
+                if parent.name == 'tr':
+                    cells = parent.find_all(['td', 'th'])
+                    for cell in cells:
+                        cell_text = cell.get_text()
+                        date = extract_all_other_date(cell_text)
+                        if date:
+                            print(f"Gefundene Daten in Zelle: {cell_text.strip()}")
+                            print(f"Extrahiertes Datum für 'all other graduate applicants': {date}")
+                            return date
+                else:
+                    # Schaue in Geschwister-Elementen
+                    row = parent.find_parent('tr')
+                    if row:
+                        cells = row.find_all(['td', 'th'])
+                        for cell in cells:
+                            cell_text = cell.get_text()
+                            date = extract_all_other_date(cell_text)
+                            if date:
+                                print(f"Gefundene Daten in Zelle: {cell_text.strip()}")
+                                print(f"Extrahiertes Datum für 'all other graduate applicants': {date}")
+                                return date
+        
+        # Methode 2: Falls Methode 1 fehlschlägt, suche im gesamten Text
+        full_text = soup.get_text()
+        # Suche nach dem Muster "all other graduate applicants" gefolgt von Daten
+        pattern = r'all other graduate applicants[^0-9]*?((?:\d{1,2}\s+\w+\s*)+)'
+        match = re.search(pattern, full_text, re.IGNORECASE | re.DOTALL)
         
         if match:
-            date_found = match.group(1).strip()
-            print(f"Datum gefunden durch Regex: {date_found}")
-            return date_found
-            
-        # Alternative Suche in Tabellen
-        print("Regex nicht erfolgreich, suche in Tabellen...")
-        tables = soup.find_all('table')
-        for table in tables:
-            rows = table.find_all('tr')
-            for row in rows:
-                cells = row.find_all(['td', 'th'])
-                for i, cell in enumerate(cells):
-                    if 'all other graduate applicants' in cell.get_text().lower():
-                        # Schaue in die nächste Zelle
-                        if i + 1 < len(cells):
-                            potential_date = cells[i + 1].get_text().strip()
-                            if re.match(r'\d{1,2}\s+\w+', potential_date):
-                                print(f"Datum in Tabelle gefunden: {potential_date}")
-                                return potential_date
+            dates_text = match.group(1)
+            date = extract_all_other_date(dates_text)
+            if date:
+                print(f"Datum durch Textsuche gefunden: {date}")
+                return date
         
         print("WARNUNG: Konnte das Datum nicht finden!")
         return None
@@ -113,7 +150,7 @@ def main():
     current_date = fetch_processing_date()
     
     if current_date:
-        print(f"Aktuelles Datum auf der Webseite: {current_date}")
+        print(f"Aktuelles Datum für 'all other graduate applicants': {current_date}")
         
         if current_date != status['last_date']:
             print("\n🔔 ÄNDERUNG ERKANNT!")
@@ -130,7 +167,7 @@ Zeitpunkt der Erkennung: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
 Link zur Seite: {URL}
 
 Diese E-Mail wurde automatisch von deinem GitHub Actions Monitor generiert.
-Der Monitor überprüft die Seite alle 5 Minuten."""
+Der Monitor überprüft die Seite alle 5 Minuten und erfasst nur das Datum für "all other graduate applicants"."""
             
             # Sende E-Mail
             if send_gmail(subject, body):
