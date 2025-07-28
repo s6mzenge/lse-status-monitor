@@ -2,9 +2,14 @@ name: LSE Status Monitor
 
 on:
   schedule:
-    # Läuft alle 10 Minuten - zuverlässiger als 5 Minuten
-    # GitHub führt sehr häufige Schedules oft verzögert aus
-    - cron: '*/10 * * * *'
+    # Mehrere explizite Zeitpunkte statt */10 - das ist zuverlässiger!
+    # Läuft stündlich zu diesen Minuten: 00, 10, 20, 30, 40, 50
+    - cron: '0 * * * *'   # Jede Stunde um :00
+    - cron: '10 * * * *'  # Jede Stunde um :10
+    - cron: '20 * * * *'  # Jede Stunde um :20
+    - cron: '30 * * * *'  # Jede Stunde um :30
+    - cron: '40 * * * *'  # Jede Stunde um :40
+    - cron: '50 * * * *'  # Jede Stunde um :50
   workflow_dispatch: # Ermöglicht manuelles Testen
 
 jobs:
