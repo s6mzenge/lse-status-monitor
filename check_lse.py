@@ -13,6 +13,33 @@ URL = "https://www.lse.ac.uk/study-at-lse/Graduate/News/Current-processing-times
 STATUS_FILE = "status.json"
 HISTORY_FILE = "history.json"
 
+def send_telegram(message):
+    """Sendet eine Nachricht über Telegram Bot"""
+    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+    
+    if not bot_token or not chat_id:
+        print("Telegram nicht konfiguriert")
+        return False
+    
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        data = {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        response = requests.post(url, json=data)
+        if response.status_code == 200:
+            print("✅ Telegram-Nachricht gesendet!")
+            return True
+        else:
+            print(f"❌ Telegram-Fehler: {response.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Telegram-Fehler: {e}")
+        return False
+
 def load_status():
     try:
         with open(STATUS_FILE, 'r') as f:
@@ -315,6 +342,18 @@ Link zur Seite: {URL}"""
             # E-Mail ohne Prognose für bedingte Empfänger
             body_simple = base_body + "\n\nDiese E-Mail wurde automatisch von deinem GitHub Actions Monitor generiert."
             
+            # Telegram-Nachricht formatieren
+            telegram_msg = f"""<b>🔔 LSE Status Update</b>
+
+<b>ÄNDERUNG ERKANNT!</b>
+Von: {status['last_date']}
+Auf: <b>{current_date}</b>
+
+Zeit: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
+{forecast_text}
+
+<a href="{URL}">📄 LSE Webseite öffnen</a>"""
+            
             # Sende E-Mails
             emails_sent = False
             
@@ -323,20 +362,33 @@ Link zur Seite: {URL}"""
                 if send_gmail(subject, body_with_forecast, always_notify):
                     emails_sent = True
             
+            # Telegram-Nachricht senden
+            send_telegram(telegram_msg)
+            
             # Bedingt benachrichtigen (nur bei 25 oder 28 July)
             if conditional_notify and current_date in ["25 July", "28 July"]:
                 print(f"\n🎯 Zieldatum {current_date} erreicht! Benachrichtige zusätzliche Empfänger.")
                 if send_gmail(subject, body_simple, conditional_notify):
                     emails_sent = True
+                
+                # Spezielle Telegram-Nachricht für Zieldatum
+                telegram_special = f"""<b>🎯 ZIELDATUM ERREICHT!</b>
+
+Das Datum <b>{current_date}</b> wurde erreicht!
+
+Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
+
+<a href="{URL}">📄 Jetzt zur LSE Webseite</a>"""
+                send_telegram(telegram_special)
             
-            if emails_sent:
-                # Update Status nur bei erfolgreicher E-Mail
+            if emails_sent or os.environ.get('TELEGRAM_BOT_TOKEN'):
+                # Update Status nur bei erfolgreicher Benachrichtigung
                 status['last_date'] = current_date
                 status['last_check'] = datetime.now().isoformat()
                 save_status(status)
                 print("✅ Status wurde aktualisiert.")
             else:
-                print("⚠️  Status wurde NICHT aktualisiert (E-Mail fehlgeschlagen)")
+                print("⚠️  Status wurde NICHT aktualisiert (keine Benachrichtigung erfolgreich)")
         else:
             print("✅ Keine Änderung - alles beim Alten.")
             status['last_check'] = datetime.now().isoformat()
@@ -344,7 +396,7 @@ Link zur Seite: {URL}"""
     else:
         print("\n⚠️  WARNUNG: Konnte das Datum nicht von der Webseite extrahieren!")
         
-        # Sende Warnung nur an Hauptempfänger
+        # Sende Warnung per E-Mail
         subject = "LSE Monitor WARNUNG: Datum nicht gefunden"
         body = f"""WARNUNG: Der LSE Monitor konnte das Datum nicht von der Webseite extrahieren!
 
@@ -359,6 +411,23 @@ Der Monitor wird weiterhin prüfen."""
         
         if always_notify:
             send_gmail(subject, body, always_notify)
+        
+        # Telegram-Warnung
+        telegram_warning = f"""<b>⚠️ LSE Monitor WARNUNG</b>
+
+Konnte das Datum nicht von der Webseite extrahieren!
+
+Letztes bekanntes Datum: <b>{status['last_date']}</b>
+Zeit: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
+
+Mögliche Gründe:
+• Webseite nicht erreichbar
+• Struktur hat sich geändert
+• Netzwerkfehler
+
+<a href="{URL}">📄 Webseite manuell prüfen</a>"""
+        
+        send_telegram(telegram_warning)
     
     print("\n" + "="*50)
 
