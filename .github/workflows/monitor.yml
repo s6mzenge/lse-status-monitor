@@ -1,15 +1,7 @@
 name: LSE Status Monitor
 
 on:
-  schedule:
-    # Mehrere explizite Zeitpunkte für bessere Zuverlässigkeit
-    - cron: '0 * * * *'   # Jede Stunde um :00
-    - cron: '10 * * * *'  # Jede Stunde um :10
-    - cron: '20 * * * *'  # Jede Stunde um :20
-    - cron: '30 * * * *'  # Jede Stunde um :30
-    - cron: '40 * * * *'  # Jede Stunde um :40
-    - cron: '50 * * * *'  # Jede Stunde um :50
-  workflow_dispatch: # Ermöglicht manuelles Testen und Cron-Job.org
+  workflow_dispatch: # Ermöglicht manuelles Testen und Cron-Job.org Trigger
   repository_dispatch: # Für API-Trigger
     types: [check-lse-status]
 
@@ -36,6 +28,8 @@ jobs:
         EMAIL_TO: ${{ secrets.EMAIL_TO }}
         EMAIL_TO_2: ${{ secrets.EMAIL_TO_2 }}
         EMAIL_TO_3: ${{ secrets.EMAIL_TO_3 }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
         python check_lse.py
     
@@ -45,4 +39,5 @@ jobs:
         git config --local user.name "GitHub Action"
         git add status.json history.json 2>/dev/null || true
         git commit -m "Update status and history [skip ci]" || true
+        git pull --rebase origin main || true
         git push || true
