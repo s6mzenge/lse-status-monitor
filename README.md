@@ -49,14 +49,22 @@ graph TD
 | `GMAIL_APP_PASSWORD` | Gmail App-spezifisches Passwort |
 | `EMAIL_TO` | Hauptempfänger E-Mail |
 | `EMAIL_TO_2` | Zweiter Empfänger (optional) |
-| `EMAIL_TO_3` | Dritter Empfänger (optional) |
+| `EMAIL_TO_3` | Dritter Empfänger - nur bei 25/28 July (optional) |
+| `EMAIL_TO_4` | Vierter Empfänger - nur bei 25/28 July (optional) |
+| `EMAIL_TO_5` | Fünfter Empfänger - nur bei 25/28 July (optional) |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot Token (optional) |
 | `TELEGRAM_CHAT_ID` | Telegram Chat ID (optional) |
 
 ### Benachrichtigungslogik
 
-1. **Immer benachrichtigen**: Empfänger ohne "engelquast" im E-Mail-Namen
-2. **Bedingt benachrichtigen**: Empfänger mit "engelquast" im E-Mail-Namen (nur bei Erreichen von 25 July oder 28 July)
+1. **Immer benachrichtigen**: 
+   - `EMAIL_TO` und `EMAIL_TO_2` (außer wenn sie "engelquast" im E-Mail-Namen enthalten)
+   - Diese Empfänger erhalten bei jeder Änderung eine E-Mail mit Prognose
+
+2. **Bedingt benachrichtigen** (nur bei Erreichen von 25 July oder 28 July):
+   - `EMAIL_TO_3`, `EMAIL_TO_4`, `EMAIL_TO_5`
+   - Alle E-Mail-Adressen mit "engelquast" im Namen
+   - Diese Empfänger erhalten eine vereinfachte E-Mail ohne Prognose
 
 ## 📊 Funktionen im Detail
 
@@ -102,7 +110,16 @@ graph TD
 
 2. **GitHub Secrets konfigurieren**
    - Gehe zu Settings → Secrets and variables → Actions
-   - Füge alle erforderlichen Secrets hinzu
+   - Füge alle erforderlichen Secrets hinzu:
+     - `GMAIL_USER`: Deine Gmail-Adresse
+     - `GMAIL_APP_PASSWORD`: App-spezifisches Passwort
+     - `EMAIL_TO`: Hauptempfänger
+     - `EMAIL_TO_2`: Zweiter Empfänger (optional)
+     - `EMAIL_TO_3`: ulrike.engelquast@web.de (optional)
+     - `EMAIL_TO_4`: carsten.engel@dlh.de (optional)
+     - `EMAIL_TO_5`: carsten_engel@t-online.de (optional)
+     - `TELEGRAM_BOT_TOKEN`: Bot Token (optional)
+     - `TELEGRAM_CHAT_ID`: Chat ID (optional)
 
 3. **Cron-Job aktivieren**
    - Verwende einen externen Cron-Job Service (z.B. cron-job.org)
