@@ -100,46 +100,77 @@ def fetch_processing_date():
         print(f"Fehler beim Abrufen der Webseite: {e}")
         return None
 
+def get_email_recipients():
+    """Sammelt alle E-Mail-Empfänger aus den Environment-Variablen"""
+    recipients = []
+    
+    # Primäre E-Mail
+    email_to = os.environ.get('EMAIL_TO')
+    if email_to:
+        recipients.append(email_to)
+    
+    # Zusätzliche E-Mails
+    email_to_2 = os.environ.get('EMAIL_TO_2')
+    if email_to_2:
+        recipients.append(email_to_2)
+    
+    email_to_3 = os.environ.get('EMAIL_TO_3')
+    if email_to_3:
+        recipients.append(email_to_3)
+    
+    return recipients
+
 def send_gmail(subject, body):
-    """Sendet E-Mail über Gmail"""
+    """Sendet E-Mail über Gmail an mehrere Empfänger"""
     gmail_user = os.environ.get('GMAIL_USER')
     gmail_password = os.environ.get('GMAIL_APP_PASSWORD')
-    to_email = os.environ.get('EMAIL_TO')
+    recipients = get_email_recipients()
     
-    if not all([gmail_user, gmail_password, to_email]):
+    if not gmail_user or not gmail_password:
         print("E-Mail-Konfiguration unvollständig!")
         print(f"GMAIL_USER vorhanden: {'Ja' if gmail_user else 'Nein'}")
         print(f"GMAIL_APP_PASSWORD vorhanden: {'Ja' if gmail_password else 'Nein'}")
-        print(f"EMAIL_TO vorhanden: {'Ja' if to_email else 'Nein'}")
         return False
     
-    msg = MIMEText(body)
-    msg['Subject'] = subject
-    msg['From'] = gmail_user
-    msg['To'] = to_email
+    if not recipients:
+        print("Keine E-Mail-Empfänger konfiguriert!")
+        return False
     
-    try:
-        print(f"Verbinde mit Gmail SMTP Server...")
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        print(f"Anmeldung als {gmail_user}...")
-        server.login(gmail_user, gmail_password)
-        print(f"Sende E-Mail an {to_email}...")
-        server.send_message(msg)
-        server.quit()
-        print("✅ E-Mail erfolgreich gesendet!")
-        return True
-    except smtplib.SMTPAuthenticationError:
-        print("❌ FEHLER: Gmail Login fehlgeschlagen. Überprüfe das App-Passwort!")
-        return False
-    except Exception as e:
-        print(f"❌ E-Mail-Fehler: {type(e).__name__}: {e}")
-        return False
+    print(f"Sende E-Mail an {len(recipients)} Empfänger: {', '.join(recipients)}")
+    
+    # Erstelle eine E-Mail für jeden Empfänger
+    success_count = 0
+    for recipient in recipients:
+        msg = MIMEText(body)
+        msg['Subject'] = subject
+        msg['From'] = gmail_user
+        msg['To'] = recipient
+        
+        try:
+            print(f"Verbinde mit Gmail SMTP Server für {recipient}...")
+            server = smtplib.SMTP('smtp.gmail.com', 587)
+            server.starttls()
+            server.login(gmail_user, gmail_password)
+            server.send_message(msg)
+            server.quit()
+            print(f"✅ E-Mail erfolgreich gesendet an {recipient}")
+            success_count += 1
+        except smtplib.SMTPAuthenticationError:
+            print(f"❌ FEHLER für {recipient}: Gmail Login fehlgeschlagen. Überprüfe das App-Passwort!")
+        except Exception as e:
+            print(f"❌ E-Mail-Fehler für {recipient}: {type(e).__name__}: {e}")
+    
+    # Rückgabe true wenn mindestens eine E-Mail erfolgreich war
+    return success_count > 0
 
 def main():
     print("="*50)
     print(f"LSE Status Check - {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
     print("="*50)
+    
+    # Zeige konfigurierte Empfänger
+    recipients = get_email_recipients()
+    print(f"Konfigurierte E-Mail-Empfänger: {', '.join(recipients) if recipients else 'KEINE'}")
     
     # Lade gespeicherten Status
     status = load_status()
@@ -167,7 +198,7 @@ Zeitpunkt der Erkennung: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
 Link zur Seite: {URL}
 
 Diese E-Mail wurde automatisch von deinem GitHub Actions Monitor generiert.
-Der Monitor überprüft die Seite alle 5 Minuten und erfasst nur das Datum für "all other graduate applicants"."""
+Der Monitor überprüft die Seite alle 10 Minuten und erfasst nur das Datum für "all other graduate applicants"."""
             
             # Sende E-Mail
             if send_gmail(subject, body):
@@ -200,7 +231,7 @@ Bitte überprüfe:
 1. Ist die Webseite erreichbar? {URL}
 2. Hat sich die Struktur der Seite geändert?
 
-Der Monitor wird weiterhin alle 5 Minuten prüfen."""
+Der Monitor wird weiterhin alle 10 Minuten prüfen."""
         
         send_gmail(subject, body)
     
