@@ -1,121 +1,152 @@
-# lse-status-monitor
+# LSE Status Monitor 🎓
 
-# LSE Status Monitor
+Automatischer Monitor für die LSE (London School of Economics) Graduate Application Processing Times. Dieses Tool überwacht die offizielle LSE-Webseite und benachrichtigt bei Änderungen des Verarbeitungsdatums für "all other graduate applicants".
 
-Ein automatisierter Monitor, der die Bearbeitungszeiten für Graduate-Bewerbungen an der London School of Economics (LSE) überwacht und bei Änderungen Benachrichtigungen versendet.
+## 🚀 Features
 
-## 🎯 Funktionsweise
+- **Automatische Überwachung**: Prüft alle 10 Minuten die LSE-Webseite via Cron-Job
+- **Multi-Channel Benachrichtigungen**: E-Mail (Gmail) und Telegram
+- **Intelligente Benachrichtigungslogik**: Unterschiedliche Empfängergruppen für verschiedene Ereignisse
+- **Verlaufstracking**: Speichert alle Änderungen in einer Historie
+- **Prognose-System**: Berechnet basierend auf bisherigen Änderungen eine Vorhersage für zukünftige Daten
+- **Fehlerbehandlung**: Benachrichtigt bei Problemen mit der Datenextraktion
 
-Der Monitor durchläuft drei Phasen:
+## 📋 Systemübersicht
 
-### Phase 1: Application Tracking
-- Überwacht das Verarbeitungsdatum für "all other graduate applicants"
-- Ziel: Warten bis das Datum "28 July" erreicht wird
-- Bei Erreichen von "28 July" → Automatischer Wechsel zu Phase 2
+### Dateien im Repository
 
-### Phase 2: Pre-CAS Tracking  
-- Startet automatisch wenn "28 July" erreicht wird
-- Überwacht das Pre-CAS Ausgabedatum
-- Ziel: Pre-CAS muss das Datum erreichen, an dem die Bewerbung fertig bearbeitet wurde
+| Datei | Beschreibung |
+|-------|--------------|
+| `check_lse.py` | Hauptskript - Web Scraping, Datenanalyse und Benachrichtigungen |
+| `monitor.yml` | GitHub Actions Workflow - Automatisierung und Scheduling |
+| `status.json` | Speichert das zuletzt erkannte Datum und Zeitstempel |
+| `history.json` | Verlauf aller erkannten Änderungen |
 
-### Phase 3: CAS Tracking
-- Startet automatisch kurz bevor Pre-CAS das Zieldatum erreicht
-- Überwacht das CAS Ausgabedatum
-- Ziel: CAS muss das aktuelle Datum erreichen (dann wird es ausgestellt)
+### Workflow
 
-## 📊 Features
-
-- **Automatische Phasenwechsel**: Der Monitor wechselt intelligent zwischen den Tracking-Phasen
-- **Prognosen**: Berechnet basierend auf historischen Daten, wann wichtige Meilensteine erreicht werden
-- **Multi-Channel Benachrichtigungen**: 
-  - Telegram-Nachrichten für alle Updates
-  - E-Mail-Benachrichtigungen mit konfigurierbaren Empfängern
-- **Intelligente Benachrichtigungslogik**: Unterscheidet zwischen Haupt- und bedingten Empfängern
-- **Fehlerbehandlung**: Warnt bei Problemen mit der Webseite
-
-## 📁 Dateistruktur
-
-### `check_lse.py`
-Hauptskript mit folgenden Funktionen:
-- Web-Scraping der LSE-Webseite
-- Datums-Extraktion und -Vergleich
-- Benachrichtigungsversand (Telegram & E-Mail)
-- Phasenverwaltung und automatische Übergänge
-- Lineare Regression für Prognosen
-- Historienführung aller Änderungen
-
-### `status.json`
-Speichert den aktuellen Zustand:
-```json
-{
-  "last_date": "10 July",
-  "last_check": null,
-  "phase": "tracking_applications",
-  "phase_2_start_date": null,
-  "phase_2_target_date": null,
-  "last_precas_date": null,
-  "phase_3_start_date": null,
-  "phase_3_target_date": null,
-  "last_cas_date": null
-}
+```mermaid
+graph TD
+    A[Cron-Job alle 10 Min] --> B[GitHub Action startet]
+    B --> C[check_lse.py ausführen]
+    C --> D{Webseite abrufen}
+    D -->|Erfolg| E[Datum extrahieren]
+    D -->|Fehler| F[Warnung senden]
+    E --> G{Änderung erkannt?}
+    G -->|Ja| H[Historie updaten]
+    G -->|Nein| I[Status updaten]
+    H --> J[Prognose berechnen]
+    J --> K[Benachrichtigungen senden]
+    K --> L[Git Commit & Push]
 ```
-
-### `history.json`
-Protokolliert alle Änderungen:
-```json
-{
-  "changes": [],        // Phase 1 Änderungen
-  "precas_changes": [], // Phase 2 Änderungen
-  "cas_changes": []     // Phase 3 Änderungen
-}
-```
-
-### `monitor.yml`
-GitHub Actions Workflow für automatische Ausführung:
-- Kann manuell oder per API getriggert werden
-- Installiert Abhängigkeiten
-- Führt Check aus
-- Committed Änderungen zurück ins Repository
 
 ## 🔧 Konfiguration
 
-### Erforderliche GitHub Secrets:
-- `GMAIL_USER`: Gmail-Adresse für E-Mail-Versand
-- `GMAIL_APP_PASSWORD`: App-spezifisches Passwort
-- `EMAIL_TO`: Haupt-E-Mail-Empfänger
-- `EMAIL_TO_2`: Zweiter E-Mail-Empfänger (optional)
-- `EMAIL_TO_3`: Dritter E-Mail-Empfänger (optional)
-- `TELEGRAM_BOT_TOKEN`: Token für Telegram Bot
-- `TELEGRAM_CHAT_ID`: Ziel-Chat für Telegram-Nachrichten
+### Erforderliche GitHub Secrets
 
-## 📈 Prognose-Feature
+| Secret | Beschreibung |
+|--------|--------------|
+| `GMAIL_USER` | Gmail E-Mail-Adresse für den Versand |
+| `GMAIL_APP_PASSWORD` | Gmail App-spezifisches Passwort |
+| `EMAIL_TO` | Hauptempfänger E-Mail |
+| `EMAIL_TO_2` | Zweiter Empfänger (optional) |
+| `EMAIL_TO_3` | Dritter Empfänger (optional) |
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot Token (optional) |
+| `TELEGRAM_CHAT_ID` | Telegram Chat ID (optional) |
 
-Der Monitor berechnet basierend auf vergangenen Änderungen:
-- Durchschnittliche Fortschrittsrate (Tage pro Tag)
-- Voraussichtliches Datum für Zielerreichung
-- Konfidenzwert (R²) für die Vorhersagegenauigkeit
+### Benachrichtigungslogik
 
-## 🚀 Verwendung
+1. **Immer benachrichtigen**: Empfänger ohne "engelquast" im E-Mail-Namen
+2. **Bedingt benachrichtigen**: Empfänger mit "engelquast" im E-Mail-Namen (nur bei Erreichen von 25 July oder 28 July)
 
-### Manueller Start:
-```bash
-python check_lse.py
+## 📊 Funktionen im Detail
+
+### Web Scraping
+- Sucht auf der LSE-Webseite nach "all other graduate applicants"
+- Extrahiert das zugehörige Datum aus der Tabelle
+- Fallback-Mechanismen für verschiedene HTML-Strukturen
+
+### Prognose-System
+- Nutzt lineare Regression basierend auf historischen Daten
+- Berechnet voraussichtliche Daten für das Erreichen von 25 July und 28 July
+- Zeigt R²-Wert für die Qualität der Vorhersage
+
+### Datenstruktur
+
+**status.json**
+```json
+{
+  "last_date": "10 July",
+  "last_check": "2025-07-28T18:40:29.045235"
+}
 ```
 
-### Automatisierung via GitHub Actions:
-- Workflow kann manuell über GitHub UI getriggert werden
-- Oder per API-Call an `/repos/{owner}/{repo}/dispatches`
+**history.json**
+```json
+{
+  "changes": [
+    {
+      "timestamp": "2025-07-28T18:40:29.045235",
+      "date": "11 July",
+      "from": "10 July"
+    }
+  ]
+}
+```
 
-### Automatisierung via Cron-Job:
-Der Workflow kann mit einem externen Cron-Service (z.B. cron-job.org) regelmäßig getriggert werden.
+## 🚀 Installation & Setup
 
-## 📋 Anforderungen
+1. **Repository forken/klonen**
+   ```bash
+   git clone https://github.com/[YOUR-USERNAME]/lse-status-monitor.git
+   ```
 
-- Python 3.10+
-- requests
-- beautifulsoup4
-- numpy
+2. **GitHub Secrets konfigurieren**
+   - Gehe zu Settings → Secrets and variables → Actions
+   - Füge alle erforderlichen Secrets hinzu
 
-## 🔗 Überwachte URL
+3. **Cron-Job aktivieren**
+   - Verwende einen externen Cron-Job Service (z.B. cron-job.org)
+   - Konfiguriere einen POST Request alle 10 Minuten an:
+     ```
+     https://api.github.com/repos/[YOUR-USERNAME]/[REPO-NAME]/dispatches
+     ```
+   - Header: `Authorization: token [YOUR-GITHUB-TOKEN]`
+   - Body: `{"event_type": "check-lse-status"}`
 
-https://www.lse.ac.uk/study-at-lse/Graduate/News/Current-processing-times
+## 📈 Monitoring & Logs
+
+- **GitHub Actions**: Siehe "Actions" Tab für Ausführungslogs
+- **Status-Dateien**: Werden automatisch im Repository aktualisiert
+- **Benachrichtigungen**: Erfolg/Fehler werden in den Action Logs protokolliert
+
+## 🛠️ Wartung
+
+### Bei Webseiten-Änderungen
+Falls die LSE ihre Webseite umstrukturiert:
+1. Prüfe die `extract_all_other_date()` Funktion in `check_lse.py`
+2. Passe die Selektoren/Regex-Muster an
+3. Teste lokal mit `python check_lse.py`
+
+### Logs prüfen
+```bash
+# Letzte Änderungen anzeigen
+cat history.json | jq '.changes[-5:]'
+
+# Aktuellen Status prüfen
+cat status.json
+```
+
+## 📝 Lizenz
+
+Dieses Projekt ist für den persönlichen Gebrauch gedacht. Bei Nutzung bitte die LSE-Webseiten-Nutzungsbedingungen beachten.
+
+## 🤝 Beitragen
+
+Issues und Pull Requests sind willkommen! Besonders für:
+- Verbesserungen der Datum-Extraktion
+- Zusätzliche Benachrichtigungskanäle
+- Optimierung der Prognose-Algorithmen
+
+---
+
+**Hinweis**: Dieses Tool ist nicht offiziell mit der LSE verbunden. Es dient ausschließlich zur persönlichen Information über öffentlich verfügbare Daten.
