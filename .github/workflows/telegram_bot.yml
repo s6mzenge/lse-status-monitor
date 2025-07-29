@@ -1,0 +1,41 @@
+name: Telegram Bot Handler
+
+on:
+  # Ermöglicht manuelles Testen
+  workflow_dispatch:
+  
+  # Für externen Cron-Job Trigger
+  repository_dispatch:
+    types: [check-telegram-bot]
+
+jobs:
+  check-telegram:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        pip install requests
+    
+    - name: Check Telegram Messages
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        python telegram_bot.py
+    
+    - name: Commit last_update_id if changed
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add last_update_id.json 2>/dev/null || true
+        git commit -m "Update last telegram update id [skip ci]" || true
+        git pull --rebase origin main || true
+        git push || true
