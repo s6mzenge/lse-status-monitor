@@ -46,39 +46,43 @@ jobs:
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         
+        # Debug: Zeige aktuelle Dateien
+        echo "=== Status.json Inhalt ==="
+        cat status.json || echo "status.json nicht gefunden"
+        echo ""
+        echo "=== History.json Inhalt ==="
+        cat history.json || echo "history.json nicht gefunden"
+        echo ""
+        
         # Stelle sicher, dass wir auf dem neuesten Stand sind
         git fetch origin main
-        git pull origin main --no-rebase || true
         
-        # Bei Konflikten: Nehme die lokale Version (unsere Änderungen)
-        if [ -f status.json ]; then
-          git checkout --ours status.json 2>/dev/null || true
-        fi
-        if [ -f history.json ]; then
-          git checkout --ours history.json 2>/dev/null || true
-        fi
+        # Reset auf origin/main um sicherzustellen, dass wir den aktuellen Stand haben
+        git reset --hard origin/main
         
-        # Füge Änderungen hinzu
-        git add status.json history.json 2>/dev/null || true
+        # Führe das Python-Skript erneut aus, um die Dateien zu aktualisieren
+        # (Falls sie durch den Reset verloren gingen)
+        python check_lse.py || true
+        
+        # Füge die aktualisierten Dateien hinzu
+        git add status.json history.json
+        
+        # Zeige was geändert wurde
+        echo "=== Git Status ==="
+        git status
         
         # Committe nur wenn es Änderungen gibt
         if ! git diff --cached --quiet; then
+          echo "=== Änderungen gefunden, committe... ==="
           git commit -m "Update status and history [skip ci]"
           
-          # Versuche zu pushen mit Retry-Logik
-          for i in {1..3}; do
-            if git push origin main; then
-              echo "✅ Push erfolgreich"
-              break
-            else
-              echo "⚠️ Push fehlgeschlagen, versuche erneut ($i/3)..."
-              git pull origin main --no-rebase || true
-              # Bei Konflikten nehme unsere Version
-              git checkout --ours status.json history.json 2>/dev/null || true
-              git add status.json history.json 2>/dev/null || true
-              git commit --amend --no-edit || true
-            fi
-          done
+          # Push mit Force-with-lease (sicherer als force)
+          echo "=== Pushe Änderungen... ==="
+          git push origin main --force-with-lease || {
+            echo "=== Push fehlgeschlagen, versuche Pull und erneuten Push ==="
+            git pull origin main --rebase
+            git push origin main
+          }
         else
-          echo "ℹ️ Keine Änderungen zu committen"
+          echo "=== Keine Änderungen zu committen ==="
         fi
