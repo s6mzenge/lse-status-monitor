@@ -287,19 +287,10 @@ def main():
     email_main = os.environ.get('EMAIL_TO', '')
     email_2 = os.environ.get('EMAIL_TO_2', '')
     email_3 = os.environ.get('EMAIL_TO_3', '')
-    email_4 = os.environ.get('EMAIL_TO_4', '')
-    email_5 = os.environ.get('EMAIL_TO_5', '')
     
     # Kategorisiere Empfänger
-    # Immer benachrichtigen: EMAIL_TO und EMAIL_TO_2 (außer wenn sie "engelquast" enthalten)
     always_notify = [email for email in [email_main, email_2] if email and 'engelquast' not in email.lower()]
-    
-    # Nur bei 25/28 July benachrichtigen: EMAIL_TO_3, EMAIL_TO_4, EMAIL_TO_5 und alle mit "engelquast"
-    conditional_notify = []
-    # Füge alle E-Mails mit "engelquast" hinzu
-    conditional_notify.extend([email for email in [email_main, email_2] if email and 'engelquast' in email.lower()])
-    # Füge EMAIL_TO_3, EMAIL_TO_4 und EMAIL_TO_5 hinzu
-    conditional_notify.extend([email for email in [email_3, email_4, email_5] if email])
+    conditional_notify = [email for email in [email_main, email_2, email_3] if email and 'engelquast' in email.lower()]
     
     print(f"Immer benachrichtigen: {', '.join(always_notify)}")
     print(f"Nur bei 25/28 July: {', '.join(conditional_notify)}")
