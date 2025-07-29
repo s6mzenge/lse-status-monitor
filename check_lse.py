@@ -157,6 +157,38 @@ def extract_all_other_date(text):
     
     return None
 
+def create_forecast_text(forecast):
+    """Erstellt einen Prognosetext basierend auf der Regression"""
+    if not forecast:
+        return "\n📊 Prognose: Noch nicht genügend Daten für eine zuverlässige Vorhersage."
+    
+    text = "\n📊 PROGNOSE basierend auf bisherigen Änderungen:\n"
+    text += f"(Analyse von {forecast['data_points']} Datenpunkten, R²={forecast['r_squared']:.2f})\n\n"
+    
+    if forecast['slope'] <= 0:
+        text += "⚠️ Die Daten zeigen keinen Fortschritt oder sogar Rückschritte.\n"
+    else:
+        text += f"📈 Durchschnittlicher Fortschritt: {forecast['slope']:.1f} Tage pro Tag\n\n"
+        
+        if forecast['days_until_25_july'] is not None and forecast['days_until_25_july'] > 0:
+            date_25 = datetime.now() + timedelta(days=forecast['days_until_25_july'])
+            text += f"📅 25 July wird voraussichtlich erreicht:\n"
+            text += f"   • In {forecast['days_until_25_july']:.0f} Tagen\n"
+            text += f"   • Am {date_25.strftime('%d. %B %Y')}\n\n"
+        
+        if forecast['days_until_28_july'] is not None and forecast['days_until_28_july'] > 0:
+            date_28 = datetime.now() + timedelta(days=forecast['days_until_28_july'])
+            text += f"📅 28 July wird voraussichtlich erreicht:\n"
+            text += f"   • In {forecast['days_until_28_july']:.0f} Tagen\n"
+            text += f"   • Am {date_28.strftime('%d. %B %Y')}\n\n"
+        
+        if forecast['r_squared'] < 0.5:
+            text += "⚠️ Hinweis: Die Vorhersage ist unsicher (niedrige Korrelation).\n"
+        elif forecast['r_squared'] > 0.8:
+            text += "✅ Die Vorhersage basiert auf einem stabilen Trend.\n"
+    
+    return text
+
 def fetch_processing_date():
     try:
         response = requests.get(URL, headers={
@@ -211,38 +243,6 @@ def fetch_processing_date():
         print(f"Fehler beim Abrufen der Webseite: {e}")
         return None
 
-def create_forecast_text(forecast):
-    """Erstellt einen Prognosetext basierend auf der Regression"""
-    if not forecast:
-        return "\n📊 Prognose: Noch nicht genügend Daten für eine zuverlässige Vorhersage."
-    
-    text = "\n📊 PROGNOSE basierend auf bisherigen Änderungen:\n"
-    text += f"(Analyse von {forecast['data_points']} Datenpunkten, R²={forecast['r_squared']:.2f})\n\n"
-    
-    if forecast['slope'] <= 0:
-        text += "⚠️ Die Daten zeigen keinen Fortschritt oder sogar Rückschritte.\n"
-    else:
-        text += f"📈 Durchschnittlicher Fortschritt: {forecast['slope']:.1f} Tage pro Tag\n\n"
-        
-        if forecast['days_until_25_july'] is not None and forecast['days_until_25_july'] > 0:
-            date_25 = datetime.now() + timedelta(days=forecast['days_until_25_july'])
-            text += f"📅 25 July wird voraussichtlich erreicht:\n"
-            text += f"   • In {forecast['days_until_25_july']:.0f} Tagen\n"
-            text += f"   • Am {date_25.strftime('%d. %B %Y')}\n\n"
-        
-        if forecast['days_until_28_july'] is not None and forecast['days_until_28_july'] > 0:
-            date_28 = datetime.now() + timedelta(days=forecast['days_until_28_july'])
-            text += f"📅 28 July wird voraussichtlich erreicht:\n"
-            text += f"   • In {forecast['days_until_28_july']:.0f} Tagen\n"
-            text += f"   • Am {date_28.strftime('%d. %B %Y')}\n\n"
-        
-        if forecast['r_squared'] < 0.5:
-            text += "⚠️ Hinweis: Die Vorhersage ist unsicher (niedrige Korrelation).\n"
-        elif forecast['r_squared'] > 0.8:
-            text += "✅ Die Vorhersage basiert auf einem stabilen Trend.\n"
-    
-    return text
-
 def send_gmail(subject, body, recipients):
     """Sendet E-Mail über Gmail an spezifische Empfänger"""
     gmail_user = os.environ.get('GMAIL_USER')
@@ -281,6 +281,12 @@ def send_gmail(subject, body, recipients):
 def main():
     print("="*50)
     print(f"LSE Status Check - {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+    
+    # Prüfe ob manueller Run via Telegram
+    IS_MANUAL = os.environ.get('GITHUB_EVENT_NAME') == 'repository_dispatch'
+    if IS_MANUAL:
+        print("🔄 MANUELLER CHECK VIA TELEGRAM")
+    
     print("="*50)
     
     # Lade E-Mail-Adressen
@@ -306,6 +312,26 @@ def main():
     
     if current_date:
         print(f"Aktuelles Datum für 'all other graduate applicants': {current_date}")
+        
+        # Bei manuellem Check immer Status senden
+        if IS_MANUAL:
+            # Berechne aktuellen Trend wenn möglich
+            forecast = calculate_regression_forecast(history)
+            trend_text = ""
+            if forecast and forecast['slope'] > 0:
+                if forecast['days_until_25_july'] and forecast['days_until_25_july'] > 0:
+                    trend_text = f"\n\n📈 <b>Prognose:</b> 25 July in ~{forecast['days_until_25_july']:.0f} Tagen"
+            
+            telegram_msg = f"""<b>📊 LSE Status Check Ergebnis</b>
+
+<b>Aktuelles Datum:</b> {current_date}
+<b>Letzter Stand:</b> {status['last_date']}
+<b>Status:</b> {"🔔 ÄNDERUNG ERKANNT!" if current_date != status['last_date'] else "✅ Keine Änderung"}
+
+<b>Zeitpunkt:</b> {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}{trend_text}
+
+<a href="{URL}">📄 LSE Webseite öffnen</a>"""
+            send_telegram(telegram_msg)
         
         if current_date != status['last_date']:
             print("\n🔔 ÄNDERUNG ERKANNT!")
@@ -342,8 +368,9 @@ Link zur Seite: {URL}"""
             # E-Mail ohne Prognose für bedingte Empfänger
             body_simple = base_body + "\n\nDiese E-Mail wurde automatisch von deinem GitHub Actions Monitor generiert."
             
-            # Telegram-Nachricht formatieren
-            telegram_msg = f"""<b>🔔 LSE Status Update</b>
+            # Telegram-Nachricht formatieren (nur bei automatischer Ausführung)
+            if not IS_MANUAL:
+                telegram_msg = f"""<b>🔔 LSE Status Update</b>
 
 <b>ÄNDERUNG ERKANNT!</b>
 Von: {status['last_date']}
@@ -353,6 +380,8 @@ Zeit: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
 {forecast_text}
 
 <a href="{URL}">📄 LSE Webseite öffnen</a>"""
+                
+                send_telegram(telegram_msg)
             
             # Sende E-Mails
             emails_sent = False
@@ -361,9 +390,6 @@ Zeit: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
             if always_notify:
                 if send_gmail(subject, body_with_forecast, always_notify):
                     emails_sent = True
-            
-            # Telegram-Nachricht senden
-            send_telegram(telegram_msg)
             
             # Bedingt benachrichtigen (nur bei 25 oder 28 July)
             if conditional_notify and current_date in ["25 July", "28 July"]:
@@ -396,6 +422,21 @@ Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
     else:
         print("\n⚠️  WARNUNG: Konnte das Datum nicht von der Webseite extrahieren!")
         
+        # Bei manueller Ausführung auch Fehler melden
+        if IS_MANUAL:
+            telegram_error = f"""<b>❌ Manueller Check fehlgeschlagen</b>
+
+Konnte das Datum nicht von der Webseite extrahieren!
+
+<b>Zeitpunkt:</b> {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
+<b>Letztes bekanntes Datum:</b> {status['last_date']}
+
+Bitte prüfe die Webseite manuell.
+
+<a href="{URL}">📄 LSE Webseite öffnen</a>"""
+            
+            send_telegram(telegram_error)
+        
         # Sende Warnung per E-Mail
         subject = "LSE Monitor WARNUNG: Datum nicht gefunden"
         body = f"""WARNUNG: Der LSE Monitor konnte das Datum nicht von der Webseite extrahieren!
@@ -412,8 +453,9 @@ Der Monitor wird weiterhin prüfen."""
         if always_notify:
             send_gmail(subject, body, always_notify)
         
-        # Telegram-Warnung
-        telegram_warning = f"""<b>⚠️ LSE Monitor WARNUNG</b>
+        # Telegram-Warnung (nur bei automatischer Ausführung)
+        if not IS_MANUAL:
+            telegram_warning = f"""<b>⚠️ LSE Monitor WARNUNG</b>
 
 Konnte das Datum nicht von der Webseite extrahieren!
 
@@ -426,8 +468,8 @@ Mögliche Gründe:
 • Netzwerkfehler
 
 <a href="{URL}">📄 Webseite manuell prüfen</a>"""
-        
-        send_telegram(telegram_warning)
+            
+            send_telegram(telegram_warning)
     
     print("\n" + "="*50)
 
