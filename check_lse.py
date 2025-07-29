@@ -361,6 +361,9 @@ def main():
             # Erstelle E-Mail-Inhalt
             subject = f"LSE Status Update: Neues Datum {current_date}"
             
+            # Bei manuellem Check: Hinweis in E-Mail
+            manual_hint = "\n\n(Änderung durch manuellen Check via Telegram entdeckt)" if IS_MANUAL else ""
+            
             # Basis-E-Mail für alle
             base_body = f"""Das Verarbeitungsdatum für "all other graduate applicants" hat sich geändert!
 
@@ -370,7 +373,7 @@ Auf: {current_date}
 
 Zeitpunkt der Erkennung: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 
-Link zur Seite: {URL}"""
+Link zur Seite: {URL}{manual_hint}"""
             
             # E-Mail mit Prognose für Hauptempfänger
             body_with_forecast = base_body + f"\n{forecast_text}\n\nDiese E-Mail wurde automatisch von deinem GitHub Actions Monitor generiert."
@@ -378,8 +381,9 @@ Link zur Seite: {URL}"""
             # E-Mail ohne Prognose für bedingte Empfänger
             body_simple = base_body + "\n\nDiese E-Mail wurde automatisch von deinem GitHub Actions Monitor generiert."
             
-            # Telegram-Nachricht formatieren (nur bei automatischer Ausführung)
+            # Telegram-Nachricht formatieren
             if not IS_MANUAL:
+                # Automatischer Check: Standard-Änderungsnachricht
                 telegram_msg = f"""<b>🔔 LSE Status Update</b>
 
 <b>ÄNDERUNG ERKANNT!</b>
@@ -392,11 +396,28 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 <a href="{URL}">📄 LSE Webseite öffnen</a>"""
                 
                 send_telegram(telegram_msg)
+            else:
+                # Manueller Check: Spezielle Nachricht bei Änderung
+                telegram_msg = f"""<b>🚨 ÄNDERUNG GEFUNDEN!</b>
+
+Dein manueller Check hat eine Änderung entdeckt!
+
+Von: {status['last_date']}
+Auf: <b>{current_date}</b>
+
+Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
+{forecast_text}
+
+📧 E-Mails werden an die Hauptempfänger gesendet!
+
+<a href="{URL}">📄 LSE Webseite öffnen</a>"""
+                
+                send_telegram(telegram_msg)
             
             # Sende E-Mails
             emails_sent = False
             
-            # Immer benachrichtigen (mit Prognose)
+            # Immer benachrichtigen (mit Prognose) - JETZT AUCH BEI MANUELLEN CHECKS
             if always_notify:
                 if send_gmail(subject, body_with_forecast, always_notify):
                     emails_sent = True
