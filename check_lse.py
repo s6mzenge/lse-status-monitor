@@ -13,6 +13,15 @@ URL = "https://www.lse.ac.uk/study-at-lse/Graduate/News/Current-processing-times
 STATUS_FILE = "status.json"
 HISTORY_FILE = "history.json"
 
+def get_german_time():
+    """Gibt die aktuelle Zeit in deutscher Zeitzone zurück (UTC+2 für Sommerzeit)"""
+    utc_time = datetime.utcnow()
+    # Deutschland ist UTC+1 (Winter) oder UTC+2 (Sommer)
+    # Hier verwenden wir UTC+2 für Sommerzeit
+    # Im Winter auf hours=1 ändern
+    german_time = utc_time + timedelta(hours=2)
+    return german_time
+
 def send_telegram(message):
     """Sendet eine Nachricht über Telegram Bot"""
     bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -66,7 +75,7 @@ def date_to_days(date_str):
     """Konvertiert ein Datum wie '10 July' in Tage seit dem 1. Januar"""
     try:
         # Füge das aktuelle Jahr hinzu
-        current_year = datetime.now().year
+        current_year = get_german_time().year
         date_obj = datetime.strptime(f"{date_str} {current_year}", "%d %B %Y")
         jan_first = datetime(current_year, 1, 1)
         return (date_obj - jan_first).days
@@ -75,7 +84,7 @@ def date_to_days(date_str):
 
 def days_to_date(days):
     """Konvertiert Tage seit 1. Januar zurück in ein Datum"""
-    current_year = datetime.now().year
+    current_year = get_german_time().year
     jan_first = datetime(current_year, 1, 1)
     target_date = jan_first + timedelta(days=int(days))
     return target_date.strftime("%d %B").lstrip("0")
@@ -128,7 +137,8 @@ def calculate_regression_forecast(history):
         return None
     
     # Berechne wann diese Daten erreicht werden
-    current_days_elapsed = (datetime.now() - first_timestamp).total_seconds() / 86400
+    current_time = get_german_time()
+    current_days_elapsed = (current_time - first_timestamp).total_seconds() / 86400
     current_predicted_days = slope * current_days_elapsed + intercept
     
     days_until_25 = (target_25_days - current_predicted_days) / slope if slope > 0 else None
@@ -171,13 +181,13 @@ def create_forecast_text(forecast):
         text += f"📈 Durchschnittlicher Fortschritt: {forecast['slope']:.1f} Tage pro Tag\n\n"
         
         if forecast['days_until_25_july'] is not None and forecast['days_until_25_july'] > 0:
-            date_25 = datetime.now() + timedelta(days=forecast['days_until_25_july'])
+            date_25 = get_german_time() + timedelta(days=forecast['days_until_25_july'])
             text += f"📅 25 July wird voraussichtlich erreicht:\n"
             text += f"   • In {forecast['days_until_25_july']:.0f} Tagen\n"
             text += f"   • Am {date_25.strftime('%d. %B %Y')}\n\n"
         
         if forecast['days_until_28_july'] is not None and forecast['days_until_28_july'] > 0:
-            date_28 = datetime.now() + timedelta(days=forecast['days_until_28_july'])
+            date_28 = get_german_time() + timedelta(days=forecast['days_until_28_july'])
             text += f"📅 28 July wird voraussichtlich erreicht:\n"
             text += f"   • In {forecast['days_until_28_july']:.0f} Tagen\n"
             text += f"   • Am {date_28.strftime('%d. %B %Y')}\n\n"
@@ -280,7 +290,7 @@ def send_gmail(subject, body, recipients):
 
 def main():
     print("="*50)
-    print(f"LSE Status Check - {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+    print(f"LSE Status Check - {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}")
     
     # Prüfe ob manueller Run via Telegram
     IS_MANUAL = os.environ.get('GITHUB_EVENT_NAME') == 'repository_dispatch'
@@ -328,7 +338,7 @@ def main():
 <b>Letzter Stand:</b> {status['last_date']}
 <b>Status:</b> {"🔔 ÄNDERUNG ERKANNT!" if current_date != status['last_date'] else "✅ Keine Änderung"}
 
-<b>Zeitpunkt:</b> {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}{trend_text}
+<b>Zeitpunkt:</b> {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}{trend_text}
 
 <a href="{URL}">📄 LSE Webseite öffnen</a>"""
             send_telegram(telegram_msg)
@@ -336,9 +346,9 @@ def main():
         if current_date != status['last_date']:
             print("\n🔔 ÄNDERUNG ERKANNT!")
             
-            # Speichere in Historie
+            # Speichere in Historie mit UTC Zeit (für Konsistenz)
             history["changes"].append({
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.utcnow().isoformat(),
                 "date": current_date,
                 "from": status['last_date']
             })
@@ -358,7 +368,7 @@ def main():
 Von: {status['last_date']}
 Auf: {current_date}
 
-Zeitpunkt der Erkennung: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
+Zeitpunkt der Erkennung: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 
 Link zur Seite: {URL}"""
             
@@ -376,7 +386,7 @@ Link zur Seite: {URL}"""
 Von: {status['last_date']}
 Auf: <b>{current_date}</b>
 
-Zeit: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
+Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 {forecast_text}
 
 <a href="{URL}">📄 LSE Webseite öffnen</a>"""
@@ -410,14 +420,14 @@ Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
             if emails_sent or os.environ.get('TELEGRAM_BOT_TOKEN'):
                 # Update Status nur bei erfolgreicher Benachrichtigung
                 status['last_date'] = current_date
-                status['last_check'] = datetime.now().isoformat()
+                status['last_check'] = datetime.utcnow().isoformat()  # UTC für Konsistenz
                 save_status(status)
                 print("✅ Status wurde aktualisiert.")
             else:
                 print("⚠️  Status wurde NICHT aktualisiert (keine Benachrichtigung erfolgreich)")
         else:
             print("✅ Keine Änderung - alles beim Alten.")
-            status['last_check'] = datetime.now().isoformat()
+            status['last_check'] = datetime.utcnow().isoformat()  # UTC für Konsistenz
             save_status(status)
     else:
         print("\n⚠️  WARNUNG: Konnte das Datum nicht von der Webseite extrahieren!")
@@ -428,7 +438,7 @@ Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
 
 Konnte das Datum nicht von der Webseite extrahieren!
 
-<b>Zeitpunkt:</b> {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
+<b>Zeitpunkt:</b> {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 <b>Letztes bekanntes Datum:</b> {status['last_date']}
 
 Bitte prüfe die Webseite manuell.
@@ -441,7 +451,7 @@ Bitte prüfe die Webseite manuell.
         subject = "LSE Monitor WARNUNG: Datum nicht gefunden"
         body = f"""WARNUNG: Der LSE Monitor konnte das Datum nicht von der Webseite extrahieren!
 
-Zeitpunkt: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
+Zeitpunkt: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 Letztes bekanntes Datum: {status['last_date']}
 
 Bitte überprüfe:
@@ -460,7 +470,7 @@ Der Monitor wird weiterhin prüfen."""
 Konnte das Datum nicht von der Webseite extrahieren!
 
 Letztes bekanntes Datum: <b>{status['last_date']}</b>
-Zeit: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
+Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 
 Mögliche Gründe:
 • Webseite nicht erreichbar
