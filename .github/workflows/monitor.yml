@@ -3,7 +3,9 @@ name: LSE Status Monitor
 on:
   workflow_dispatch: # Ermöglicht manuelles Testen und Cron-Job.org Trigger
   repository_dispatch: # Für API-Trigger
-    types: [check-lse-status]
+    types: 
+      - check-lse-status
+      - check-lse-status-manual
 
 jobs:
   check-status:
