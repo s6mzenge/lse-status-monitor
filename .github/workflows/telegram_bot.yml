@@ -1,10 +1,7 @@
 name: Telegram Bot Handler
 
 on:
-  # Ermöglicht manuelles Testen
   workflow_dispatch:
-  
-  # Für externen Cron-Job Trigger
   repository_dispatch:
     types: [check-telegram-bot]
 
