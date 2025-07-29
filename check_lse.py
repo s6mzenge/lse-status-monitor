@@ -8,6 +8,8 @@ from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 import numpy as np
 from collections import defaultdict
+import time
+import sys
 
 URL = "https://www.lse.ac.uk/study-at-lse/Graduate/News/Current-processing-times"
 STATUS_FILE = "status.json"
@@ -50,26 +52,123 @@ def send_telegram(message):
         return False
 
 def load_status():
+    """Lädt Status mit Fehlerbehandlung und Validierung"""
     try:
         with open(STATUS_FILE, 'r') as f:
-            return json.load(f)
-    except:
+            status = json.load(f)
+            
+        # Validiere die geladenen Daten
+        if not isinstance(status, dict):
+            print("⚠️ Status ist kein Dictionary, verwende Standardwerte")
+            return {"last_date": "10 July", "last_check": None}
+            
+        if 'last_date' not in status:
+            print("⚠️ last_date fehlt in status.json, verwende Standardwert")
+            status['last_date'] = "10 July"
+            
+        print(f"✅ Status geladen: {status['last_date']}")
+        return status
+    except FileNotFoundError:
+        print("ℹ️ status.json nicht gefunden, erstelle neue Datei")
+        return {"last_date": "10 July", "last_check": None}
+    except json.JSONDecodeError as e:
+        print(f"❌ Fehler beim Parsen von status.json: {e}")
+        print("Verwende Standardwerte")
+        return {"last_date": "10 July", "last_check": None}
+    except Exception as e:
+        print(f"❌ Unerwarteter Fehler beim Laden von status.json: {e}")
         return {"last_date": "10 July", "last_check": None}
 
 def save_status(status):
-    with open(STATUS_FILE, 'w') as f:
-        json.dump(status, f, indent=2)
+    """Speichert Status mit Validierung und Verifikation"""
+    # Validiere dass last_date gesetzt ist
+    if not status.get('last_date'):
+        print("❌ Fehler: last_date ist leer, Status wird nicht gespeichert")
+        return False
+    
+    # Erstelle Backup bevor wir speichern
+    try:
+        if os.path.exists(STATUS_FILE):
+            with open(STATUS_FILE, 'r') as f:
+                backup = f.read()
+            with open(STATUS_FILE + '.backup', 'w') as f:
+                f.write(backup)
+    except Exception as e:
+        print(f"⚠️ Konnte kein Backup erstellen: {e}")
+    
+    # Speichere mit Fehlerbehandlung
+    try:
+        # Füge Zeitstempel hinzu wenn nicht vorhanden
+        if 'last_check' not in status:
+            status['last_check'] = datetime.utcnow().isoformat()
+        
+        with open(STATUS_FILE, 'w') as f:
+            json.dump(status, f, indent=2)
+        
+        # Verifiziere dass es korrekt gespeichert wurde
+        with open(STATUS_FILE, 'r') as f:
+            saved = json.load(f)
+            if saved.get('last_date') == status['last_date']:
+                print(f"✅ Status erfolgreich gespeichert: {status['last_date']}")
+                return True
+            else:
+                print(f"❌ FEHLER: Status nicht korrekt gespeichert!")
+                print(f"   Erwartet: {status['last_date']}")
+                print(f"   Gespeichert: {saved.get('last_date')}")
+                # Restore backup
+                if os.path.exists(STATUS_FILE + '.backup'):
+                    os.rename(STATUS_FILE + '.backup', STATUS_FILE)
+                return False
+                
+    except Exception as e:
+        print(f"❌ Fehler beim Speichern von status.json: {e}")
+        # Restore backup
+        if os.path.exists(STATUS_FILE + '.backup'):
+            os.rename(STATUS_FILE + '.backup', STATUS_FILE)
+        return False
 
 def load_history():
+    """Lädt Historie mit Fehlerbehandlung"""
     try:
         with open(HISTORY_FILE, 'r') as f:
-            return json.load(f)
-    except:
+            history = json.load(f)
+            
+        # Validiere die geladenen Daten
+        if not isinstance(history, dict) or 'changes' not in history:
+            print("⚠️ History ist ungültig, verwende leere Historie")
+            return {"changes": []}
+            
+        if not isinstance(history['changes'], list):
+            print("⚠️ History changes ist keine Liste, verwende leere Historie")
+            return {"changes": []}
+            
+        print(f"✅ Historie geladen: {len(history['changes'])} Änderungen")
+        return history
+    except FileNotFoundError:
+        print("ℹ️ history.json nicht gefunden, erstelle neue Datei")
+        return {"changes": []}
+    except json.JSONDecodeError as e:
+        print(f"❌ Fehler beim Parsen von history.json: {e}")
+        return {"changes": []}
+    except Exception as e:
+        print(f"❌ Unerwarteter Fehler beim Laden von history.json: {e}")
         return {"changes": []}
 
 def save_history(history):
-    with open(HISTORY_FILE, 'w') as f:
-        json.dump(history, f, indent=2)
+    """Speichert Historie mit Validierung"""
+    try:
+        # Validiere die Historie
+        if not isinstance(history, dict) or 'changes' not in history:
+            print("❌ Fehler: Historie ist ungültig")
+            return False
+            
+        with open(HISTORY_FILE, 'w') as f:
+            json.dump(history, f, indent=2)
+        print(f"✅ Historie gespeichert: {len(history['changes'])} Änderungen")
+        return True
+    except Exception as e:
+        print(f"❌ Fehler beim Speichern von history.json: {e}")
+        return False
 
 def date_to_days(date_str):
     """Konvertiert ein Datum wie '10 July' in Tage seit dem 1. Januar"""
@@ -99,59 +198,67 @@ def calculate_regression_forecast(history):
     first_timestamp = None
     
     for entry in history["changes"]:
-        timestamp = datetime.fromisoformat(entry["timestamp"])
-        date_days = date_to_days(entry["date"])
-        
-        if date_days is None:
+        try:
+            timestamp = datetime.fromisoformat(entry["timestamp"])
+            date_days = date_to_days(entry["date"])
+            
+            if date_days is None:
+                continue
+                
+            if first_timestamp is None:
+                first_timestamp = timestamp
+                
+            days_elapsed = (timestamp - first_timestamp).total_seconds() / 86400  # Tage seit erstem Eintrag
+            data_points.append((days_elapsed, date_days))
+        except Exception as e:
+            print(f"⚠️ Fehler beim Verarbeiten von Historie-Eintrag: {e}")
             continue
-            
-        if first_timestamp is None:
-            first_timestamp = timestamp
-            
-        days_elapsed = (timestamp - first_timestamp).total_seconds() / 86400  # Tage seit erstem Eintrag
-        data_points.append((days_elapsed, date_days))
     
     if len(data_points) < 2:
         return None
     
-    # Lineare Regression
-    x = np.array([p[0] for p in data_points])
-    y = np.array([p[1] for p in data_points])
-    
-    # Berechne Steigung und y-Achsenabschnitt
-    n = len(x)
-    slope = (n * np.sum(x * y) - np.sum(x) * np.sum(y)) / (n * np.sum(x**2) - np.sum(x)**2)
-    intercept = (np.sum(y) - slope * np.sum(x)) / n
-    
-    # Berechne R² für Qualität der Regression
-    y_pred = slope * x + intercept
-    ss_res = np.sum((y - y_pred)**2)
-    ss_tot = np.sum((y - np.mean(y))**2)
-    r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-    
-    # Prognose für July 25 und July 28
-    target_25_days = date_to_days("25 July")
-    target_28_days = date_to_days("28 July")
-    
-    if target_25_days is None or target_28_days is None:
+    try:
+        # Lineare Regression
+        x = np.array([p[0] for p in data_points])
+        y = np.array([p[1] for p in data_points])
+        
+        # Berechne Steigung und y-Achsenabschnitt
+        n = len(x)
+        slope = (n * np.sum(x * y) - np.sum(x) * np.sum(y)) / (n * np.sum(x**2) - np.sum(x)**2)
+        intercept = (np.sum(y) - slope * np.sum(x)) / n
+        
+        # Berechne R² für Qualität der Regression
+        y_pred = slope * x + intercept
+        ss_res = np.sum((y - y_pred)**2)
+        ss_tot = np.sum((y - np.mean(y))**2)
+        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+        
+        # Prognose für July 25 und July 28
+        target_25_days = date_to_days("25 July")
+        target_28_days = date_to_days("28 July")
+        
+        if target_25_days is None or target_28_days is None:
+            return None
+        
+        # Berechne wann diese Daten erreicht werden
+        current_time = get_german_time()
+        current_days_elapsed = (current_time - first_timestamp).total_seconds() / 86400
+        current_predicted_days = slope * current_days_elapsed + intercept
+        
+        days_until_25 = (target_25_days - current_predicted_days) / slope if slope > 0 else None
+        days_until_28 = (target_28_days - current_predicted_days) / slope if slope > 0 else None
+        
+        return {
+            "slope": slope,
+            "r_squared": r_squared,
+            "current_trend_days": current_predicted_days,
+            "days_until_25_july": days_until_25,
+            "days_until_28_july": days_until_28,
+            "data_points": len(data_points)
+        }
+    except Exception as e:
+        print(f"❌ Fehler bei der Prognoseberechnung: {e}")
         return None
-    
-    # Berechne wann diese Daten erreicht werden
-    current_time = get_german_time()
-    current_days_elapsed = (current_time - first_timestamp).total_seconds() / 86400
-    current_predicted_days = slope * current_days_elapsed + intercept
-    
-    days_until_25 = (target_25_days - current_predicted_days) / slope if slope > 0 else None
-    days_until_28 = (target_28_days - current_predicted_days) / slope if slope > 0 else None
-    
-    return {
-        "slope": slope,
-        "r_squared": r_squared,
-        "current_trend_days": current_predicted_days,
-        "days_until_25_july": days_until_25,
-        "days_until_28_july": days_until_28,
-        "data_points": len(data_points)
-    }
 
 def extract_all_other_date(text):
     """Extrahiert nur das Datum für 'all other graduate applicants'"""
@@ -200,15 +307,23 @@ def create_forecast_text(forecast):
     return text
 
 def fetch_processing_date():
+    """Holt das aktuelle Verarbeitungsdatum von der LSE-Webseite"""
     try:
+        print("Rufe LSE-Webseite ab...")
         response = requests.get(URL, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }, timeout=30)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        for element in soup.find_all(text=re.compile(r'all other graduate applicants', re.IGNORECASE)):
+        # Suche nach "all other graduate applicants"
+        for element in soup.find_all(string=re.compile(r'all other graduate applicants', re.IGNORECASE)):
             parent = element.parent
             while parent and parent.name not in ['td', 'th', 'tr']:
                 parent = parent.parent
@@ -235,6 +350,7 @@ def fetch_processing_date():
                                 print(f"Extrahiertes Datum für 'all other graduate applicants': {date}")
                                 return date
         
+        # Fallback: Textsuche
         full_text = soup.get_text()
         pattern = r'all other graduate applicants[^0-9]*?((?:\d{1,2}\s+\w+\s*)+)'
         match = re.search(pattern, full_text, re.IGNORECASE | re.DOTALL)
@@ -249,8 +365,14 @@ def fetch_processing_date():
         print("WARNUNG: Konnte das Datum nicht finden!")
         return None
         
+    except requests.exceptions.Timeout:
+        print("❌ Timeout beim Abrufen der Webseite")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Netzwerkfehler beim Abrufen der Webseite: {e}")
+        return None
     except Exception as e:
-        print(f"Fehler beim Abrufen der Webseite: {e}")
+        print(f"❌ Unerwarteter Fehler beim Abrufen der Webseite: {e}")
         return None
 
 def send_gmail(subject, body, recipients):
@@ -311,7 +433,7 @@ def main():
     print(f"Immer benachrichtigen: {', '.join(always_notify)}")
     print(f"Nur bei 25/28 July: {', '.join(conditional_notify)}")
     
-    # Lade Status und Historie
+    # Lade Status und Historie mit Fehlerbehandlung
     status = load_status()
     history = load_history()
     print(f"Letztes bekanntes Datum: {status['last_date']}")
@@ -343,8 +465,11 @@ def main():
 <a href="{URL}">📄 LSE Webseite öffnen</a>"""
             send_telegram(telegram_msg)
         
+        # WICHTIG: Prüfe ob sich das Datum wirklich geändert hat
         if current_date != status['last_date']:
             print("\n🔔 ÄNDERUNG ERKANNT!")
+            print(f"   Von: {status['last_date']}")
+            print(f"   Auf: {current_date}")
             
             # Speichere in Historie mit UTC Zeit (für Konsistenz)
             history["changes"].append({
@@ -352,7 +477,10 @@ def main():
                 "date": current_date,
                 "from": status['last_date']
             })
-            save_history(history)
+            
+            # Speichere Historie sofort
+            if not save_history(history):
+                print("❌ Fehler beim Speichern der Historie!")
             
             # Berechne Prognose
             forecast = calculate_regression_forecast(history)
@@ -442,13 +570,25 @@ Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
                 # Update Status nur bei erfolgreicher Benachrichtigung
                 status['last_date'] = current_date
                 status['last_check'] = datetime.utcnow().isoformat()  # UTC für Konsistenz
-                save_status(status)
-                print("✅ Status wurde aktualisiert.")
+                
+                # WICHTIG: Speichere Status und verifiziere
+                if save_status(status):
+                    print("✅ Status wurde aktualisiert und verifiziert.")
+                else:
+                    print("❌ KRITISCHER FEHLER: Status konnte nicht gespeichert werden!")
+                    # Versuche es nochmal
+                    time.sleep(1)
+                    if save_status(status):
+                        print("✅ Status beim zweiten Versuch gespeichert.")
+                    else:
+                        print("❌ Status konnte auch beim zweiten Versuch nicht gespeichert werden!")
+                        sys.exit(1)  # Beende mit Fehlercode
             else:
                 print("⚠️  Status wurde NICHT aktualisiert (keine Benachrichtigung erfolgreich)")
         else:
             print("✅ Keine Änderung - alles beim Alten.")
             status['last_check'] = datetime.utcnow().isoformat()  # UTC für Konsistenz
+            # Speichere auch bei keiner Änderung den aktualisierten Timestamp
             save_status(status)
     else:
         print("\n⚠️  WARNUNG: Konnte das Datum nicht von der Webseite extrahieren!")
@@ -503,6 +643,16 @@ Mögliche Gründe:
             send_telegram(telegram_warning)
     
     print("\n" + "="*50)
+    
+    # Finaler Status-Output für Debugging
+    print("\n📊 FINALER STATUS:")
+    try:
+        with open(STATUS_FILE, 'r') as f:
+            final_status = json.load(f)
+            print(f"   last_date: {final_status.get('last_date')}")
+            print(f"   last_check: {final_status.get('last_check')}")
+    except Exception as e:
+        print(f"   Fehler beim Lesen des finalen Status: {e}")
 
 if __name__ == "__main__":
     main()
