@@ -7,6 +7,11 @@ on:
       - check-lse-status
       - check-lse-status-manual # Spezielle manuelle Trigger vom Telegram Bot
 
+# Verhindert parallele Ausführungen
+concurrency:
+  group: lse-monitor
+  cancel-in-progress: false
+
 jobs:
   check-status:
     runs-on: ubuntu-latest
@@ -26,7 +31,19 @@ jobs:
       run: |
         pip install requests beautifulsoup4 numpy
     
+    # Backup der aktuellen Dateien erstellen
+    - name: Backup current files
+      run: |
+        cp status.json status.json.backup 2>/dev/null || echo '{"last_date": "10 July", "last_check": null}' > status.json.backup
+        cp history.json history.json.backup 2>/dev/null || echo '{"changes": []}' > history.json.backup
+        
+        echo "=== Backup Status ==="
+        cat status.json.backup
+        echo ""
+        cat history.json.backup
+    
     - name: Check LSE Status
+      id: check_status
       env:
         GMAIL_USER: ${{ secrets.GMAIL_USER }}
         GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
@@ -38,7 +55,52 @@ jobs:
         # Setze MANUAL_RUN flag für manuelle Ausführungen
         MANUAL_RUN: ${{ github.event_name == 'workflow_dispatch' || github.event.action == 'check-lse-status-manual' }}
       run: |
+        # Führe Check aus und speichere Exit Code
         python check_lse.py
+        echo "check_exit_code=$?" >> $GITHUB_OUTPUT
+        
+        # Zeige aktuelle Inhalte zur Diagnose
+        echo "=== Nach Check: status.json ==="
+        cat status.json || echo "Fehler: status.json nicht gefunden"
+        echo ""
+        echo "=== Nach Check: history.json ==="
+        cat history.json || echo "Fehler: history.json nicht gefunden"
+    
+    - name: Validate JSON files
+      run: |
+        # Validiere dass die JSON Dateien gültig sind
+        echo "=== Validiere JSON Dateien ==="
+        python -c "
+        import json
+        import sys
+        
+        try:
+            with open('status.json', 'r') as f:
+                status = json.load(f)
+                print('✅ status.json ist gültig')
+                print(f'  last_date: {status.get(\"last_date\")}')
+                print(f'  last_check: {status.get(\"last_check\")}')
+        except Exception as e:
+            print(f'❌ status.json ist ungültig: {e}')
+            # Restore backup
+            import shutil
+            shutil.copy('status.json.backup', 'status.json')
+            print('  Backup wiederhergestellt')
+            sys.exit(1)
+        
+        try:
+            with open('history.json', 'r') as f:
+                history = json.load(f)
+                print('✅ history.json ist gültig')
+                print(f'  Anzahl Änderungen: {len(history.get(\"changes\", []))}')
+        except Exception as e:
+            print(f'❌ history.json ist ungültig: {e}')
+            # Restore backup
+            import shutil
+            shutil.copy('history.json.backup', 'history.json')
+            print('  Backup wiederhergestellt')
+            sys.exit(1)
+        "
     
     - name: Update status and history files
       run: |
@@ -46,43 +108,83 @@ jobs:
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         
-        # Debug: Zeige aktuelle Dateien
-        echo "=== Status.json Inhalt ==="
-        cat status.json || echo "status.json nicht gefunden"
-        echo ""
-        echo "=== History.json Inhalt ==="
-        cat history.json || echo "history.json nicht gefunden"
-        echo ""
-        
-        # Stelle sicher, dass wir auf dem neuesten Stand sind
+        # Hole neueste Änderungen
+        echo "=== Hole neueste Änderungen von GitHub ==="
         git fetch origin main
         
-        # Reset auf origin/main um sicherzustellen, dass wir den aktuellen Stand haben
-        git reset --hard origin/main
+        # Zeige Unterschiede
+        echo "=== Lokale vs Remote status.json ==="
+        git diff origin/main -- status.json || true
         
-        # Führe das Python-Skript erneut aus, um die Dateien zu aktualisieren
-        # (Falls sie durch den Reset verloren gingen)
-        python check_lse.py || true
+        # Merge-Strategie: Bei Konflikten nehmen wir unsere Version (die neueste)
+        git checkout --ours status.json 2>/dev/null || true
+        git checkout --ours history.json 2>/dev/null || true
         
-        # Füge die aktualisierten Dateien hinzu
+        # Stage die Dateien
         git add status.json history.json
         
-        # Zeige was geändert wurde
-        echo "=== Git Status ==="
-        git status
-        
-        # Committe nur wenn es Änderungen gibt
-        if ! git diff --cached --quiet; then
-          echo "=== Änderungen gefunden, committe... ==="
-          git commit -m "Update status and history [skip ci]"
-          
-          # Push mit Force-with-lease (sicherer als force)
-          echo "=== Pushe Änderungen... ==="
-          git push origin main --force-with-lease || {
-            echo "=== Push fehlgeschlagen, versuche Pull und erneuten Push ==="
-            git pull origin main --rebase
-            git push origin main
-          }
-        else
+        # Prüfe ob es wirklich Änderungen gibt
+        if git diff --cached --quiet; then
           echo "=== Keine Änderungen zu committen ==="
+        else
+          echo "=== Committe Änderungen ==="
+          # Zeige was committet wird
+          git diff --cached --stat
+          
+          # Committe mit timestamp
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          git commit -m "Update status and history [skip ci] - $TIMESTAMP"
+          
+          # Versuche zu pushen mit verschiedenen Strategien
+          echo "=== Versuche Push (Versuch 1: Normal) ==="
+          if git push origin main; then
+            echo "✅ Push erfolgreich!"
+          else
+            echo "=== Push fehlgeschlagen, versuche Rebase (Versuch 2) ==="
+            git fetch origin main
+            git rebase origin/main
+            if git push origin main; then
+              echo "✅ Push nach Rebase erfolgreich!"
+            else
+              echo "=== Rebase fehlgeschlagen, versuche Force-with-lease (Versuch 3) ==="
+              git push origin main --force-with-lease
+              echo "✅ Force-with-lease Push erfolgreich!"
+            fi
+          fi
+        fi
+        
+        # Finaler Status
+        echo "=== Finaler Git Status ==="
+        git status
+        echo ""
+        echo "=== Finale status.json ==="
+        cat status.json
+        echo ""
+        echo "=== Finale history.json (letzte 5 Einträge) ==="
+        python -c "
+        import json
+        with open('history.json', 'r') as f:
+            history = json.load(f)
+            changes = history.get('changes', [])
+            print(f'Gesamt {len(changes)} Änderungen')
+            for change in changes[-5:]:
+                print(f\"  {change.get('from')} → {change.get('date')} am {change.get('timestamp')}\")
+        "
+    
+    # Zusätzlicher Sicherheitscheck
+    - name: Verify push success
+      run: |
+        echo "=== Verifiziere dass Push erfolgreich war ==="
+        git fetch origin main
+        
+        # Vergleiche lokale und remote Version
+        LOCAL_HASH=$(git rev-parse HEAD)
+        REMOTE_HASH=$(git rev-parse origin/main)
+        
+        if [ "$LOCAL_HASH" = "$REMOTE_HASH" ]; then
+          echo "✅ Lokale und Remote Version sind identisch!"
+        else
+          echo "⚠️  Warnung: Lokale und Remote Version unterscheiden sich"
+          echo "Local:  $LOCAL_HASH"
+          echo "Remote: $REMOTE_HASH"
         fi
