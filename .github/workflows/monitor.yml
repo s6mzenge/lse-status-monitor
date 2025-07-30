@@ -101,24 +101,34 @@ jobs:
             print('  Backup wiederhergestellt')
             sys.exit(1)
         "
-    
     - name: Update status and history files
       run: |
         # Git Konfiguration
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         
-        # Hole neueste Änderungen
+        # WICHTIG: Stelle sicher, dass wir auf dem neuesten Stand sind
         echo "=== Hole neueste Änderungen von GitHub ==="
         git fetch origin main
+        git reset --hard origin/main
         
-        # Zeige Unterschiede
-        echo "=== Lokale vs Remote status.json ==="
-        git diff origin/main -- status.json || true
+        # Kopiere unsere aktualisierten Dateien zurück
+        cp status.json.backup status.json.current 2>/dev/null || true
+        cp history.json.backup history.json.current 2>/dev/null || true
         
-        # Merge-Strategie: Bei Konflikten nehmen wir unsere Version (die neueste)
-        git checkout --ours status.json 2>/dev/null || true
-        git checkout --ours history.json 2>/dev/null || true
+        # Vergleiche mit Remote
+        echo "=== Vergleiche lokale Dateien mit Remote ==="
+        if [ -f status.json.current ]; then
+          echo "Lokale status.json:"
+          cat status.json.current
+          mv status.json.current status.json
+        fi
+        
+        if [ -f history.json.current ]; then
+          echo "Lokale history.json:"
+          cat history.json.current
+          mv history.json.current history.json
+        fi
         
         # Stage die Dateien
         git add status.json history.json
@@ -135,22 +145,19 @@ jobs:
           TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
           git commit -m "Update status and history [skip ci] - $TIMESTAMP"
           
-          # Versuche zu pushen mit verschiedenen Strategien
-          echo "=== Versuche Push (Versuch 1: Normal) ==="
-          if git push origin main; then
-            echo "✅ Push erfolgreich!"
-          else
-            echo "=== Push fehlgeschlagen, versuche Rebase (Versuch 2) ==="
-            git fetch origin main
-            git rebase origin/main
+          # Push mit Retry-Logik
+          echo "=== Push zu GitHub ==="
+          for i in 1 2 3; do
+            echo "Push Versuch $i..."
             if git push origin main; then
-              echo "✅ Push nach Rebase erfolgreich!"
+              echo "✅ Push erfolgreich!"
+              break
             else
-              echo "=== Rebase fehlgeschlagen, versuche Force-with-lease (Versuch 3) ==="
-              git push origin main --force-with-lease
-              echo "✅ Force-with-lease Push erfolgreich!"
+              echo "❌ Push fehlgeschlagen, warte 5 Sekunden..."
+              sleep 5
+              git pull --rebase origin main
             fi
-          fi
+          done
         fi
         
         # Finaler Status
