@@ -101,6 +101,7 @@ jobs:
             print('  Backup wiederhergestellt')
             sys.exit(1)
         "
+    
     - name: Update status and history files
       run: |
         # Git Konfiguration
@@ -159,24 +160,6 @@ jobs:
             fi
           done
         fi
-        
-        # Finaler Status
-        echo "=== Finaler Git Status ==="
-        git status
-        echo ""
-        echo "=== Finale status.json ==="
-        cat status.json
-        echo ""
-        echo "=== Finale history.json (letzte 5 Einträge) ==="
-        python -c "
-        import json
-        with open('history.json', 'r') as f:
-            history = json.load(f)
-            changes = history.get('changes', [])
-            print(f'Gesamt {len(changes)} Änderungen')
-            for change in changes[-5:]:
-                print(f\"  {change.get('from')} → {change.get('date')} am {change.get('timestamp')}\")
-        "
     
     # Zusätzlicher Sicherheitscheck
     - name: Verify push success
