@@ -111,25 +111,26 @@ jobs:
         # WICHTIG: Stelle sicher, dass wir auf dem neuesten Stand sind
         echo "=== Hole neueste Änderungen von GitHub ==="
         git fetch origin main
+        
+        # Speichere die aktualisierten Dateien (NICHT die Backups!)
+        echo "=== Sichere aktualisierte Dateien ==="
+        cp status.json status.json.new
+        cp history.json history.json.new
+        
+        # Reset auf origin/main
         git reset --hard origin/main
         
-        # Kopiere unsere aktualisierten Dateien zurück
-        cp status.json.backup status.json.current 2>/dev/null || true
-        cp history.json.backup history.json.current 2>/dev/null || true
+        # Kopiere die NEUEN (aktualisierten) Dateien zurück
+        echo "=== Stelle aktualisierte Dateien wieder her ==="
+        cp status.json.new status.json
+        cp history.json.new history.json
         
-        # Vergleiche mit Remote
-        echo "=== Vergleiche lokale Dateien mit Remote ==="
-        if [ -f status.json.current ]; then
-          echo "Lokale status.json:"
-          cat status.json.current
-          mv status.json.current status.json
-        fi
-        
-        if [ -f history.json.current ]; then
-          echo "Lokale history.json:"
-          cat history.json.current
-          mv history.json.current history.json
-        fi
+        # Zeige den Inhalt zur Verifikation
+        echo "=== Aktualisierte status.json ==="
+        cat status.json
+        echo ""
+        echo "=== Aktualisierte history.json ==="
+        cat history.json
         
         # Stage die Dateien
         git add status.json history.json
