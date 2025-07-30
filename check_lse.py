@@ -567,22 +567,41 @@ Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
                 send_telegram(telegram_special)
             
             if emails_sent or os.environ.get('TELEGRAM_BOT_TOKEN'):
+                # KRITISCH: Update Status IMMER nach einer erkannten Änderung
                 # Update Status nur bei erfolgreicher Benachrichtigung
                 status['last_date'] = current_date
-                status['last_check'] = datetime.utcnow().isoformat()  # UTC für Konsistenz
+                status['last_check'] = datetime.utcnow().isoformat()
                 
-                # WICHTIG: Speichere Status und verifiziere
-                if save_status(status):
-                    print("✅ Status wurde aktualisiert und verifiziert.")
-                else:
-                    print("❌ KRITISCHER FEHLER: Status konnte nicht gespeichert werden!")
-                    # Versuche es nochmal
-                    time.sleep(1)
+                # KRITISCH: Speichere Status mehrfach mit Verifikation
+                print("\n🔄 Speichere aktualisierten Status...")
+                save_attempts = 0
+                save_success = False
+                
+                while save_attempts < 3 and not save_success:
+                    save_attempts += 1
+                    print(f"Speicherversuch {save_attempts}/3...")
+                    
                     if save_status(status):
-                        print("✅ Status beim zweiten Versuch gespeichert.")
+                        # Verifiziere durch erneutes Laden
+                        verify_status = load_status()
+                        if verify_status.get('last_date') == current_date:
+                            print(f"✅ Status erfolgreich gespeichert und verifiziert: {current_date}")
+                            save_success = True
+                        else:
+                            print(f"❌ Verifikation fehlgeschlagen! Erwartet: {current_date}, Geladen: {verify_status.get('last_date')}")
                     else:
-                        print("❌ Status konnte auch beim zweiten Versuch nicht gespeichert werden!")
-                        sys.exit(1)  # Beende mit Fehlercode
+                        print(f"❌ Speichern fehlgeschlagen in Versuch {save_attempts}")
+                    
+                    if not save_success and save_attempts < 3:
+                        time.sleep(1)
+                
+                if not save_success:
+                    print("❌ KRITISCHER FEHLER: Status konnte nach 3 Versuchen nicht gespeichert werden!")
+                    sys.exit(1)
+                
+                # Speichere auch die Historie nochmal zur Sicherheit
+                if not save_history(history):
+                    print("❌ Fehler beim erneuten Speichern der Historie!")
             else:
                 print("⚠️  Status wurde NICHT aktualisiert (keine Benachrichtigung erfolgreich)")
         else:
@@ -643,6 +662,13 @@ Mögliche Gründe:
             send_telegram(telegram_warning)
     
     print("\n" + "="*50)
+    
+    # Debug: Zeige finale Dateien
+    print("\n📁 FINALE DATEIEN:")
+    print("=== status.json ===")
+    os.system("cat status.json")
+    print("\n=== history.json (letzte 3 Einträge) ===")
+    os.system("tail -n 20 history.json | head -n 20")
     
     # Finaler Status-Output für Debugging
     print("\n📊 FINALER STATUS:")
