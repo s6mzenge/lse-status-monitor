@@ -51,6 +51,35 @@ def send_telegram(message):
         print(f"❌ Telegram-Fehler: {e}")
         return False
 
+def send_telegram_mama(old_date, new_date):
+    """Sendet eine einfache Nachricht an Mama über separaten Bot"""
+    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN_MAMA')
+    chat_id = os.environ.get('TELEGRAM_CHAT_ID_MAMA')
+    
+    if not bot_token or not chat_id:
+        print("Telegram für Mama nicht konfiguriert")
+        return False
+    
+    try:
+        # Einfache Nachricht ohne HTML-Formatierung
+        message = f"LSE-Datums-Update!\n\nVom: {old_date}\nAuf: {new_date}"
+        
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        data = {
+            "chat_id": chat_id,
+            "text": message
+        }
+        response = requests.post(url, json=data)
+        if response.status_code == 200:
+            print("✅ Telegram-Nachricht an Mama gesendet!")
+            return True
+        else:
+            print(f"❌ Telegram-Fehler (Mama): {response.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Telegram-Fehler (Mama): {e}")
+        return False
+
 def load_status():
     """Lädt Status mit Fehlerbehandlung und Validierung"""
     try:
@@ -470,6 +499,9 @@ def main():
             print("\n🔔 ÄNDERUNG ERKANNT!")
             print(f"   Von: {status['last_date']}")
             print(f"   Auf: {current_date}")
+            
+            # Sende einfache Nachricht an Mama
+            send_telegram_mama(status['last_date'], current_date)
             
             # Speichere in Historie mit UTC Zeit (für Konsistenz)
             history["changes"].append({
