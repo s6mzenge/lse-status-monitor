@@ -52,6 +52,8 @@ jobs:
         EMAIL_TO_3: ${{ secrets.EMAIL_TO_3 }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        TELEGRAM_BOT_TOKEN_MAMA: ${{ secrets.TELEGRAM_BOT_TOKEN_MAMA }}
+        TELEGRAM_CHAT_ID_MAMA: ${{ secrets.TELEGRAM_CHAT_ID_MAMA }}
         # Setze MANUAL_RUN flag für manuelle Ausführungen
         MANUAL_RUN: ${{ github.event_name == 'workflow_dispatch' || github.event.action == 'check-lse-status-manual' }}
       run: |
