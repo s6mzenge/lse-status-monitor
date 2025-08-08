@@ -10,6 +10,10 @@ import numpy as np
 from collections import defaultdict
 import time
 import sys
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from io import BytesIO
+import base64
 
 URL = "https://www.lse.ac.uk/study-at-lse/Graduate/News/Current-processing-times"
 STATUS_FILE = "status.json"
@@ -23,6 +27,153 @@ def get_german_time():
     # Im Winter auf hours=1 ändern
     german_time = utc_time + timedelta(hours=2)
     return german_time
+
+def create_progression_graph(history, current_date, forecast=None):
+    """Erstellt ein Diagramm mit der Progression der Verarbeitungsdaten"""
+    if len(history["changes"]) < 2:
+        return None
+    
+    try:
+        # Matplotlib Style für bessere Optik
+        plt.style.use('seaborn-v0_8-darkgrid')
+        fig, ax = plt.subplots(figsize=(12, 7))
+        
+        # Extrahiere Datenpunkte
+        timestamps = []
+        dates_numeric = []
+        date_labels = []
+        
+        for entry in history["changes"]:
+            timestamp = datetime.fromisoformat(entry["timestamp"])
+            date_days = date_to_days(entry["date"])
+            if date_days is not None:
+                timestamps.append(timestamp)
+                dates_numeric.append(date_days)
+                date_labels.append(entry["date"])
+        
+        # Plot historische Datenpunkte
+        ax.scatter(timestamps, dates_numeric, color='darkblue', s=100, zorder=5, label='Historische Daten', alpha=0.8)
+        
+        # Füge Labels für jeden Punkt hinzu
+        for i, (ts, days, label) in enumerate(zip(timestamps, dates_numeric, date_labels)):
+            ax.annotate(label, (ts, days), xytext=(5, 5), textcoords='offset points', 
+                       fontsize=8, alpha=0.7)
+        
+        # Wenn Regression verfügbar ist, zeichne Trendlinie
+        if forecast and forecast['slope'] > 0:
+            # Erstelle Trendlinie
+            first_timestamp = timestamps[0]
+            x_days = [(ts - first_timestamp).total_seconds() / 86400 for ts in timestamps]
+            
+            # Erweitere die Linie in die Zukunft
+            future_days = 30  # 30 Tage in die Zukunft projizieren
+            last_x = x_days[-1]
+            future_x = np.linspace(0, last_x + future_days, 100)
+            future_y = forecast['slope'] * future_x + (forecast['current_trend_days'] - forecast['slope'] * ((get_german_time() - first_timestamp).total_seconds() / 86400))
+            
+            # Konvertiere zurück zu Timestamps für x-Achse
+            future_timestamps = [first_timestamp + timedelta(days=d) for d in future_x]
+            
+            # Plot Trendlinie
+            ax.plot(future_timestamps, future_y, 'r--', alpha=0.5, linewidth=2, 
+                   label=f'Trend (R²={forecast["r_squared"]:.2f})')
+            
+            # Markiere Zielpunkte (25. und 28. Juli)
+            target_dates = {"25 July": date_to_days("25 July"), "28 July": date_to_days("28 July")}
+            
+            for target_name, target_days in target_dates.items():
+                if target_days:
+                    # Finde wann dieses Datum erreicht wird
+                    days_until = (target_days - forecast['current_trend_days']) / forecast['slope'] if forecast['slope'] > 0 else None
+                    if days_until and days_until > 0:
+                        target_timestamp = get_german_time() + timedelta(days=days_until)
+                        ax.axhline(y=target_days, color='green', linestyle=':', alpha=0.3)
+                        ax.scatter([target_timestamp], [target_days], color='green', s=150, marker='*', 
+                                  zorder=6, alpha=0.7)
+                        ax.annotate(f'{target_name}\n(~{days_until:.0f} Tage)', 
+                                  (target_timestamp, target_days), 
+                                  xytext=(10, 0), textcoords='offset points',
+                                  fontsize=9, color='green', weight='bold')
+        
+        # Markiere aktuelles Datum
+        current_days = date_to_days(current_date)
+        if current_days:
+            ax.axhline(y=current_days, color='blue', linestyle='-', alpha=0.3, linewidth=1)
+            ax.scatter([get_german_time()], [current_days], color='red', s=150, marker='o', 
+                      zorder=7, label=f'Aktuell: {current_date}')
+        
+        # Formatierung
+        ax.set_xlabel('Datum', fontsize=12)
+        ax.set_ylabel('Verarbeitungsdatum (Tage seit 1. Januar)', fontsize=12)
+        ax.set_title('LSE Verarbeitungsdatum - Progression und Prognose', fontsize=14, weight='bold')
+        
+        # X-Achse formatieren
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m'))
+        ax.xaxis.set_major_locator(mdates.DayLocator(interval=2))
+        plt.xticks(rotation=45)
+        
+        # Y-Achse mit Datum-Labels
+        y_ticks = ax.get_yticks()
+        y_labels = []
+        for y in y_ticks:
+            if y >= 0:
+                try:
+                    y_labels.append(days_to_date(int(y)))
+                except:
+                    y_labels.append(str(int(y)))
+            else:
+                y_labels.append('')
+        ax.set_yticklabels(y_labels)
+        
+        # Legende
+        ax.legend(loc='upper left', framealpha=0.9)
+        
+        # Grid
+        ax.grid(True, alpha=0.3)
+        
+        # Layout anpassen
+        plt.tight_layout()
+        
+        # In BytesIO speichern
+        img_buffer = BytesIO()
+        plt.savefig(img_buffer, format='png', dpi=100, bbox_inches='tight')
+        img_buffer.seek(0)
+        plt.close()
+        
+        return img_buffer
+        
+    except Exception as e:
+        print(f"❌ Fehler beim Erstellen des Graphen: {e}")
+        return None
+
+def send_telegram_photo(photo_buffer, caption, parse_mode='HTML'):
+    """Sendet ein Foto über Telegram Bot"""
+    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+    
+    if not bot_token or not chat_id:
+        print("Telegram nicht konfiguriert")
+        return False
+    
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+        files = {'photo': ('graph.png', photo_buffer, 'image/png')}
+        data = {
+            'chat_id': chat_id,
+            'caption': caption,
+            'parse_mode': parse_mode
+        }
+        
+        response = requests.post(url, files=files, data=data)
+        if response.status_code == 200:
+            print("✅ Telegram-Foto gesendet!")
+            return True
+        else:
+            print(f"❌ Telegram-Fehler beim Foto senden: {response.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Telegram-Fehler beim Foto senden: {e}")
+        return False
 
 def send_telegram(message):
     """Sendet eine Nachricht über Telegram Bot"""
@@ -521,7 +672,15 @@ def main():
 <b>Zeitpunkt:</b> {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}{trend_text}
 
 <a href="{URL}">📄 LSE Webseite öffnen</a>"""
+            
+            # Sende Text-Nachricht
             send_telegram(telegram_msg)
+            
+            # Erstelle und sende Graph
+            graph_buffer = create_progression_graph(history, current_date, forecast)
+            if graph_buffer:
+                graph_caption = f"📈 Progression der LSE Verarbeitungsdaten\nAktuell: {current_date}"
+                send_telegram_photo(graph_buffer, graph_caption)
         
         # WICHTIG: Prüfe ob sich das Datum wirklich geändert hat
         if current_date != status['last_date']:
@@ -575,7 +734,7 @@ Link zur Seite: {URL}{manual_hint}"""
             
             # Telegram-Nachricht formatieren
             if not IS_MANUAL:
-                # Automatischer Check: Standard-Änderungsnachricht
+                # Automatischer Check: Standard-Änderungsnachricht mit Graph
                 telegram_msg = f"""<b>🔔 LSE Status Update</b>
 
 <b>ÄNDERUNG ERKANNT!</b>
@@ -588,8 +747,14 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 <a href="{URL}">📄 LSE Webseite öffnen</a>"""
                 
                 send_telegram(telegram_msg)
+                
+                # Sende Graph als separates Bild
+                graph_buffer = create_progression_graph(history, current_date, forecast)
+                if graph_buffer:
+                    graph_caption = f"📈 Progression Update\nNeues Datum: {current_date}"
+                    send_telegram_photo(graph_buffer, graph_caption)
             else:
-                # Manueller Check: Spezielle Nachricht bei Änderung
+                # Manueller Check: Spezielle Nachricht bei Änderung mit Graph
                 telegram_msg = f"""<b>🚨 ÄNDERUNG GEFUNDEN!</b>
 
 Dein manueller Check hat eine Änderung entdeckt!
@@ -605,6 +770,12 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 <a href="{URL}">📄 LSE Webseite öffnen</a>"""
                 
                 send_telegram(telegram_msg)
+                
+                # Sende Graph
+                graph_buffer = create_progression_graph(history, current_date, forecast)
+                if graph_buffer:
+                    graph_caption = f"📈 Änderung erkannt!\nVon {status['last_date']} auf {current_date}"
+                    send_telegram_photo(graph_buffer, graph_caption)
             
             # Sende E-Mails
             emails_sent = False
@@ -620,7 +791,7 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
                 if send_gmail(subject, body_simple, conditional_notify):
                     emails_sent = True
                 
-                # Spezielle Telegram-Nachricht für Zieldatum
+                # Spezielle Telegram-Nachricht für Zieldatum mit Graph
                 telegram_special = f"""<b>🎯 ZIELDATUM ERREICHT!</b>
 
 Das Datum <b>{current_date}</b> wurde erreicht!
@@ -629,6 +800,12 @@ Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
 
 <a href="{URL}">📄 Jetzt zur LSE Webseite</a>"""
                 send_telegram(telegram_special)
+                
+                # Sende speziellen Graph für Zieldatum
+                graph_buffer = create_progression_graph(history, current_date, forecast)
+                if graph_buffer:
+                    graph_caption = f"🎯 ZIELDATUM ERREICHT: {current_date}!"
+                    send_telegram_photo(graph_buffer, graph_caption)
             
             if emails_sent or os.environ.get('TELEGRAM_BOT_TOKEN'):
                 # KRITISCH: Update Status IMMER nach einer erkannten Änderung
