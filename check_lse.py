@@ -535,11 +535,33 @@ def extract_all_other_date(text):
 
 def extract_pre_cas_date(text):
     """Extrahiert das Datum für Pre-CAS"""
-    # Suche nach Pre-CAS Pattern
-    pattern = r'issuing\s+Pre-CAS.*?criteria\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-    match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+    # Pattern 1: Suche nach Pre-CAS mit Datum in der gleichen Zeile
+    pattern1 = r'issuing\s+Pre-CAS.*?criteria\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+    match = re.search(pattern1, text, re.IGNORECASE | re.DOTALL)
     if match:
         return match.group(1).strip()
+    
+    # Pattern 2: Suche nach Pre-CAS gefolgt von Datum in der Nähe (für Tabellen)
+    # Bereinige Text von mehrfachen Leerzeichen/Zeilenumbrüchen
+    clean_text = ' '.join(text.split())
+    
+    # Suche nach Pre-CAS und dem nächsten Datum danach
+    pattern2 = r'issuing\s+Pre-CAS\s+for\s+offer\s+holders.*?criteria\s+on:?\s*([^.]*?)(?:Please|We\s+are|$)'
+    match = re.search(pattern2, clean_text, re.IGNORECASE)
+    if match:
+        potential_text = match.group(1)
+        # Extrahiere das erste Datum aus diesem Bereich
+        date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+        date_match = re.search(date_pattern, potential_text, re.IGNORECASE)
+        if date_match:
+            return date_match.group(1).strip()
+    
+    # Pattern 3: Allgemeinere Suche - Pre-CAS gefolgt von einem Datum innerhalb von ~100 Zeichen
+    pattern3 = r'Pre-CAS[^0-9]{0,100}?(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+    match = re.search(pattern3, clean_text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    
     return None
 
 def extract_cas_date(text):
