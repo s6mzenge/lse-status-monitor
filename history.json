@@ -40,5 +40,13 @@
       "date": "22 July",
       "from": "19 July"
     }
+  ],
+  "pre_cas_changes": [],
+  "cas_changes": [
+    {
+      "timestamp": "2025-08-10T23:16:42.230373",
+      "date": "04 August",
+      "from": null
+    }
   ]
 }
