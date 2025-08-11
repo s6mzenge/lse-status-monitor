@@ -480,7 +480,7 @@ def create_enhanced_forecast_text(forecast):
         text += f"\n⚠️ Erweiterte Prognose fehlgeschlagen: {str(_e)[:200]}\n"
         import traceback
         traceback.print_exc()
-
+    return text
 
 def create_forecast_text(forecast):
     """Wrapper für Rückwärtskompatibilität - ruft erweiterte Version auf"""
@@ -1242,7 +1242,7 @@ def main():
         if IS_MANUAL:
             # Berechne aktuellen Trend und erstelle vollständige Prognose
             forecast = calculate_regression_forecast(history)
-            forecast_text = create_forecast_text(forecast)
+            forecast_text = create_forecast_text(forecast) or ""
             
             telegram_msg = f"""<b>📊 LSE Status Check Ergebnis</b>
 
@@ -1289,7 +1289,7 @@ def main():
             
             # Berechne Prognose
             forecast = calculate_regression_forecast(history)
-            forecast_text = create_forecast_text(forecast)
+            forecast_text = create_forecast_text(forecast) or ""
             
             # Erstelle E-Mail-Inhalt
             subject = f"LSE Status Update: Neues Datum {current_date}"
