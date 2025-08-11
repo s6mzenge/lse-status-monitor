@@ -590,9 +590,6 @@ def create_progression_graph(history, current_date, forecast=None):
 
             future_y = np.array([forecast['slope'] * business_days_elapsed(first_timestamp, ts) + intercept
                      for ts in future_timestamps])
-            upper_bound = future_y + CONFIDENCE_LEVEL * std_error
-            lower_bound = future_y - CONFIDENCE_LEVEL * std_error
-
             
             # Zeige Konfidenzintervall wenn verfügbar
             if 'std_error' in forecast and ADVANCED_REGRESSION:
