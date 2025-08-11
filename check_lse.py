@@ -451,13 +451,26 @@ def _median(xs):
         return xs[mid]
     return 0.5 * (xs[mid-1] + xs[mid])
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 def _to_aware_berlin(dt):
+    """Nimmt datetime ODER ISO-String (auch mit 'Z') und gibt tz-aware Europe/Berlin zurück."""
     if dt is None:
         return None
-    tz = ZoneInfo("Europe/Berlin")
+    tz_berlin = ZoneInfo("Europe/Berlin")
+    # Strings sauber nach datetime wandeln
+    if isinstance(dt, str):
+        s = dt.replace('Z', '+00:00')
+        try:
+            dt = datetime.fromisoformat(s)
+        except Exception:
+            # Fallback: behandle als naive UTC
+            return datetime.now(tz_berlin)
+    # Naive Zeitstempel als UTC interpretieren
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=tz)
-    return dt.astimezone(tz)
+        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+    return dt.astimezone(tz_berlin)
 
 def _hours_since(ts, now=None):
     if ts is None:
@@ -654,7 +667,12 @@ def create_enhanced_forecast_text(forecast):
 
     # Neue (integrierte) Metriken + echte ETA-Datetimes
     hist = get_history()
-    new_s = compute_integrated_model_metrics(hist)
+    try:
+        new_s = compute_integrated_model_metrics(hist)
+    except Exception as e:
+        print(f"⚠️ Integriertes Modell temporär deaktiviert: {e}")
+        new_s = None
+
 
     if not new_s:
         # Fallback: nur ALT kompakt ausgeben
