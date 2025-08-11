@@ -467,10 +467,14 @@ def create_enhanced_forecast_text(forecast):
             # Zu wenig Daten für integrierte Regression
             pass
 
+    except ImportError as _e:
+        print(f"❌ Import-Fehler bei erweiterter Prognose: {_e}")
+        text += "\n⚠️ Erweiterte Prognose nicht verfügbar (Modul fehlt)\n"
     except Exception as _e:
-        # Wenn Modul nicht vorhanden oder Fehler: einfach nichts ergänzen
-        pass
-    return text
+        print(f"❌ Fehler bei erweiterter Prognose: {type(_e).__name__}: {str(_e)}")
+        text += f"\n⚠️ Erweiterte Prognose fehlgeschlagen: {str(_e)[:200]}\n"
+        import traceback
+        traceback.print_exc()
 
 
 def create_forecast_text(forecast):
