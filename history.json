@@ -54,5 +54,12 @@
       "date": "04 August",
       "from": null
     }
+  ],
+  "observations": [
+    {
+      "timestamp": "2025-08-11T08:00:00+00:00",
+      "date": "22 July",
+      "kind": "heartbeat"
+    }
   ]
 }
