@@ -225,6 +225,34 @@ def _iter_observations_or_changes(history: Dict) -> List[Dict]:
     out.sort(key=lambda r: r["timestamp"])
     return out
 
+def _iter_changes_only(history: Dict) -> List[Dict]:
+    """
+    Gibt nur echte Änderungen zurück (keine Heartbeats), normiert Timestamps auf ISO-UTC,
+    validiert Daten, sortiert aufsteigend.
+    """
+    out: List[Dict] = []
+    src = history.get("changes", []) or []
+    for e in src:
+        if not isinstance(e, dict):
+            continue
+        ts = e.get("timestamp")
+        dt = e.get("date")
+        if not ts or not dt:
+            continue
+        if not re.match(r'^\d{1,2}\s+\w+$', str(dt)):
+            continue
+        try:
+            s = str(ts).replace('Z', '+00:00')
+            dt_obj = datetime.fromisoformat(s)
+            if dt_obj.tzinfo is None:
+                dt_obj = dt_obj.replace(tzinfo=ZoneInfo("UTC"))
+            ts_iso = dt_obj.astimezone(ZoneInfo("UTC")).isoformat()
+        except Exception:
+            continue
+        out.append({"timestamp": ts_iso, "date": dt, "kind": "change"})
+    out.sort(key=lambda r: r["timestamp"])
+    return out
+
 def calculate_advanced_regression_forecast(history, current_date=None):
     """
     Erweiterte Regression mit mehreren Verbesserungen:
@@ -233,17 +261,20 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     - Gewichtete Regression (neuere Daten wichtiger)
     - Konfidenzintervalle
     - Arbeitstagberechnung
+    
+    WICHTIG: Diese (alte) Regression verwendet nur echte Änderungen, keine Heartbeats!
     """
     np = _get_numpy()  # Lazy load numpy
     
-    source_data = _iter_observations_or_changes(history)
+    # GEÄNDERT: Verwende nur echte Änderungen, keine Heartbeats
+    source_data = _iter_changes_only(history)
     if len(source_data) < REGRESSION_MIN_POINTS:
         return None
     
     # Extrahiere Datenpunkte
     data_points = []
     first_timestamp = None
-    for entry in _iter_observations_or_changes(history):
+    for entry in source_data:  # GEÄNDERT: Verwende source_data (nur Änderungen)
         try:
             timestamp = datetime.fromisoformat(entry["timestamp"])
             date_days = date_to_days(entry["date"])
@@ -879,18 +910,15 @@ def create_progression_graph(history, current_date, forecast=None):
         return None
 
     change_ts, change_y, change_labels = [], [], []
-    hb_ts, hb_y = [], []
-
+    
+    # Sammle alle echten Änderungen
     for e in entries:
         try:
             ts = _to_naive_berlin(datetime.fromisoformat(e["timestamp"]))
             yv = date_to_days(e["date"])
             if ts is None or yv is None:
                 continue
-            if e.get("kind") == "heartbeat":
-                hb_ts.append(ts)
-                hb_y.append(yv)   # Heartbeat liegt auf dem zuletzt bekannten y-Wert
-            else:
+            if e.get("kind") != "heartbeat":
                 change_ts.append(ts); change_y.append(yv); change_labels.append(e["date"])
         except Exception:
             continue
@@ -900,6 +928,32 @@ def create_progression_graph(history, current_date, forecast=None):
 
     ordered = sorted(zip(change_ts, change_y, change_labels), key=lambda r: r[0])
     change_ts, change_y, change_labels = [list(t) for t in zip(*ordered)]
+    
+    # GEÄNDERT: Filtere Heartbeats - nur den neuesten nach der letzten echten Änderung
+    hb_ts, hb_y = [], []
+    if change_ts:  # Wenn es echte Änderungen gibt
+        last_change_ts = change_ts[-1]  # Letzter Change-Zeitpunkt
+        
+        # Sammle alle Heartbeats nach der letzten Änderung
+        heartbeats_after_last_change = []
+        for e in entries:
+            try:
+                if e.get("kind") == "heartbeat":
+                    ts = _to_naive_berlin(datetime.fromisoformat(e["timestamp"]))
+                    yv = date_to_days(e["date"])
+                    if ts is None or yv is None:
+                        continue
+                    if ts > last_change_ts:  # Nur Heartbeats nach letzter Änderung
+                        heartbeats_after_last_change.append((ts, yv))
+            except Exception:
+                continue
+        
+        # Wähle nur den neuesten Heartbeat (falls vorhanden)
+        if heartbeats_after_last_change:
+            heartbeats_after_last_change.sort(key=lambda x: x[0])  # Sortiere nach Zeitstempel
+            latest_hb_ts, latest_hb_y = heartbeats_after_last_change[-1]  # Neuester
+            hb_ts = [latest_hb_ts]
+            hb_y = [latest_hb_y]
 
     now_de  = _to_naive_berlin(get_german_time())
     year_ref = now_de.year
