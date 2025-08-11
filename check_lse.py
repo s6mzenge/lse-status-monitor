@@ -14,6 +14,19 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from io import BytesIO
 import base64
+import warnings
+warnings.filterwarnings('ignore')
+
+# Versuche erweiterte Bibliotheken zu importieren
+try:
+    from scipy import stats
+    from sklearn.linear_model import HuberRegressor, RANSACRegressor
+    from sklearn.preprocessing import PolynomialFeatures
+    from sklearn.pipeline import make_pipeline
+    ADVANCED_REGRESSION = True
+except ImportError:
+    print("⚠️ Erweiterte Regression nicht verfügbar. Installiere: pip install scikit-learn scipy")
+    ADVANCED_REGRESSION = False
 
 URL = "https://www.lse.ac.uk/study-at-lse/Graduate/News/Current-processing-times"
 STATUS_FILE = "status.json"
@@ -27,6 +40,291 @@ def get_german_time():
     # Im Winter auf hours=1 ändern
     german_time = utc_time + timedelta(hours=2)
     return german_time
+
+def calculate_advanced_regression_forecast(history, current_date=None):
+    """
+    Erweiterte Regression mit mehreren Verbesserungen:
+    - Outlier-resistente Regression
+    - Polynomielle Regression 
+    - Gewichtete Regression (neuere Daten wichtiger)
+    - Konfidenzintervalle
+    - Arbeitstagberechnung
+    """
+    if len(history["changes"]) < 2:
+        return None
+    
+    # Extrahiere Datenpunkte
+    data_points = []
+    first_timestamp = None
+    
+    for entry in history["changes"]:
+        try:
+            timestamp = datetime.fromisoformat(entry["timestamp"])
+            date_days = date_to_days(entry["date"])
+            
+            if date_days is None:
+                continue
+                
+            if first_timestamp is None:
+                first_timestamp = timestamp
+                
+            days_elapsed = (timestamp - first_timestamp).total_seconds() / 86400
+            data_points.append((days_elapsed, date_days, timestamp))
+        except Exception as e:
+            print(f"⚠️ Fehler beim Verarbeiten: {e}")
+            continue
+    
+    if len(data_points) < 2:
+        return None
+    
+    x = np.array([p[0] for p in data_points]).reshape(-1, 1)
+    y = np.array([p[1] for p in data_points])
+    timestamps = [p[2] for p in data_points]
+    
+    # 1. STANDARD LINEARE REGRESSION (wie bisher)
+    n = len(x)
+    x_flat = x.flatten()
+    slope_linear = (n * np.sum(x_flat * y) - np.sum(x_flat) * np.sum(y)) / (n * np.sum(x_flat**2) - np.sum(x_flat)**2)
+    intercept_linear = (np.sum(y) - slope_linear * np.sum(x_flat)) / n
+    y_pred_linear = slope_linear * x_flat + intercept_linear
+    
+    # R² für lineare Regression
+    ss_res = np.sum((y - y_pred_linear)**2)
+    ss_tot = np.sum((y - np.mean(y))**2)
+    r2_linear = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+    
+    # Initialisiere Variablen für beste Modellauswahl
+    best_slope = slope_linear
+    best_intercept = intercept_linear
+    best_r2 = r2_linear
+    best_name = "Linear"
+    
+    models_comparison = {
+        "linear": {"slope": slope_linear, "r2": r2_linear}
+    }
+    
+    if ADVANCED_REGRESSION:
+        # 2. ROBUST REGRESSION (Outlier-resistent)
+        try:
+            huber = HuberRegressor(epsilon=1.5)
+            huber.fit(x, y)
+            slope_robust = huber.coef_[0]
+            intercept_robust = huber.intercept_
+            y_pred_robust = huber.predict(x)
+            r2_robust = 1 - np.sum((y - y_pred_robust)**2) / ss_tot if ss_tot > 0 else 0
+            models_comparison["robust"] = {"slope": slope_robust, "r2": r2_robust}
+            
+            if r2_robust > best_r2:
+                best_slope = slope_robust
+                best_intercept = intercept_robust
+                best_r2 = r2_robust
+                best_name = "Robust"
+        except:
+            pass
+        
+        # 3. GEWICHTETE REGRESSION (neuere Daten wichtiger)
+        try:
+            weights = np.exp(x_flat / np.max(x_flat) * 2)  # Exponentiell steigende Gewichte
+            weighted_slope, weighted_intercept = np.polyfit(x_flat, y, 1, w=weights)
+            y_pred_weighted = weighted_slope * x_flat + weighted_intercept
+            r2_weighted = 1 - np.sum((y - y_pred_weighted)**2) / ss_tot if ss_tot > 0 else 0
+            models_comparison["weighted"] = {"slope": weighted_slope, "r2": r2_weighted}
+            
+            if r2_weighted > best_r2:
+                best_slope = weighted_slope
+                best_intercept = weighted_intercept
+                best_r2 = r2_weighted
+                best_name = "Gewichtet"
+        except:
+            pass
+        
+        # 4. POLYNOMIELLE REGRESSION (Grad 2) - nur für Information
+        if len(data_points) >= 4:
+            try:
+                poly_model = make_pipeline(PolynomialFeatures(2), HuberRegressor())
+                poly_model.fit(x, y)
+                y_pred_poly = poly_model.predict(x)
+                r2_poly = 1 - np.sum((y - y_pred_poly)**2) / ss_tot if ss_tot > 0 else 0
+                models_comparison["polynomial"] = {"r2": r2_poly}
+            except:
+                pass
+    
+    # 5. MOVING AVERAGE der Geschwindigkeit
+    velocities = []
+    if len(data_points) >= 3:
+        for i in range(1, len(data_points)):
+            dx = data_points[i][0] - data_points[i-1][0]
+            dy = data_points[i][1] - data_points[i-1][1]
+            if dx > 0:
+                velocities.append(dy / dx)
+        
+        if velocities:
+            # Verwende die letzten 3 Geschwindigkeiten für kurzfristigen Trend
+            recent_velocities = velocities[-3:] if len(velocities) >= 3 else velocities
+            recent_avg_velocity = np.mean(recent_velocities)
+            
+            if ADVANCED_REGRESSION:
+                # Gewichteter Moving Average (neuere wichtiger)
+                weights_ma = np.exp(np.linspace(0, 2, len(velocities)))
+                weighted_avg_velocity = np.average(velocities, weights=weights_ma)
+            else:
+                weighted_avg_velocity = np.mean(velocities)
+        else:
+            recent_avg_velocity = best_slope
+            weighted_avg_velocity = best_slope
+    else:
+        recent_avg_velocity = best_slope
+        weighted_avg_velocity = best_slope
+    
+    # 6. KONFIDENZINTERVALLE berechnen
+    residuals = y - (best_slope * x_flat + best_intercept)
+    std_error = np.std(residuals)
+    
+    # 7. PROGNOSEN
+    current_time = get_german_time()
+    current_days_elapsed = (current_time - first_timestamp).total_seconds() / 86400
+    current_predicted_days = best_slope * current_days_elapsed + best_intercept
+    
+    # Zieldaten
+    target_25_days = date_to_days("25 July")
+    target_28_days = date_to_days("28 July")
+    
+    predictions = {}
+    days_until_25 = None
+    days_until_28 = None
+    
+    for target_name, target_days in [("25 July", target_25_days), ("28 July", target_28_days)]:
+        if target_days and best_slope > 0:
+            days_until = (target_days - current_predicted_days) / best_slope
+            
+            # Konfidenzintervall (95%)
+            confidence_margin = 1.96 * std_error / best_slope if best_slope > 0 else 0
+            days_until_lower = max(0, days_until - confidence_margin)
+            days_until_upper = days_until + confidence_margin
+            
+            predictions[target_name] = {
+                "days": days_until,
+                "days_lower": days_until_lower,
+                "days_upper": days_until_upper,
+                "date": current_time + timedelta(days=days_until) if days_until > 0 else None,
+                "date_lower": current_time + timedelta(days=days_until_upper) if days_until_upper > 0 else None,
+                "date_upper": current_time + timedelta(days=days_until_lower) if days_until_lower > 0 else None,
+            }
+            
+            # Für Legacy-Kompatibilität
+            if target_name == "25 July":
+                days_until_25 = days_until
+            elif target_name == "28 July":
+                days_until_28 = days_until
+    
+    # 8. TREND-ANALYSE
+    trend_analysis = "unbekannt"
+    if len(velocities) >= 2:
+        # Ist der Trend beschleunigend oder verlangsamend?
+        recent_acceleration = recent_avg_velocity - weighted_avg_velocity
+        if recent_acceleration > 0.1:
+            trend_analysis = "beschleunigend"
+        elif recent_acceleration < -0.1:
+            trend_analysis = "verlangsamend"
+        else:
+            trend_analysis = "konstant"
+    
+    return {
+        # Basis-Informationen (für Kompatibilität)
+        "slope": best_slope,
+        "r_squared": best_r2,
+        "current_trend_days": current_predicted_days,
+        "data_points": len(data_points),
+        "days_until_25_july": days_until_25,
+        "days_until_28_july": days_until_28,
+        
+        # Erweiterte Informationen
+        "model_name": best_name,
+        "std_error": std_error,
+        "trend_analysis": trend_analysis,
+        "recent_velocity": recent_avg_velocity,
+        "models": models_comparison,
+        "predictions": predictions,
+    }
+
+def calculate_regression_forecast(history):
+    """Wrapper-Funktion für Rückwärtskompatibilität - ruft die erweiterte Version auf"""
+    return calculate_advanced_regression_forecast(history)
+
+def create_enhanced_forecast_text(forecast):
+    """Erstellt erweiterten Prognosetext mit mehr Details wenn verfügbar"""
+    if not forecast:
+        return "\n📊 Prognose: Noch nicht genügend Daten für eine zuverlässige Vorhersage."
+    
+    text = "\n📊 PROGNOSE basierend auf bisherigen Änderungen:\n"
+    
+    # Zeige verwendetes Modell wenn erweiterte Regression verfügbar
+    if 'model_name' in forecast and ADVANCED_REGRESSION:
+        text += f"📈 Bestes Modell: {forecast['model_name']} "
+    
+    text += f"(R²={forecast['r_squared']:.2f}, {forecast['data_points']} Datenpunkte)\n\n"
+    
+    if forecast['slope'] <= 0:
+        text += "⚠️ Die Daten zeigen keinen Fortschritt oder sogar Rückschritte.\n"
+    else:
+        text += f"📈 Durchschnittlicher Fortschritt: {forecast['slope']:.1f} Tage pro Tag\n"
+        
+        # Zeige Trend-Analyse wenn verfügbar
+        if 'trend_analysis' in forecast and forecast['trend_analysis'] != "unbekannt":
+            emoji = {"beschleunigend": "🚀", "verlangsamend": "🐌", "konstant": "➡️"}
+            text += f"{emoji.get(forecast['trend_analysis'], '❓')} Trend: {forecast['trend_analysis'].upper()}\n"
+        
+        text += "\n"
+        
+        # Verwende erweiterte Prognosen wenn verfügbar
+        if 'predictions' in forecast and forecast['predictions']:
+            for target_name in ["25 July", "28 July"]:
+                if target_name in forecast['predictions']:
+                    pred = forecast['predictions'][target_name]
+                    if pred['days'] and pred['days'] > 0:
+                        date_pred = get_german_time() + timedelta(days=pred['days'])
+                        text += f"📅 {target_name} wird voraussichtlich erreicht:\n"
+                        text += f"   • In {pred['days']:.0f} Tagen"
+                        
+                        # Zeige Konfidenzintervall wenn verfügbar
+                        if 'days_lower' in pred and 'days_upper' in pred and ADVANCED_REGRESSION:
+                            text += f" ({pred['days_lower']:.0f}-{pred['days_upper']:.0f} Tage)\n"
+                        else:
+                            text += "\n"
+                        
+                        text += f"   • Am {date_pred.strftime('%d. %B %Y')}\n\n"
+        else:
+            # Fallback auf alte Methode
+            if forecast.get('days_until_25_july') is not None and forecast['days_until_25_july'] > 0:
+                date_25 = get_german_time() + timedelta(days=forecast['days_until_25_july'])
+                text += f"📅 25 July wird voraussichtlich erreicht:\n"
+                text += f"   • In {forecast['days_until_25_july']:.0f} Tagen\n"
+                text += f"   • Am {date_25.strftime('%d. %B %Y')}\n\n"
+            
+            if forecast.get('days_until_28_july') is not None and forecast['days_until_28_july'] > 0:
+                date_28 = get_german_time() + timedelta(days=forecast['days_until_28_july'])
+                text += f"📅 28 July wird voraussichtlich erreicht:\n"
+                text += f"   • In {forecast['days_until_28_july']:.0f} Tagen\n"
+                text += f"   • Am {date_28.strftime('%d. %B %Y')}\n\n"
+        
+        # Qualitätshinweis
+        if forecast['r_squared'] < 0.5:
+            text += "⚠️ Hinweis: Die Vorhersage ist unsicher (niedrige Korrelation).\n"
+        elif forecast['r_squared'] > 0.8:
+            text += "✅ Die Vorhersage basiert auf einem stabilen Trend.\n"
+        
+        # Zeige Modellvergleich wenn mehrere Modelle verfügbar
+        if ADVANCED_REGRESSION and 'models' in forecast and len(forecast['models']) > 1:
+            text += "\n🔬 Modell-Vergleich:\n"
+            for name, data in sorted(forecast['models'].items(), key=lambda x: x[1].get('r2', 0), reverse=True):
+                if 'r2' in data:
+                    text += f"   • {name.capitalize()}: R²={data['r2']:.3f}\n"
+    
+    return text
+
+def create_forecast_text(forecast):
+    """Wrapper für Rückwärtskompatibilität - ruft erweiterte Version auf"""
+    return create_enhanced_forecast_text(forecast)
 
 def create_progression_graph(history, current_date, forecast=None):
     """Erstellt ein Diagramm mit der Progression der Verarbeitungsdaten"""
@@ -74,26 +372,53 @@ def create_progression_graph(history, current_date, forecast=None):
             # Konvertiere zurück zu Timestamps für x-Achse
             future_timestamps = [first_timestamp + timedelta(days=d) for d in future_x]
             
-            # Plot Trendlinie
-            ax.plot(future_timestamps, future_y, 'r--', alpha=0.5, linewidth=2, 
-                   label=f'Trend (R²={forecast["r_squared"]:.2f})')
+            # Plot Trendlinie mit Modellname wenn verfügbar
+            model_label = f'Trend ({forecast.get("model_name", "Linear")}, R²={forecast["r_squared"]:.2f})'
+            ax.plot(future_timestamps, future_y, 'r--', alpha=0.5, linewidth=2, label=model_label)
+            
+            # Zeige Konfidenzintervall wenn verfügbar
+            if 'std_error' in forecast and ADVANCED_REGRESSION:
+                std_error = forecast['std_error']
+                upper_bound = future_y + 1.96 * std_error
+                lower_bound = future_y - 1.96 * std_error
+                ax.fill_between(future_timestamps, lower_bound, upper_bound, 
+                               color='red', alpha=0.1, label='95% Konfidenzintervall')
             
             # Markiere Zielpunkte (25. und 28. Juli)
             target_dates = {"25 July": date_to_days("25 July"), "28 July": date_to_days("28 July")}
             
             for target_name, target_days in target_dates.items():
                 if target_days:
-                    # Finde wann dieses Datum erreicht wird
-                    days_until = (target_days - forecast['current_trend_days']) / forecast['slope'] if forecast['slope'] > 0 else None
-                    if days_until and days_until > 0:
-                        target_timestamp = get_german_time() + timedelta(days=days_until)
-                        ax.axhline(y=target_days, color='green', linestyle=':', alpha=0.3)
-                        ax.scatter([target_timestamp], [target_days], color='green', s=150, marker='*', 
-                                  zorder=6, alpha=0.7)
-                        ax.annotate(f'{target_name}\n(~{days_until:.0f} Tage)', 
-                                  (target_timestamp, target_days), 
-                                  xytext=(10, 0), textcoords='offset points',
-                                  fontsize=9, color='green', weight='bold')
+                    # Verwende erweiterte Prognosen wenn verfügbar
+                    if 'predictions' in forecast and target_name in forecast['predictions']:
+                        pred = forecast['predictions'][target_name]
+                        if pred['days'] and pred['days'] > 0:
+                            target_timestamp = get_german_time() + timedelta(days=pred['days'])
+                            ax.axhline(y=target_days, color='green', linestyle=':', alpha=0.3)
+                            ax.scatter([target_timestamp], [target_days], color='green', s=150, marker='*', 
+                                      zorder=6, alpha=0.7)
+                            
+                            # Zeige Konfidenzintervall wenn verfügbar
+                            if 'days_lower' in pred and 'days_upper' in pred and ADVANCED_REGRESSION:
+                                label_text = f'{target_name}\n({pred["days"]:.0f} Tage\n±{(pred["days_upper"]-pred["days_lower"])/2:.0f})'
+                            else:
+                                label_text = f'{target_name}\n(~{pred["days"]:.0f} Tage)'
+                            
+                            ax.annotate(label_text, (target_timestamp, target_days), 
+                                      xytext=(10, 0), textcoords='offset points',
+                                      fontsize=9, color='green', weight='bold')
+                    else:
+                        # Fallback auf alte Methode
+                        days_until_key = f'days_until_{target_name.lower().replace(" ", "_")}'
+                        if days_until_key in forecast and forecast[days_until_key] and forecast[days_until_key] > 0:
+                            target_timestamp = get_german_time() + timedelta(days=forecast[days_until_key])
+                            ax.axhline(y=target_days, color='green', linestyle=':', alpha=0.3)
+                            ax.scatter([target_timestamp], [target_days], color='green', s=150, marker='*', 
+                                      zorder=6, alpha=0.7)
+                            ax.annotate(f'{target_name}\n(~{forecast[days_until_key]:.0f} Tage)', 
+                                      (target_timestamp, target_days), 
+                                      xytext=(10, 0), textcoords='offset points',
+                                      fontsize=9, color='green', weight='bold')
         
         # Markiere aktuelles Datum
         current_days = date_to_days(current_date)
@@ -105,7 +430,12 @@ def create_progression_graph(history, current_date, forecast=None):
         # Formatierung
         ax.set_xlabel('Datum', fontsize=12)
         ax.set_ylabel('Verarbeitungsdatum (Tage seit 1. Januar)', fontsize=12)
-        ax.set_title('LSE Verarbeitungsdatum - Progression und Prognose', fontsize=14, weight='bold')
+        
+        # Titel mit Modellinfo wenn verfügbar
+        title = 'LSE Verarbeitungsdatum - Progression und Prognose'
+        if forecast and 'model_name' in forecast and ADVANCED_REGRESSION:
+            title += f' ({forecast["model_name"]} Modell)'
+        ax.set_title(title, fontsize=14, weight='bold')
         
         # X-Achse formatieren
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m'))
@@ -447,78 +777,6 @@ def days_to_date(days):
     target_date = jan_first + timedelta(days=int(days))
     return target_date.strftime("%d %B").lstrip("0")
 
-def calculate_regression_forecast(history):
-    """Berechnet eine lineare Regression und Prognose basierend auf der Historie"""
-    if len(history["changes"]) < 2:
-        return None
-    
-    # Extrahiere Datenpunkte (Zeit in Tagen seit erstem Eintrag, Datum in Tagen seit 1. Januar)
-    data_points = []
-    first_timestamp = None
-    
-    for entry in history["changes"]:
-        try:
-            timestamp = datetime.fromisoformat(entry["timestamp"])
-            date_days = date_to_days(entry["date"])
-            
-            if date_days is None:
-                continue
-                
-            if first_timestamp is None:
-                first_timestamp = timestamp
-                
-            days_elapsed = (timestamp - first_timestamp).total_seconds() / 86400  # Tage seit erstem Eintrag
-            data_points.append((days_elapsed, date_days))
-        except Exception as e:
-            print(f"⚠️ Fehler beim Verarbeiten von Historie-Eintrag: {e}")
-            continue
-    
-    if len(data_points) < 2:
-        return None
-    
-    try:
-        # Lineare Regression
-        x = np.array([p[0] for p in data_points])
-        y = np.array([p[1] for p in data_points])
-        
-        # Berechne Steigung und y-Achsenabschnitt
-        n = len(x)
-        slope = (n * np.sum(x * y) - np.sum(x) * np.sum(y)) / (n * np.sum(x**2) - np.sum(x)**2)
-        intercept = (np.sum(y) - slope * np.sum(x)) / n
-        
-        # Berechne R² für Qualität der Regression
-        y_pred = slope * x + intercept
-        ss_res = np.sum((y - y_pred)**2)
-        ss_tot = np.sum((y - np.mean(y))**2)
-        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-        
-        # Prognose für July 25 und July 28
-        target_25_days = date_to_days("25 July")
-        target_28_days = date_to_days("28 July")
-        
-        if target_25_days is None or target_28_days is None:
-            return None
-        
-        # Berechne wann diese Daten erreicht werden
-        current_time = get_german_time()
-        current_days_elapsed = (current_time - first_timestamp).total_seconds() / 86400
-        current_predicted_days = slope * current_days_elapsed + intercept
-        
-        days_until_25 = (target_25_days - current_predicted_days) / slope if slope > 0 else None
-        days_until_28 = (target_28_days - current_predicted_days) / slope if slope > 0 else None
-        
-        return {
-            "slope": slope,
-            "r_squared": r_squared,
-            "current_trend_days": current_predicted_days,
-            "days_until_25_july": days_until_25,
-            "days_until_28_july": days_until_28,
-            "data_points": len(data_points)
-        }
-    except Exception as e:
-        print(f"❌ Fehler bei der Prognoseberechnung: {e}")
-        return None
-
 def extract_all_other_date(text):
     """Extrahiert nur das Datum für 'all other graduate applicants'"""
     text = ' '.join(text.split())
@@ -572,38 +830,6 @@ def extract_cas_date(text):
     if match:
         return match.group(1).strip()
     return None
-
-def create_forecast_text(forecast):
-    """Erstellt einen Prognosetext basierend auf der Regression"""
-    if not forecast:
-        return "\n📊 Prognose: Noch nicht genügend Daten für eine zuverlässige Vorhersage."
-    
-    text = "\n📊 PROGNOSE basierend auf bisherigen Änderungen:\n"
-    text += f"(Analyse von {forecast['data_points']} Datenpunkten, R²={forecast['r_squared']:.2f})\n\n"
-    
-    if forecast['slope'] <= 0:
-        text += "⚠️ Die Daten zeigen keinen Fortschritt oder sogar Rückschritte.\n"
-    else:
-        text += f"📈 Durchschnittlicher Fortschritt: {forecast['slope']:.1f} Tage pro Tag\n\n"
-        
-        if forecast['days_until_25_july'] is not None and forecast['days_until_25_july'] > 0:
-            date_25 = get_german_time() + timedelta(days=forecast['days_until_25_july'])
-            text += f"📅 25 July wird voraussichtlich erreicht:\n"
-            text += f"   • In {forecast['days_until_25_july']:.0f} Tagen\n"
-            text += f"   • Am {date_25.strftime('%d. %B %Y')}\n\n"
-        
-        if forecast['days_until_28_july'] is not None and forecast['days_until_28_july'] > 0:
-            date_28 = get_german_time() + timedelta(days=forecast['days_until_28_july'])
-            text += f"📅 28 July wird voraussichtlich erreicht:\n"
-            text += f"   • In {forecast['days_until_28_july']:.0f} Tagen\n"
-            text += f"   • Am {date_28.strftime('%d. %B %Y')}\n\n"
-        
-        if forecast['r_squared'] < 0.5:
-            text += "⚠️ Hinweis: Die Vorhersage ist unsicher (niedrige Korrelation).\n"
-        elif forecast['r_squared'] > 0.8:
-            text += "✅ Die Vorhersage basiert auf einem stabilen Trend.\n"
-    
-    return text
 
 def fetch_processing_dates():
     """Holt alle Verarbeitungsdaten von der LSE-Webseite"""
@@ -730,6 +956,12 @@ def send_gmail(subject, body, recipients):
 def main():
     print("="*50)
     print(f"LSE Status Check - {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}")
+    
+    # Zeige ob erweiterte Regression verfügbar ist
+    if ADVANCED_REGRESSION:
+        print("✅ Erweiterte Regression aktiviert")
+    else:
+        print("⚠️ Erweiterte Regression nicht verfügbar (Standard-Regression wird verwendet)")
     
     # Migriere JSON-Dateien falls nötig
     migrate_json_files()
