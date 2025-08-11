@@ -403,13 +403,18 @@ def create_enhanced_forecast_text(forecast):
         from datetime import time as _time
         import numpy as _np
 
-        # Lade Historie von Datei (minimale Invasivität, keine Funktionsänderung nötig)
+        # Lade Historie und verwende die existierende Funktion zum Kombinieren
         hist = get_history()
+        
+        # KORREKTUR: Verwende _iter_observations_or_changes um ALLE Datenpunkte zu bekommen
+        all_entries = _iter_observations_or_changes(hist)
         rows = [
-            {"timestamp": c["timestamp"], "date": c["date"], "from": c.get("from")}
-            for c in (hist.get("observations") or hist.get("changes", []))
-            if isinstance(c, dict) and "timestamp" in c and "date" in c
+            {"timestamp": entry["timestamp"], "date": entry["date"]}
+            for entry in all_entries
         ]
+        
+        print(f"🔍 Erweiterte Regression: {len(rows)} Datenpunkte gefunden")  # Debug
+        
         if len(rows) >= REGRESSION_MIN_POINTS:
             cal = BusinessCalendar(tz=LON, start=_time(10,0), end=_time(16,0), holidays=tuple([]))
             imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
