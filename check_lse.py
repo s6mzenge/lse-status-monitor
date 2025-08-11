@@ -85,11 +85,18 @@ import math
 from zoneinfo import ZoneInfo
 
 def _now_berlin():
-    return get_german_time().astimezone(ZoneInfo("Europe/Berlin"))
+    from zoneinfo import ZoneInfo
+    dt = get_german_time()
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=ZoneInfo("Europe/Berlin"))
+    return dt.astimezone(ZoneInfo("Europe/Berlin"))
 
 def _short_date(d):  # "14 Aug"
     if d is None:
         return "—"
+    from zoneinfo import ZoneInfo
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=ZoneInfo("Europe/Berlin"))
     return d.astimezone(ZoneInfo("Europe/Berlin")).strftime("%d %b").replace(".", "")
 
 def _cal_days_until(dt, now=None):
@@ -475,10 +482,14 @@ def compute_integrated_model_metrics(history):
         "r2": r2_new,
         "points": len(rows),
         "speed": f"{avg_prog_new:.1f} Tage/Tag",
+        "speed_val": float(avg_prog_new),                 # <-- neu: numerisch
         "eta25": _fmt_eta(d25, pred25["when_point"]),
         "eta28": _fmt_eta(d28, pred28["when_point"]),
+        "eta25_dt": pred25["when_point"],                 # <-- neu: echtes Datum
+        "eta28_dt": pred28["when_point"],                 # <-- neu: echtes Datum
         "heartbeats": heartbeats
     }
+
 
 def format_regression_comparison_table_mono(old_s, new_s):
     """
@@ -514,88 +525,63 @@ def format_regression_comparison_table_mono(old_s, new_s):
     return "\n".join(out)
 
 def create_enhanced_forecast_text(forecast):
-    """Erstellt erweiterten Prognosetext mit mehr Details wenn verfügbar"""
+    """Kompakte, mobilfreundliche Prognose (ALT vs. NEU) mit Legende und Kalendertagen."""
     if not forecast:
         return "\n📊 Prognose: Noch nicht genügend Daten für eine zuverlässige Vorhersage."
-    
-    text = "\n📊 PROGNOSEN basierend auf bisherigen Änderungen:\n"
-    
-    # Zeige verwendetes Modell wenn erweiterte Regression verfügbar
-    if 'model_name' in forecast and ADVANCED_REGRESSION:
-        text += f"📈 Bestes Modell: {forecast['model_name']} "
-    
-    text += f"(R²={forecast['r_squared']:.2f}, {forecast['data_points']} Datenpunkte)\n\n"
 
-    # === ALT vs. NEU: Monospace-Vergleichstabelle ===
-    try:
-        hist = get_history()
-        old_s = _old_regression_summary(forecast)
-        new_s = compute_integrated_model_metrics(hist)
-        if new_s:
-            table = format_regression_comparison_table_mono(old_s, new_s)
-            if table:
-                text += "<b>ALT vs. NEU (kompakt)</b>\n<pre>" + table + "</pre>\n"
-    except Exception as _e:
-        print(f"❌ Tabelle (ALT vs. NEU) konnte nicht erzeugt werden: {_e}")
+    # Basis (ALT)
+    r2_old   = float(forecast.get("r_squared", 0.0))
+    pts_old  = int(forecast.get("data_points", 0))
+    slope_old = float(forecast.get("slope", 0.0))
 
-    
-    if forecast['slope'] <= 0:
-        text += "⚠️ Die Daten zeigen keinen Fortschritt oder sogar Rückschritte.\n"
-    else:
-        text += f"📈 Durchschnittlicher Fortschritt: {forecast['slope']:.1f} Tage pro Tag\n"
-        
-        # Zeige Trend-Analyse wenn verfügbar
-        if 'trend_analysis' in forecast and forecast['trend_analysis'] != "unbekannt":
-            emoji = {"beschleunigend": "🚀", "verlangsamend": "🐌", "konstant": "➡️"}
-            text += f"{emoji.get(forecast['trend_analysis'], '❓')} Trend: {forecast['trend_analysis'].upper()}\n"
-        
-        text += "\n"
-        
-        # Verwende erweiterte Prognosen wenn verfügbar
-        if 'predictions' in forecast and forecast['predictions']:
-            for target_name in ["25 July", "28 July"]:
-                if target_name in forecast['predictions']:
-                    pred = forecast['predictions'][target_name]
-                    if pred['days'] and pred['days'] > 0:
-                        date_pred = pred.get('date', get_german_time() + timedelta(days=pred['days']))
-                        text += f"📅 {target_name} wird voraussichtlich erreicht:\n"
-                        text += f"   • In {pred['days']:.0f} Tagen"
-                        
-                        # Zeige Konfidenzintervall wenn verfügbar
-                        if 'days_lower' in pred and 'days_upper' in pred and ADVANCED_REGRESSION:
-                            text += f" ({pred['days_lower']:.0f}-{pred['days_upper']:.0f} Tage)\n"
-                        else:
-                            text += "\n"
-                        
-                        text += f"   • Am {date_pred.strftime('%d. %B %Y')}\n\n"
-        else:
-            # Fallback auf alte Methode
-            if forecast.get('days_until_25_july') is not None and forecast['days_until_25_july'] > 0:
-                date_25 = get_german_time() + timedelta(days=forecast['days_until_25_july'])
-                text += f"📅 25 July wird voraussichtlich erreicht:\n"
-                text += f"   • In {forecast['days_until_25_july']:.0f} Tagen\n"
-                text += f"   • Am {date_25.strftime('%d. %B %Y')}\n\n"
-            
-            if forecast.get('days_until_28_july') is not None and forecast['days_until_28_july'] > 0:
-                date_28 = get_german_time() + timedelta(days=forecast['days_until_28_july'])
-                text += f"📅 28 July wird voraussichtlich erreicht:\n"
-                text += f"   • In {forecast['days_until_28_july']:.0f} Tagen\n"
-                text += f"   • Am {date_28.strftime('%d. %B %Y')}\n\n"
-        
-        # Qualitätshinweis
-        if forecast['r_squared'] < 0.5:
-            text += "⚠️ Hinweis: Die Vorhersage ist unsicher (niedrige Korrelation).\n"
-        elif forecast['r_squared'] > 0.8:
-            text += "✅ Die Vorhersage basiert auf einem stabilen Trend.\n"
-        
-        # Zeige Modellvergleich wenn mehrere Modelle verfügbar
-        if ADVANCED_REGRESSION and 'models' in forecast and len(forecast['models']) > 1:
-            text += "\n🔬 Modell-Vergleich:\n"
-            for name, data in sorted(forecast['models'].items(), key=lambda x: x[1].get('r2', 0), reverse=True):
-                if 'r2' in data:
-                    text += f"   • {name.capitalize()}: R²={data['r2']:.3f}\n"
+    # Alte ETAs (echte Datumsobjekte, falls vorhanden)
+    def _old_eta_dt(frc, key):
+        try:
+            return frc.get("predictions", {}).get(key, {}).get("date")
+        except Exception:
+            return None
 
-    return text
+    eta25_old_dt = _old_eta_dt(forecast, "25 July")
+    eta28_old_dt = _old_eta_dt(forecast, "28 July")
+
+    # Neue (integrierte) Metriken + echte ETA-Datetimes
+    hist = get_history()
+    new_s = compute_integrated_model_metrics(hist)
+
+    if not new_s:
+        # Fallback: nur ALT kompakt ausgeben
+        parts = []
+        parts.append("🎨 <b>Legende:</b> 🔵 ALT (linear) · 🟠 NEU (integriert)")
+        parts.append("\n📌 <b>Kurzprognose</b>")
+        parts.append("🎯 <b>25 July</b>")
+        parts.append(f"🔵 {_short_date(eta25_old_dt) if eta25_old_dt else '—'}"
+                     f" (in {_cal_days_until(eta25_old_dt)} Tagen)" if eta25_old_dt else "🔵 —")
+        parts.append("\n🎯 <b>28 July</b>")
+        parts.append(f"🔵 {_short_date(eta28_old_dt) if eta28_old_dt else '—'}"
+                     f" (in {_cal_days_until(eta28_old_dt)} Tagen)" if eta28_old_dt else "🔵 —")
+        parts.append("\n📐 <b>Modelle</b>")
+        parts.append(f"R²: 🔵 {r2_old:.2f} ({pts_old})")
+        parts.append(f"Fortschritt: 🔵 {slope_old:.1f} d/Tag")
+        return "\n".join(parts)
+
+    # NEU-Werte
+    r2_new   = float(new_s["r2"])
+    pts_new  = int(new_s["points"])
+    slope_new = float(new_s.get("speed_val", 0.0))
+    hb_count = int(new_s.get("heartbeats") or 0)
+    eta25_new_dt = new_s.get("eta25_dt")
+    eta28_new_dt = new_s.get("eta28_dt")
+
+    # Kompakte Bullets (Kalendertage!)
+    text = render_compact_bullets(
+        eta25_old_dt, eta25_new_dt,
+        eta28_old_dt, eta28_new_dt,
+        r2_old, pts_old, slope_old,
+        r2_new, pts_new, slope_new,
+        hb_count=hb_count
+    )
+
+    return "\n" + text
 
 def create_forecast_text(forecast):
     """Wrapper für Rückwärtskompatibilität - ruft erweiterte Version auf"""
