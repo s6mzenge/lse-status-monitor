@@ -494,39 +494,6 @@ def compute_integrated_model_metrics(history):
     }
 
 
-def format_regression_comparison_table_mono(old_s, new_s):
-    """
-    Baut eine Monospace-Tabelle mit drei Spalten: Metrik | ALT | NEU.
-    Wird als <pre>...</pre> in Telegram (HTML parse_mode) gesendet.
-    """
-    if not old_s or not new_s:
-        return ""
-
-    rows = [
-        ("R² (Datenpunkte)", f"{old_s['r2']:.2f} ({old_s['points']})",       f"{new_s['r2']:.2f} ({new_s['points']})"),
-        ("Fortschritt",       old_s['speed'],                                new_s['speed']),
-        ("Trend",             old_s.get('trend', '—'),                       "—"),
-        ("25 July ETA",       old_s['eta25'],                                new_s['eta25']),
-        ("28 July ETA",       old_s['eta28'],                                new_s['eta28']),
-    ]
-
-    h1, h2, h3 = "Metrik", old_s["name"], new_s["name"]
-    w1 = max(len(h1), *(len(r[0]) for r in rows))
-    w2 = max(len(h2), *(len(r[1]) for r in rows))
-    w3 = max(len(h3), *(len(r[2]) for r in rows))
-
-    def fmt(a, b, c): return f"{a:<{w1}}  |  {b:<{w2}}  |  {c:<{w3}}"
-    line = "-" * (w1 + w2 + w3 + 6)
-
-    out = []
-    out.append(fmt(h1, h2, h3))
-    out.append(line)
-    for r in rows:
-        out.append(fmt(*r))
-    out.append(line)
-    out.append(f"* Neue Regression nutzt Heartbeats: {new_s['heartbeats']}")
-    return "\n".join(out)
-
 def create_enhanced_forecast_text(forecast):
     """Kompakte, mobilfreundliche Prognose (ALT vs. NEU) mit Legende und Kalendertagen."""
     if not forecast:
