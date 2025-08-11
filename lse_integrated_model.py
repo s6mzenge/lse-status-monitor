@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, time, date
@@ -84,12 +83,12 @@ class BusinessCalendar:
         cur = start_dt.astimezone(self.tz)
 
         # move to next business start if outside hours
-        def normalize_start(dt):
-            while dt.weekday() >= 5 or (self.holidays and dt.date().isoformat() in self.holidays) or dt.timetz() >= self.end:
+        def normalize_start(dt: datetime) -> datetime:
+            # Achtung: dt.time() ist tz-naiv und daher mit self.start/self.end vergleichbar
+            while dt.weekday() >= 5 or (self.holidays and dt.date().isoformat() in self.holidays) or dt.time() >= self.end:
                 dt = (dt + timedelta(days=1)).replace(hour=self.start.hour, minute=self.start.minute, second=0, microsecond=0)
-            if dt.timetz() < self.start:
+            if dt.time() < self.start:
                 dt = dt.replace(hour=self.start.hour, minute=self.start.minute, second=0, microsecond=0)
-            # if holiday, while-loop above handles next day
             return dt
 
         cur = normalize_start(cur)
@@ -121,11 +120,21 @@ class RobustLinear:
         y = np.asarray(y, float)
         slopes = []
         n = len(x)
+        if n < 2:
+            # Fallback: keine robuste Schätzung möglich
+            a = float(y[0]) if n == 1 else 0.0
+            b = 0.0
+            return RobustLinear(a=a, b=b, slope_q20=b, slope_q80=b)
         for i in range(n):
             for j in range(i+1, n):
                 dx = x[j] - x[i]
                 if dx != 0:
                     slopes.append((y[j] - y[i]) / dx)
+        if not slopes:
+            # alle x identisch
+            a = float(np.median(y))
+            b = 0.0
+            return RobustLinear(a=a, b=b, slope_q20=b, slope_q80=b)
         b = float(np.median(slopes))
         a = float(np.median(y - b*x))
         q20, q80 = float(np.quantile(slopes, 0.2)), float(np.quantile(slopes, 0.8))
@@ -190,9 +199,10 @@ class IntegratedRegressor:
     ts_: RobustLinear = field(default=None, init=False)
     loess_: LOESS = field(default=None, init=False)
     rmse_: float = field(default=None, init=False)
+    t0_: datetime = field(default=None, init=False)
 
     def _prepare_xy(self, rows: List[Dict]) -> Tuple[np.ndarray, np.ndarray, datetime]:
-        # rows: dicts with keys: timestamp_utc(str), date_label(str like "22 July")
+        # rows: dicts with keys: timestamp(str, UTC naive e.g. 'YYYY-MM-DDTHH:MM:SS'), date(str like "22 July")
         # Convert to arrays
         data = []
         for r in rows:
@@ -229,8 +239,8 @@ class IntegratedRegressor:
         return float(math.exp(-d / self.tau_hours))
 
     def _blend_predict_scalar(self, x: float) -> float:
-        ts_val = self.ts_.predict(x)
-        lo_val = self.loess_.predict_one(self.x_, self.y_, x)
+        ts_val = float(self.ts_.predict(x))
+        lo_val = float(self.loess_.predict_one(self.x_, self.y_, x))
         w = self._weight(x)
         return (1.0 - w)*ts_val + w*lo_val
 
@@ -248,11 +258,12 @@ class IntegratedRegressor:
             x_hi += 6.0  # add one business day window
             fhi = f(x_hi)
             it += 1
-        # if still not bracketed, fall back to Theil–Sen closed form
-        if flo > 0 and fhi > 0:
-            return (y_target - self.ts_.a) / self.ts_.b
-        if flo < 0 and fhi < 0:
-            return (y_target - self.ts_.a) / self.ts_.b
+        # if still not bracketed, fall back to Theil–Sen closed form (guard b==0)
+        if (flo > 0 and fhi > 0) or (flo < 0 and fhi < 0):
+            if self.ts_.b != 0:
+                return (y_target - self.ts_.a) / self.ts_.b
+            # no slope information -> return best-effort lower bracket
+            return x_lo
         for _ in range(maxit):
             xm = 0.5*(x_lo + x_hi)
             fm = f(xm)
@@ -281,12 +292,16 @@ class IntegratedRegressor:
         eps_hours = 0.0
         if self.ts_.b > 0:
             eps_hours = self.rmse_ / self.ts_.b
-        # slope-quantile bounds
-        def pred_x_with_slope(s):
-            a = np.median(self.y_ - s*self.x_)
-            return (y_t - a) / s
-        x_lo = min(pred_x_with_slope(self.ts_.slope_q20), pred_x_with_slope(self.ts_.slope_q80)) - eps_hours
-        x_hi = max(pred_x_with_slope(self.ts_.slope_q20), pred_x_with_slope(self.ts_.slope_q80)) + eps_hours
+        # slope-quantile bounds (guard division by zero)
+        def pred_x_with_slope(s: float) -> float:
+            s_eff = s if abs(s) >= 1e-12 else (self.ts_.b if abs(self.ts_.b) >= 1e-12 else 1e-6)
+            a_med = float(np.median(self.y_ - s_eff*self.x_))
+            return (y_t - a_med) / s_eff
+
+        x_q1 = pred_x_with_slope(self.ts_.slope_q20)
+        x_q2 = pred_x_with_slope(self.ts_.slope_q80)
+        x_lo = min(x_q1, x_q2) - eps_hours
+        x_hi = max(x_q1, x_q2) + eps_hours
 
         # map business hours -> datetimes
         def to_dt(x_hours: float) -> datetime:
