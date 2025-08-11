@@ -7,6 +7,145 @@ import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 import numpy as np
+# --- Business-day helpers (Mon–Fri, optional UK_HOLIDAYS env) ---
+_UK_HOLIDAYS = [s.strip() for s in os.getenv('UK_HOLIDAYS','').split(',') if s.strip()] + ['2025-08-25']
+def _to_npday(x):
+    if hasattr(x, 'date'):
+        x = x.date()
+    return np.datetime64(x, 'D')
+def _busday_count(start_dt, end_dt):
+    try:
+        s = _to_npday(start_dt); e = _to_npday(end_dt)
+        holidays_np = np.array(_UK_HOLIDAYS, dtype='datetime64[D]') if _UK_HOLIDAYS else None
+        return int(np.busday_count(s, e, holidays=holidays_np))
+    except Exception:
+        try:
+            sd = start_dt.date() if hasattr(start_dt, 'date') else start_dt
+            ed = end_dt.date() if hasattr(end_dt, 'date') else end_dt
+            return max(0, (ed - sd).days)
+        except Exception:
+            return 0
+def _busday_offset(start_dt, n):
+    def _to_npday(x):
+        if hasattr(x, 'date'):
+            x = x.date()
+        return np.datetime64(x, 'D')
+    s = _to_npday(start_dt)
+    holidays_np = np.array(_UK_HOLIDAYS, dtype='datetime64[D]') if _UK_HOLIDAYS else None
+    return np.busday_offset(s, int(np.ceil(n)), roll='forward', holidays=holidays_np).astype(object)
+# --- Advanced forecasting helpers ---
+def _monotone_non_decreasing(dates_int):
+    # Legacy name kept; see _monotonic_smooth below
+
+    out = dates_int.copy()
+    for i in range(1, len(out)):
+        if out[i] < out[i-1]:
+            out[i] = out[i-1]
+    return out
+
+
+# Backwards-compatible alias used by robust regression
+
+def _theil_sen_slope(x, y):
+    slopes = []
+    n = len(x)
+    for i in range(n):
+        for j in range(i+1, n):
+            if x[j] != x[i]:
+                slopes.append((y[j]-y[i])/(x[j]-x[i]))
+    if not slopes:
+        return None
+    b = float(np.median(slopes))
+    a = float(np.median(y - b*x))
+    return a, b
+
+def _ols_weighted(x, y, w=None):
+    X = np.vstack([np.ones_like(x, dtype=float), x.astype(float)]).T
+    if w is not None:
+        W = np.diag(w.astype(float))
+        Xw = W @ X
+        yw = W @ y.astype(float)
+        beta, *_ = np.linalg.lstsq(Xw, yw, rcond=None)
+    else:
+        beta, *_ = np.linalg.lstsq(X, y.astype(float), rcond=None)
+    a, b = float(beta[0]), float(beta[1])
+    yhat = a + b*x
+    ss_res = np.sum((y - yhat)**2)
+    ss_tot = np.sum((y - np.mean(y))**2)
+    r2 = 1 - (ss_res/ss_tot) if ss_tot > 0 else 0.0
+    return a, b, float(r2)
+
+def _weekday_mean_gains(obs_dates, proc_days):
+    if len(obs_dates) < 2:
+        return {i:0.0 for i in range(5)}
+    gains = {i: [] for i in range(5)}
+    for i in range(1, len(obs_dates)):
+        bd = _busday_count(obs_dates[i-1], obs_dates[i])
+        gain = (proc_days[i]-proc_days[i-1])
+        if bd <= 0:
+            continue
+        per_bd = gain / bd
+        weekday = obs_dates[i].weekday()
+        if weekday < 5:
+            gains[weekday].append(per_bd)
+    return {k: (float(np.mean(v)) if v else 0.0) for k,v in gains.items()}
+
+def _simulate_weekday_path(current_date, current_gap_days, weekday_means, max_steps=300):
+    steps = 0
+    d = current_date
+    gap = float(current_gap_days)
+    while steps < max_steps and gap > 0.0:
+        d = _busday_offset(d, 1)
+        wd = d.weekday()
+        if wd > 4:
+            continue
+        gain = weekday_means.get(wd, 0.0)
+        if gain <= 0:
+            gain = max(0.1, gain)
+        gap -= gain
+        steps += 1
+    return d, steps
+
+def _bootstrap_eta(x, gap, fit_func, current_x, n=200, random_seed=42):
+    rng = np.random.default_rng(random_seed)
+    a, b = fit_func(x, gap)
+    base_res = gap - (a + b*x)
+    if len(base_res) < 2 or abs(b) < 1e-9:
+        return None
+    etas = []
+    for _ in range(n):
+        resampled = rng.choice(base_res, size=len(base_res), replace=True)
+        y_boot = (a + b*x) + resampled
+        a_b, b_b = fit_func(x, y_boot)
+        if abs(b_b) < 1e-9:
+            continue
+        x_star = -a_b / b_b
+        etas.append(x_star - current_x)
+    if not etas:
+        return None
+    etas = np.array(etas)
+    return {
+        "p50": float(np.percentile(etas, 50)),
+        "p80": float(np.percentile(etas, 80)),
+        "p95": float(np.percentile(etas, 95)),
+    }
+
+def _fit_multivariate(x, features, target):
+    Xcols = [np.ones_like(x, dtype=float), x.astype(float)]
+    names = ["intercept", "x"]
+    for name, arr in features.items():
+        if arr is None or len(arr) != len(x):
+            continue
+        Xcols.append(arr.astype(float))
+        names.append(name)
+    X = np.vstack(Xcols).T
+    beta, *_ = np.linalg.lstsq(X, target.astype(float), rcond=None)
+    yhat = X @ beta
+    ss_res = np.sum((target - yhat)**2)
+    ss_tot = np.sum((target - np.mean(target))**2)
+    r2 = 1 - (ss_res/ss_tot) if ss_tot > 0 else 0.0
+    return beta, names, float(r2)
+
 from collections import defaultdict
 import time
 import sys
@@ -28,123 +167,115 @@ def get_german_time():
     german_time = utc_time + timedelta(hours=2)
     return german_time
 
+
 def create_progression_graph(history, current_date, forecast=None):
-    """Erstellt ein Diagramm mit der Progression der Verarbeitungsdaten"""
-    if len(history["changes"]) < 2:
-        return None
-    
+    """Erstellt ein Diagramm mit der Progression (x=Beobachtungszeit, y=Verarbeitungsdatum in Tagen seit 1. Jan).
+    Gibt einen BytesIO-Puffer (PNG) zur Weitergabe an Telegram zurück.
+    """
     try:
-        # Matplotlib Style für bessere Optik
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+        from io import BytesIO
+
+        changes = history.get("changes", [])
+        if len(changes) < 2:
+            return None
+
+        # Daten extrahieren
+        obs_ts = []
+        y_days = []
+        for e in changes:
+            try:
+                ts = datetime.fromisoformat(e["timestamp"])
+                y = date_to_days(e.get("date") or e.get("main") or "")
+                if y is None:
+                    continue
+                obs_ts.append(ts)
+                y_days.append(y)
+            except Exception:
+                continue
+
+        if len(obs_ts) < 2:
+            return None
+
+        # Sortieren
+        order = sorted(range(len(obs_ts)), key=lambda i: obs_ts[i])
+        obs_ts = [obs_ts[i] for i in order]
+        y_days = [y_days[i] for i in order]
+
+        # Plot
         plt.style.use('seaborn-v0_8-darkgrid')
         fig, ax = plt.subplots(figsize=(12, 7))
-        
-        # Extrahiere Datenpunkte
-        timestamps = []
-        dates_numeric = []
-        date_labels = []
-        
-        for entry in history["changes"]:
-            timestamp = datetime.fromisoformat(entry["timestamp"])
-            date_days = date_to_days(entry["date"])
-            if date_days is not None:
-                timestamps.append(timestamp)
-                dates_numeric.append(date_days)
-                date_labels.append(entry["date"])
-        
-        # Plot historische Datenpunkte
-        ax.scatter(timestamps, dates_numeric, color='darkblue', s=100, zorder=5, label='Historische Daten', alpha=0.8)
-        
-        # Füge Labels für jeden Punkt hinzu
-        for i, (ts, days, label) in enumerate(zip(timestamps, dates_numeric, date_labels)):
-            ax.annotate(label, (ts, days), xytext=(5, 5), textcoords='offset points', 
-                       fontsize=8, alpha=0.7)
-        
-        # Wenn Regression verfügbar ist, zeichne Trendlinie
-        if forecast and forecast['slope'] > 0:
-            # Erstelle Trendlinie
-            first_timestamp = timestamps[0]
-            x_days = [(ts - first_timestamp).total_seconds() / 86400 for ts in timestamps]
-            
-            # Erweitere die Linie in die Zukunft
-            future_days = 30  # 30 Tage in die Zukunft projizieren
-            last_x = x_days[-1]
-            future_x = np.linspace(0, last_x + future_days, 100)
-            future_y = forecast['slope'] * future_x + (forecast['current_trend_days'] - forecast['slope'] * ((get_german_time() - first_timestamp).total_seconds() / 86400))
-            
-            # Konvertiere zurück zu Timestamps für x-Achse
-            future_timestamps = [first_timestamp + timedelta(days=d) for d in future_x]
-            
-            # Plot Trendlinie
-            ax.plot(future_timestamps, future_y, 'r--', alpha=0.5, linewidth=2, 
-                   label=f'Trend (R²={forecast["r_squared"]:.2f})')
-            
-            # Markiere Zielpunkte (25. und 28. Juli)
-            target_dates = {"25 July": date_to_days("25 July"), "28 July": date_to_days("28 July")}
-            
-            for target_name, target_days in target_dates.items():
-                if target_days:
-                    # Finde wann dieses Datum erreicht wird
-                    days_until = (target_days - forecast['current_trend_days']) / forecast['slope'] if forecast['slope'] > 0 else None
-                    if days_until and days_until > 0:
-                        target_timestamp = get_german_time() + timedelta(days=days_until)
-                        ax.axhline(y=target_days, color='green', linestyle=':', alpha=0.3)
-                        ax.scatter([target_timestamp], [target_days], color='green', s=150, marker='*', 
-                                  zorder=6, alpha=0.7)
-                        ax.annotate(f'{target_name}\n(~{days_until:.0f} Tage)', 
-                                  (target_timestamp, target_days), 
-                                  xytext=(10, 0), textcoords='offset points',
-                                  fontsize=9, color='green', weight='bold')
-        
-        # Markiere aktuelles Datum
-        current_days = date_to_days(current_date)
-        if current_days:
-            ax.axhline(y=current_days, color='blue', linestyle='-', alpha=0.3, linewidth=1)
-            ax.scatter([get_german_time()], [current_days], color='red', s=150, marker='o', 
-                      zorder=7, label=f'Aktuell: {current_date}')
-        
-        # Formatierung
-        ax.set_xlabel('Datum', fontsize=12)
-        ax.set_ylabel('Verarbeitungsdatum (Tage seit 1. Januar)', fontsize=12)
-        ax.set_title('LSE Verarbeitungsdatum - Progression und Prognose', fontsize=14, weight='bold')
-        
-        # X-Achse formatieren
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m'))
-        ax.xaxis.set_major_locator(mdates.DayLocator(interval=2))
-        plt.xticks(rotation=45)
-        
-        # Y-Achse mit Datum-Labels
+        ax.scatter(obs_ts, y_days, s=36, label='Beobachtungen')
+
+        # y-Achse als Datums-Labels (aus Tage-seit-1.Jan)
         y_ticks = ax.get_yticks()
         y_labels = []
         for y in y_ticks:
-            if y >= 0:
-                try:
-                    y_labels.append(days_to_date(int(y)))
-                except:
-                    y_labels.append(str(int(y)))
-            else:
-                y_labels.append('')
+            try:
+                y_labels.append(days_to_date(int(y)))
+            except Exception:
+                y_labels.append("")
         ax.set_yticklabels(y_labels)
-        
-        # Legende
-        ax.legend(loc='upper left', framealpha=0.9)
-        
-        # Grid
-        ax.grid(True, alpha=0.3)
-        
-        # Layout anpassen
+
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m'))
+        ax.xaxis.set_major_locator(mdates.DayLocator(interval=2))
+        plt.xticks(rotation=45)
+
+        ax.set_xlabel('Beobachtungsdatum')
+        ax.set_ylabel('Verarbeitungsdatum (Tage seit 1. Jan)')
+        ax.set_title('LSE Verarbeitungsdatum - Progression und Prognose')
+
+        # Trendlinie aus EWLS-Modell (falls vorhanden)
+        if forecast and isinstance(forecast, dict):
+            model = (forecast.get("models") or {}).get("ewls") or {}
+            a = model.get("a"); b = model.get("b")
+            if a is not None and b is not None and b > 0:
+                first_ts = obs_ts[0]
+                last_ts = obs_ts[-1]
+                # Business-Day Gitter von 0 bis etwas in die Zukunft
+                extra = 10
+                import numpy as _np
+                bd_span = int(_np.busday_count(first_ts.date(), last_ts.date())) + extra
+                bd_x = _np.arange(0, max(2, bd_span))
+                # y = a + b*x
+                y_fit = a + b*bd_x
+                # x (Kalender) aus Business Days zurueckrechnen
+                x_fit = [ _busday_offset(first_ts, int(n)) for n in bd_x ]
+                # Zu datetimes konvertieren
+                x_fit_dt = [ datetime(x.year, x.month, x.day, 12, 0) if hasattr(x, 'year') else first_ts for x in x_fit ]
+                ax.plot(x_fit_dt, y_fit, 'r--', linewidth=2, alpha=0.7, label=f"Business-Day Fit (R²={forecast.get('r_squared',0):.2f})")
+
+            # Zielmarken einzeichnen, wenn ETA vorhanden
+            def _plot_target(label, dstr):
+                if not dstr:
+                    return
+                y_target = date_to_days(label)
+                try:
+                    eta_date = datetime.fromisoformat(dstr).date()
+                    ax.scatter([eta_date], [y_target], marker='X', s=80, label=f"ETA {label}")
+                    ax.axvline(eta_date, color='gray', linestyle=':', alpha=0.5)
+                except Exception:
+                    pass
+
+            bands = forecast.get("eta_bands") or {}
+            b25 = bands.get("25_july") or {}
+            b28 = bands.get("28_july") or {}
+
+            _plot_target("25 July", b25.get("p50"))
+            _plot_target("28 July", b28.get("p50"))
+
+        ax.legend(loc='best', framealpha=0.9)
+        buf = BytesIO()
         plt.tight_layout()
-        
-        # In BytesIO speichern
-        img_buffer = BytesIO()
-        plt.savefig(img_buffer, format='png', dpi=100, bbox_inches='tight')
-        img_buffer.seek(0)
-        plt.close()
-        
-        return img_buffer
-        
+        plt.savefig(buf, format='png', dpi=150)
+        plt.close(fig)
+        buf.seek(0)
+        return buf
     except Exception as e:
-        print(f"❌ Fehler beim Erstellen des Graphen: {e}")
+        print("Fehler beim Erstellen des Diagramms:", e)
         return None
+
 
 def send_telegram_photo(photo_buffer, caption, parse_mode='HTML'):
     """Sendet ein Foto über Telegram Bot"""
@@ -447,78 +578,143 @@ def days_to_date(days):
     target_date = jan_first + timedelta(days=int(days))
     return target_date.strftime("%d %B").lstrip("0")
 
+
 def calculate_regression_forecast(history):
-    """Berechnet eine lineare Regression und Prognose basierend auf der Historie"""
-    if len(history["changes"]) < 2:
-        return None
-    
-    # Extrahiere Datenpunkte (Zeit in Tagen seit erstem Eintrag, Datum in Tagen seit 1. Januar)
-    data_points = []
-    first_timestamp = None
-    
-    for entry in history["changes"]:
-        try:
-            timestamp = datetime.fromisoformat(entry["timestamp"])
-            date_days = date_to_days(entry["date"])
-            
-            if date_days is None:
-                continue
-                
-            if first_timestamp is None:
-                first_timestamp = timestamp
-                
-            days_elapsed = (timestamp - first_timestamp).total_seconds() / 86400  # Tage seit erstem Eintrag
-            data_points.append((days_elapsed, date_days))
-        except Exception as e:
-            print(f"⚠️ Fehler beim Verarbeiten von Historie-Eintrag: {e}")
-            continue
-    
-    if len(data_points) < 2:
-        return None
-    
-    try:
-        # Lineare Regression
-        x = np.array([p[0] for p in data_points])
-        y = np.array([p[1] for p in data_points])
-        
-        # Berechne Steigung und y-Achsenabschnitt
-        n = len(x)
-        slope = (n * np.sum(x * y) - np.sum(x) * np.sum(y)) / (n * np.sum(x**2) - np.sum(x)**2)
-        intercept = (np.sum(y) - slope * np.sum(x)) / n
-        
-        # Berechne R² für Qualität der Regression
-        y_pred = slope * x + intercept
-        ss_res = np.sum((y - y_pred)**2)
-        ss_tot = np.sum((y - np.mean(y))**2)
-        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-        
-        # Prognose für July 25 und July 28
-        target_25_days = date_to_days("25 July")
-        target_28_days = date_to_days("28 July")
-        
-        if target_25_days is None or target_28_days is None:
-            return None
-        
-        # Berechne wann diese Daten erreicht werden
-        current_time = get_german_time()
-        current_days_elapsed = (current_time - first_timestamp).total_seconds() / 86400
-        current_predicted_days = slope * current_days_elapsed + intercept
-        
-        days_until_25 = (target_25_days - current_predicted_days) / slope if slope > 0 else None
-        days_until_28 = (target_28_days - current_predicted_days) / slope if slope > 0 else None
-        
-        return {
-            "slope": slope,
-            "r_squared": r_squared,
-            "current_trend_days": current_predicted_days,
-            "days_until_25_july": days_until_25,
-            "days_until_28_july": days_until_28,
-            "data_points": len(data_points)
-        }
-    except Exception as e:
-        print(f"❌ Fehler bei der Prognoseberechnung: {e}")
+
+    """Berechnet robuste Regression (Business Days) + Bootstrap-Intervalle fuer die 'all other applicants'-Schlange"""
+    half_life = float(os.getenv("REG_HALFLIFE_BDAYS", "10"))
+    recent_k  = int(os.getenv("REG_RECENT_K", "10"))
+    max_delta = float(os.getenv("REG_MAX_DELTA_PER_BDAY", "7"))
+    n_boot    = int(os.getenv("REG_BOOT_N", "300"))
+
+    if len(history.get("changes", [])) < 2:
         return None
 
+    data = []
+    first_ts = None
+    for entry in history["changes"]:
+        try:
+            ts = datetime.fromisoformat(entry["timestamp"])
+            y_val = date_to_days(entry["date"])
+            if y_val is None:
+                continue
+            if first_ts is None:
+                first_ts = ts
+            x_val = _busday_count(first_ts, ts)
+            data.append((x_val, y_val))
+        except Exception as e:
+            print(f"Fehler beim Verarbeiten von Historie-Eintrag: {e}")
+            continue
+
+    if len(data) < 2:
+        return None
+
+    data.sort(key=lambda t: t[0])
+    x = np.array([d[0] for d in data], dtype=float)
+    y = np.array([d[1] for d in data], dtype=float)
+
+    y = _monotonic_smooth(y)
+
+    good_mask = np.ones_like(y, dtype=bool)
+    if len(x) >= 2:
+        dx = np.diff(x)
+        dy = np.diff(y)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rate = np.where(dx > 0, dy / dx, 0.0)
+        bad_phys = (rate < 0) | (rate > max_delta)
+        hw = _hampel_weights(rate, k=3.0)
+        robust_w_point = np.ones_like(y, dtype=float)
+        robust_w_point[1:] = hw
+        good_mask[1:] &= ~bad_phys
+        if not np.any(good_mask):
+            good_mask[:] = True
+            robust_w_point[:] = 1.0
+    else:
+        robust_w_point = np.ones_like(y, dtype=float)
+
+    xg = x[good_mask]; yg = y[good_mask]; wg = robust_w_point[good_mask]
+
+    if len(xg) < 2:
+        return None
+
+    a_ew, b_ew = _ewls(xg, yg, half_life_bdays=half_life, w_robust=wg)
+    a_ts, b_ts = _theil_sen(xg, yg)
+    a_rw, b_rw = _recent_window_ols(xg, yg, k=recent_k)
+
+    a_arr = np.array([a_ew, a_ts, a_rw], dtype=float)
+    b_arr = np.array([b_ew, b_ts, b_rw], dtype=float)
+
+    y_hat = a_ew + b_ew * xg
+    ss_res = np.sum((yg - y_hat)**2)
+    ss_tot = np.sum((yg - yg.mean())**2)
+    r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+    target_25_days = date_to_days("25 July")
+    target_28_days = date_to_days("28 July")
+    if target_25_days is None or target_28_days is None:
+        return None
+
+    current_time = get_german_time()
+    def _x_star(a,b,t):
+        return (t - a)/b if b > 0 else np.nan
+    x25_models = np.array([_x_star(a_arr[i], b_arr[i], target_25_days) for i in range(3)])
+    x28_models = np.array([_x_star(a_arr[i], b_arr[i], target_28_days) for i in range(3)])
+    x25 = np.nanmedian(x25_models); x28 = np.nanmedian(x28_models)
+
+    if np.isfinite(x25):
+        eta25_date = _busday_offset(current_time, x25)
+        days_until_25 = (eta25_date - current_time.date()).days
+    else:
+        eta25_date = None
+        days_until_25 = None
+
+    if np.isfinite(x28):
+        eta28_date = _busday_offset(current_time, x28)
+        days_until_28 = (eta28_date - current_time.date()).days
+    else:
+        eta28_date = None
+        days_until_28 = None
+
+    def _ewls_solver(xb, yb):
+        ae, be = _ewls(xb, yb, half_life_bdays=half_life)
+        return ae, be
+
+    boot = _bootstrap_eta(xg, yg, _ewls_solver, [target_25_days, target_28_days], b=n_boot)
+    def _mk_band(boot_tuple):
+        p10, p50, p90 = boot_tuple
+        if not np.isfinite(p50):
+            return None
+        d10 = _busday_offset(current_time, p10) if np.isfinite(p10) else None
+        d50 = _busday_offset(current_time, p50) if np.isfinite(p50) else None
+        d90 = _busday_offset(current_time, p90) if np.isfinite(p90) else None
+        return {"p10": d10.isoformat() if d10 else None,
+                "p50": d50.isoformat() if d50 else None,
+                "p90": d90.isoformat() if d90 else None}
+
+    bands_25 = _mk_band(boot.get(target_25_days, (np.nan, np.nan, np.nan)))
+    bands_28 = _mk_band(boot.get(target_28_days, (np.nan, np.nan, np.nan)))
+
+    slope_rep = float(np.nanmedian(b_arr))
+    current_elapsed_bd = _busday_count(first_ts, current_time)
+    current_predicted_days = float(a_ew + b_ew * current_elapsed_bd)
+
+    return {
+        "slope": slope_rep,
+        "r_squared": float(r_squared),
+        "current_trend_days": current_predicted_days,
+        "days_until_25_july": days_until_25,
+        "days_until_28_july": days_until_28,
+        "data_points": int(len(xg)),
+        "models": {
+            "ewls": {"a": float(a_ew), "b": float(b_ew)},
+            "theil_sen": {"a": float(a_ts), "b": float(b_ts)},
+            "recent_window": {"a": float(a_rw), "b": float(b_rw), "k": int(recent_k)},
+        },
+        "eta_bands": {
+            "25_july": bands_25,
+            "28_july": bands_28
+        }
+    }
 def extract_all_other_date(text):
     """Extrahiert nur das Datum für 'all other graduate applicants'"""
     text = ' '.join(text.split())
@@ -573,38 +769,51 @@ def extract_cas_date(text):
         return match.group(1).strip()
     return None
 
+
 def create_forecast_text(forecast):
+
     """Erstellt einen Prognosetext basierend auf der Regression"""
     if not forecast:
         return "\n📊 Prognose: Noch nicht genügend Daten für eine zuverlässige Vorhersage."
-    
+
     text = "\n📊 PROGNOSE basierend auf bisherigen Änderungen:\n"
     text += f"(Analyse von {forecast['data_points']} Datenpunkten, R²={forecast['r_squared']:.2f})\n\n"
-    
+
     if forecast['slope'] <= 0:
         text += "⚠️ Die Daten zeigen keinen Fortschritt oder sogar Rückschritte.\n"
     else:
-        text += f"📈 Durchschnittlicher Fortschritt: {forecast['slope']:.1f} Tage pro Tag\n\n"
-        
-        if forecast['days_until_25_july'] is not None and forecast['days_until_25_july'] > 0:
+        text += f"📈 Durchschnittlicher Fortschritt (robust): {forecast['slope']:.2f} Tage pro Geschäftstag\n\n"
+
+        if forecast.get('days_until_25_july') is not None and forecast['days_until_25_july'] > 0:
             date_25 = get_german_time() + timedelta(days=forecast['days_until_25_july'])
             text += f"📅 25 July wird voraussichtlich erreicht:\n"
             text += f"   • In {forecast['days_until_25_july']:.0f} Tagen\n"
-            text += f"   • Am {date_25.strftime('%d. %B %Y')}\n\n"
-        
-        if forecast['days_until_28_july'] is not None and forecast['days_until_28_july'] > 0:
+            text += f"   • Am {date_25.strftime('%a, %d. %B %Y')}\n"
+            bands = (forecast.get('eta_bands') or {}).get('25_july')
+            if bands and bands.get('p10') and bands.get('p90'):
+                d10 = datetime.fromisoformat(bands['p10']).date()
+                d90 = datetime.fromisoformat(bands['p90']).date()
+                text += f"   • 80%-Intervall: {d10.strftime('%a, %d.%m')} – {d90.strftime('%a, %d.%m')}\n"
+            text += "\n"
+
+        if forecast.get('days_until_28_july') is not None and forecast['days_until_28_july'] > 0:
             date_28 = get_german_time() + timedelta(days=forecast['days_until_28_july'])
             text += f"📅 28 July wird voraussichtlich erreicht:\n"
             text += f"   • In {forecast['days_until_28_july']:.0f} Tagen\n"
-            text += f"   • Am {date_28.strftime('%d. %B %Y')}\n\n"
-        
+            text += f"   • Am {date_28.strftime('%a, %d. %B %Y')}\n"
+            bands = (forecast.get('eta_bands') or {}).get('28_july')
+            if bands and bands.get('p10') and bands.get('p90'):
+                d10 = datetime.fromisoformat(bands['p10']).date()
+                d90 = datetime.fromisoformat(bands['p90']).date()
+                text += f"   • 80%-Intervall: {d10.strftime('%a, %d.%m')} – {d90.strftime('%a, %d.%m')}\n"
+            text += "\n"
+
         if forecast['r_squared'] < 0.5:
             text += "⚠️ Hinweis: Die Vorhersage ist unsicher (niedrige Korrelation).\n"
         elif forecast['r_squared'] > 0.8:
             text += "✅ Die Vorhersage basiert auf einem stabilen Trend.\n"
-    
-    return text
 
+    return text
 def fetch_processing_dates():
     """Holt alle Verarbeitungsdaten von der LSE-Webseite"""
     try:
@@ -1069,3 +1278,107 @@ Mögliche Gründe:
 
 if __name__ == "__main__":
     main()
+
+# ===== Robust regression helpers (appended) =====
+def _monotonic_smooth(y):
+    y = np.array(y, dtype=float)
+    for i in range(1, len(y)):
+        if y[i] < y[i-1]:
+            y[i] = y[i-1]
+    return y
+
+def _pairwise_slopes(x, y):
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    n = len(x); sl = []
+    for i in range(n):
+        for j in range(i+1, n):
+            dx = x[j] - x[i]
+            if dx != 0:
+                sl.append((y[j]-y[i]) / dx)
+    return np.array(sl, dtype=float) if sl else np.array([0.0])
+
+def _theil_sen(x, y):
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    b = np.median(_pairwise_slopes(x, y))
+    a = np.median(y - b*x)
+    return a, b
+
+def _ols(x, y, w=None):
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    if w is None:
+        n = len(x); Sx = x.sum(); Sy = y.sum()
+        Sxx = (x*x).sum(); Sxy = (x*y).sum()
+        den = n*Sxx - Sx*Sx
+        if den == 0:
+            return y.mean(), 0.0
+        b = (n*Sxy - Sx*Sy) / den
+        a = (Sy - b*Sx) / n
+        return a, b
+    else:
+        w = np.asarray(w, dtype=float); W = w.sum()
+        if W == 0:
+            return y.mean(), 0.0
+        xw = (w*x).sum()/W; yw = (w*y).sum()/W
+        Sxx = (w*(x-xw)*(x-xw)).sum()
+        if Sxx == 0:
+            return yw, 0.0
+        b = (w*(x-xw)*(y-yw)).sum()/Sxx
+        a = yw - b*xw
+        return a, b
+
+def _ewls(x, y, half_life_bdays=10, w_robust=None):
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    if len(x) == 0:
+        return (y.mean() if len(y) else 0.0), 0.0
+    age = x.max() - x
+    lam = np.log(2.0) / max(1e-9, half_life_bdays)
+    w = np.exp(-lam * age)
+    if w_robust is not None:
+        w = w * np.asarray(w_robust, dtype=float)
+    return _ols(x, y, w=w)
+
+def _recent_window_ols(x, y, k=10):
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    if len(x) <= 1:
+        return (y.mean() if len(y) else 0.0), 0.0
+    idx = max(0, len(x)-int(k))
+    return _ols(x[idx:], y[idx:])
+
+def _hampel_weights(increments, scale=None, k=3.0):
+    inc = np.asarray(increments, dtype=float)
+    med = np.median(inc)
+    mad = np.median(np.abs(inc - med)) if scale is None else scale
+    if mad == 0:
+        return np.ones_like(inc)
+    z = np.abs(inc - med) / (1.4826*mad)
+    w = np.ones_like(inc)
+    w[z > k] = 0.3
+    return w
+
+def _bootstrap_eta(x, y, solver_fn, y_targets, b=300, rng=None):
+    rng = np.random.default_rng(rng)
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    n = len(x)
+    if n < 2:
+        return {t: (np.nan, np.nan, np.nan) for t in y_targets}
+    samples = {t: [] for t in y_targets}
+    for _ in range(int(b)):
+        idx = rng.integers(0, n, size=n)
+        xb, yb = x[idx], y[idx]
+        order = np.argsort(xb)
+        xb, yb = xb[order], yb[order]
+        a1,b1 = solver_fn(xb, yb)
+        for t in y_targets:
+            if b1 <= 0:
+                est = np.nan
+            else:
+                est = (t - a1)/b1
+            samples[t].append(est)
+    out = {}
+    for t, arr in samples.items():
+        arr = np.array([v for v in arr if np.isfinite(v)])
+        if len(arr) == 0:
+            out[t] = (np.nan, np.nan, np.nan)
+        else:
+            out[t] = (np.percentile(arr, 10), np.percentile(arr, 50), np.percentile(arr, 90))
+    return out
