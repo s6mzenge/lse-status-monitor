@@ -59,7 +59,7 @@ def business_days_elapsed(start_dt, end_dt):
     Nutzt nur das Datum (keine Uhrzeiten). Für denselben Kalendertag -> 0.
     '''
     np = _get_numpy()
-    s = np.datetime64(start_dt.date(), 'D')
+    s = np.datetime64(start.date(), 'D')
     e = np.datetime64(end_dt.date(), 'D')
     # np.busday_count zählt Werktage im Intervall [s, e)
     return int(np.busday_count(s, e))
