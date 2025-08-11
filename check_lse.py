@@ -591,28 +591,45 @@ def compute_integrated_model_metrics(history):
     _np = _get_numpy()  # Lazy load numpy
 
     # ---- Daten aufbereiten: Changes & Heartbeats ----
-    # rows_all: alle Punkte (Änderungen + Heartbeats)
+    # rows_all: changes + filtered heartbeats (at most 1 heartbeat after last change)
     # rows_changes: nur echte Änderungen (für Backtest)
     rows_all = []
     rows_changes = []
-    heartbeats = 0
 
-    # history-Struktur: { "changes":[{timestamp, date, from}], "observations":[{timestamp, date, kind:'heartbeat'}], ... }
+    # 1) Build rows_changes from history.changes and sort them
     for ch in history.get("changes", []):
         rows_changes.append({"timestamp": ch["timestamp"], "date": ch["date"]})
         rows_all.append({"timestamp": ch["timestamp"], "date": ch["date"]})
-    for ob in history.get("observations", []):
-        if ob.get("kind") == "heartbeat":
-            heartbeats += 1
-        rows_all.append({"timestamp": ob["timestamp"], "date": ob["date"]})
-
-    # Sortieren
-    rows_all.sort(key=lambda r: _to_aware_berlin(r["timestamp"]))
+    
     rows_changes.sort(key=lambda r: _to_aware_berlin(r["timestamp"]))
 
-    # Mindestdaten
+    # 2) If fewer than 3 changes exist, return None (unchanged logic)
     if len(rows_changes) < 3:
         return None  # zu wenig für integriertes Modell
+
+    # 3) Determine last_change_ts from the last entry in rows_changes
+    last_change_ts = _to_aware_berlin(rows_changes[-1]["timestamp"])
+
+    # 4) Filter observations to only heartbeats with timestamp > last_change_ts
+    # If any exist, pick the one with the latest timestamp and append it to rows_all
+    heartbeats = 0
+    latest_heartbeat = None
+    
+    for ob in history.get("observations", []):
+        if ob.get("kind") == "heartbeat":
+            ob_ts = _to_aware_berlin(ob["timestamp"])
+            if ob_ts > last_change_ts:
+                # This heartbeat is after the last change
+                if latest_heartbeat is None or ob_ts > _to_aware_berlin(latest_heartbeat["timestamp"]):
+                    latest_heartbeat = {"timestamp": ob["timestamp"], "date": ob["date"]}
+    
+    # Add only the latest heartbeat (if any) to rows_all
+    if latest_heartbeat is not None:
+        rows_all.append(latest_heartbeat)
+        heartbeats = 1
+
+    # 5) Sort rows_all and continue with existing logic
+    rows_all.sort(key=lambda r: _to_aware_berlin(r["timestamp"]))
 
     # ---- Kalender / Konstanten ----
     cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
