@@ -1,20 +1,15 @@
-import requests
-from bs4 import BeautifulSoup
+# Core imports (always needed)
 import json
 import os
 import re
-import smtplib
-from email.mime.text import MIMEText
+import time
+import sys
 from datetime import datetime, timedelta
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
     from backports.zoneinfo import ZoneInfo
 from typing import Dict, List, Optional
-from collections import defaultdict
-import time
-import sys
-from io import BytesIO
 
 # Import configuration
 from config import (
@@ -22,6 +17,43 @@ from config import (
     TARGET_DATES, REQUEST_TIMEOUT, REQUEST_HEADERS, GMAIL_SMTP_SERVER, 
     GMAIL_SMTP_PORT, TELEGRAM_API_BASE
 )
+
+# Lazy imports for modules only needed conditionally
+_requests = None
+_BeautifulSoup = None
+_smtplib = None
+_MIMEText = None
+_BytesIO = None
+
+def _get_requests():
+    global _requests
+    if _requests is None:
+        import requests
+        _requests = requests
+    return _requests
+
+def _get_beautifulsoup():
+    global _BeautifulSoup
+    if _BeautifulSoup is None:
+        from bs4 import BeautifulSoup
+        _BeautifulSoup = BeautifulSoup
+    return _BeautifulSoup
+
+def _get_email():
+    global _smtplib, _MIMEText
+    if _smtplib is None:
+        import smtplib
+        from email.mime.text import MIMEText
+        _smtplib = smtplib
+        _MIMEText = MIMEText
+    return _smtplib, _MIMEText
+
+def _get_bytesio():
+    global _BytesIO
+    if _BytesIO is None:
+        from io import BytesIO
+        _BytesIO = BytesIO
+    return _BytesIO
 
 # Lazy imports for heavy dependencies - only loaded when needed
 _numpy = None
@@ -51,7 +83,7 @@ def _get_matplotlib():
 
 # === Konfiguration und Konstanten (ergänzt) ===
 # Constants now imported from config.py
-# === Business-day helpers (x-axis skips weekends) ===
+# Business-day helpers (x-axis skips weekends)
 
 def business_days_elapsed(start_dt, end_dt):
     '''
@@ -114,18 +146,56 @@ try:
 except ImportError:
     ADVANCED_REGRESSION = False
 
-URL = LSE_URL
+def should_skip_expensive_operations(current_date, status, is_manual):
+    """Determine if we can skip expensive operations like regression/graphs"""
+    # Always do full processing if manual
+    if is_manual:
+        return False
+    
+    # If no change detected, skip expensive operations  
+    if current_date == status.get('last_date'):
+        return True
+        
+    # If not enough historical data, skip regression
+    history = load_history()
+    if len(history.get('changes', [])) < REGRESSION_MIN_POINTS:
+        return True
+        
+    return False
+_web_cache = {}
+_cache_timeout = 300  # 5 minutes cache timeout
+
+def _get_cached_page(url, headers, timeout):
+    """Get page with smart caching to avoid redundant requests"""
+    import hashlib
+    cache_key = hashlib.md5(f"{url}:{str(headers)}".encode()).hexdigest()
+    
+    now = time.time()
+    if cache_key in _web_cache:
+        cached_data, cached_time = _web_cache[cache_key]
+        if now - cached_time < _cache_timeout:
+            print(f"Using cached page (age: {int(now - cached_time)}s)")
+            return cached_data
+    
+    # Fetch fresh data
+    requests = _get_requests()
+    response = requests.get(url, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    
+    # Cache the response
+    _web_cache[cache_key] = (response, now)
+    print("Fetched fresh page data")
+    return response
 
 from zoneinfo import ZoneInfo
+
 def get_german_time():
     return datetime.now(ZoneInfo("Europe/Berlin"))
 
-# ===== Compact forecast rendering (ALT vs. NEU) =====
+# Compact forecast rendering (ALT vs. NEU)
 import math
-from zoneinfo import ZoneInfo
 
 def _now_berlin():
-    from zoneinfo import ZoneInfo
     dt = get_german_time()
     if dt.tzinfo is None:
         return dt.replace(tzinfo=ZoneInfo("Europe/Berlin"))
@@ -134,7 +204,6 @@ def _now_berlin():
 def _short_date(d):  # "14 Aug"
     if d is None:
         return "—"
-    from zoneinfo import ZoneInfo
     if d.tzinfo is None:
         d = d.replace(tzinfo=ZoneInfo("Europe/Berlin"))
     return d.astimezone(ZoneInfo("Europe/Berlin")).strftime("%d %b").replace(".", "")
@@ -511,10 +580,8 @@ def _old_regression_summary(forecast):
         "eta25": eta25, "eta28": eta28
     }
 
-# ===== ETA-Backtest & Recency-Blend Helpers =====
+# ETA-Backtest & Recency-Blend Helpers
 import math
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 def _median(xs):
     xs = sorted(xs)
@@ -525,9 +592,6 @@ def _median(xs):
     if n % 2:
         return xs[mid]
     return 0.5 * (xs[mid-1] + xs[mid])
-
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 def _to_aware_berlin(dt):
     """Nimmt datetime ODER ISO-String (auch mit 'Z') und gibt tz-aware Europe/Berlin zurück."""
@@ -819,302 +883,305 @@ def create_progression_graph(history, current_date, forecast=None):
     plt, mdates = _get_matplotlib()
     np = _get_numpy()
     
-    from matplotlib.ticker import FuncFormatter, MaxNLocator
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
-
-    COL_ALT = "#1f77b4"   # Alt: blau
-    COL_NEU = "#ff7f0e"   # Neu: orange
-    COL_HB  = "#2ca02c"   # Heartbeats: grün
-
-    # ---------- Helfer ----------
-    def _to_naive_berlin(dt_like):
-        if dt_like is None:
-            return None
-        if isinstance(dt_like, datetime):
-            if dt_like.tzinfo is None:
-                return dt_like.replace(tzinfo=ZoneInfo("Europe/Berlin")).astimezone(
-                    ZoneInfo("Europe/Berlin")
-                ).replace(tzinfo=None)
-            return dt_like.astimezone(ZoneInfo("Europe/Berlin")).replace(tzinfo=None)
-        try:
-            dtx = datetime.fromisoformat(str(dt_like))
-            return dtx.astimezone(ZoneInfo("Europe/Berlin")).replace(tzinfo=None)
-        except Exception:
-            return None
-
-    # fraktionale Business-Days (werktags + Tagesanteil)
-    def _bizdays_float(start: datetime, t: datetime) -> float:
-        np = _get_numpy()  # Lazy load
-        s0 = datetime(start.year, start.month, start.day)
-        t0 = datetime(t.year, t.month, t.day)
-        full = float(np.busday_count(np.datetime64(s0.date()), np.datetime64(t0.date())))
-        def _frac(d: datetime) -> float:
-            if not bool(np.is_busday(np.datetime64(d.date()))):
-                return 0.0
-            return (d - datetime(d.year, d.month, d.day)).total_seconds() / 86400.0
-        return full + _frac(t) - _frac(s0)
-
-    def _days_to_dt(year, doy):
-        try:
-            start = datetime(year, 1, 1)
-            return (start + timedelta(days=float(doy) - 1)).replace(tzinfo=None)
-        except Exception:
-            return None
-
-    def _fmt_day_of_year(v, pos=None, year=None):
-        dt = _days_to_dt(year, v)
-        return dt.strftime('%d %b') if dt else ''
-
-    # exakter Schnittpunkt t* für Zielhöhe y_target auf y(t) = m * BD(t) + b
-    def _solve_time_for_level(m, b, y_target, t0, t_hint, sign_positive=True):
-        if m is None or m == 0:
-            return None
-
-        def f(t):  # y(t)
-            return m * _bizdays_float(t0, t) + b
-
-        # Bracketing um t_hint (heute) – expandieren bis Zielhöhe eingeschlossen ist
-        low  = t_hint - timedelta(days=5)
-        high = t_hint + timedelta(days=20)
-        max_expand = 20
-        if sign_positive:
-            while f(low)  > y_target and max_expand > 0:
-                low  -= timedelta(days=10); max_expand -= 1
-            while f(high) < y_target and max_expand > 0:
-                high += timedelta(days=10); max_expand -= 1
-        else:
-            while f(low)  < y_target and max_expand > 0:
-                low  -= timedelta(days=10); max_expand -= 1
-            while f(high) > y_target and max_expand > 0:
-                high += timedelta(days=10); max_expand -= 1
-
-        if (f(low) - y_target) * (f(high) - y_target) > 0:
-            return None  # kein gültiges Intervall
-
-        # Bisektion
-        for _ in range(50):
-            mid = low + (high - low) / 2
-            val = f(mid)
-            if abs(val - y_target) < 1e-6:
-                return mid
-            if (val < y_target) == sign_positive:
-                low = mid
-            else:
-                high = mid
-        return mid
-
-    # ---------- Daten sammeln ----------
+    # Early exit if not enough data
     entries = list(_iter_observations_or_changes(history))
     if len(entries) < REGRESSION_MIN_POINTS:
         return None
-
-    change_ts, change_y, change_labels = [], [], []
     
-    # Sammle alle echten Änderungen
-    for e in entries:
-        try:
-            ts = _to_naive_berlin(datetime.fromisoformat(e["timestamp"]))
-            yv = date_to_days(e["date"])
-            if ts is None or yv is None:
-                continue
-            if e.get("kind") != "heartbeat":
-                change_ts.append(ts); change_y.append(yv); change_labels.append(e["date"])
-        except Exception:
-            continue
+    try:
+        from matplotlib.ticker import FuncFormatter, MaxNLocator
 
-    if not change_ts:
-        return None
+        COL_ALT = "#1f77b4"   # Alt: blau
+        COL_NEU = "#ff7f0e"   # Neu: orange
+        COL_HB  = "#2ca02c"   # Heartbeats: grün
 
-    ordered = sorted(zip(change_ts, change_y, change_labels), key=lambda r: r[0])
-    change_ts, change_y, change_labels = [list(t) for t in zip(*ordered)]
-    
-    # GEÄNDERT: Filtere Heartbeats - nur den neuesten nach der letzten echten Änderung
-    hb_ts, hb_y = [], []
-    if change_ts:  # Wenn es echte Änderungen gibt
-        last_change_ts = change_ts[-1]  # Letzter Change-Zeitpunkt
+        # ---------- Helfer ----------
+        def _to_naive_berlin(dt_like):
+            if dt_like is None:
+                return None
+            if isinstance(dt_like, datetime):
+                if dt_like.tzinfo is None:
+                    return dt_like.replace(tzinfo=ZoneInfo("Europe/Berlin")).astimezone(
+                        ZoneInfo("Europe/Berlin")
+                    ).replace(tzinfo=None)
+                return dt_like.astimezone(ZoneInfo("Europe/Berlin")).replace(tzinfo=None)
+            try:
+                dtx = datetime.fromisoformat(str(dt_like))
+                return dtx.astimezone(ZoneInfo("Europe/Berlin")).replace(tzinfo=None)
+            except Exception:
+                return None
+
+        # fraktionale Business-Days (werktags + Tagesanteil)
+        def _bizdays_float(start: datetime, t: datetime) -> float:
+            s0 = datetime(start.year, start.month, start.day)
+            t0 = datetime(t.year, t.month, t.day)
+            full = float(np.busday_count(np.datetime64(s0.date()), np.datetime64(t0.date())))
+            def _frac(d: datetime) -> float:
+                if not bool(np.is_busday(np.datetime64(d.date()))):
+                    return 0.0
+                return (d - datetime(d.year, d.month, d.day)).total_seconds() / 86400.0
+            return full + _frac(t) - _frac(s0)
+
+        def _days_to_dt(year, doy):
+            try:
+                start = datetime(year, 1, 1)
+                return (start + timedelta(days=float(doy) - 1)).replace(tzinfo=None)
+            except Exception:
+                return None
+
+        def _fmt_day_of_year(v, pos=None, year=None):
+            dt = _days_to_dt(year, v)
+            return dt.strftime('%d %b') if dt else ''
+
+        # exakter Schnittpunkt t* für Zielhöhe y_target auf y(t) = m * BD(t) + b
+        def _solve_time_for_level(m, b, y_target, t0, t_hint, sign_positive=True):
+            if m is None or m == 0:
+                return None
+
+            def f(t):  # y(t)
+                return m * _bizdays_float(t0, t) + b
+
+            # Bracketing um t_hint (heute) – expandieren bis Zielhöhe eingeschlossen ist
+            low  = t_hint - timedelta(days=5)
+            high = t_hint + timedelta(days=20)
+            max_expand = 20
+            if sign_positive:
+                while f(low)  > y_target and max_expand > 0:
+                    low  -= timedelta(days=10); max_expand -= 1
+                while f(high) < y_target and max_expand > 0:
+                    high += timedelta(days=10); max_expand -= 1
+            else:
+                while f(low)  < y_target and max_expand > 0:
+                    low  -= timedelta(days=10); max_expand -= 1
+                while f(high) > y_target and max_expand > 0:
+                    high += timedelta(days=10); max_expand -= 1
+
+            if (f(low) - y_target) * (f(high) - y_target) > 0:
+                return None  # kein gültiges Intervall
+
+            # Bisektion
+            for _ in range(50):
+                mid = low + (high - low) / 2
+                val = f(mid)
+                if abs(val - y_target) < 1e-6:
+                    return mid
+                if (val < y_target) == sign_positive:
+                    low = mid
+                else:
+                    high = mid
+            return mid
+
+        # ---------- Daten sammeln ----------
+        change_ts, change_y, change_labels = [], [], []
         
-        # Sammle alle Heartbeats nach der letzten Änderung
-        heartbeats_after_last_change = []
+        # Sammle alle echten Änderungen
         for e in entries:
             try:
-                if e.get("kind") == "heartbeat":
-                    ts = _to_naive_berlin(datetime.fromisoformat(e["timestamp"]))
-                    yv = date_to_days(e["date"])
-                    if ts is None or yv is None:
-                        continue
-                    if ts > last_change_ts:  # Nur Heartbeats nach letzter Änderung
-                        heartbeats_after_last_change.append((ts, yv))
+                ts = _to_naive_berlin(datetime.fromisoformat(e["timestamp"]))
+                yv = date_to_days(e["date"])
+                if ts is None or yv is None:
+                    continue
+                if e.get("kind") != "heartbeat":
+                    change_ts.append(ts); change_y.append(yv); change_labels.append(e["date"])
             except Exception:
                 continue
+
+        if not change_ts:
+            return None
+
+        ordered = sorted(zip(change_ts, change_y, change_labels), key=lambda r: r[0])
+        change_ts, change_y, change_labels = [list(t) for t in zip(*ordered)]
         
-        # Wähle nur den neuesten Heartbeat (falls vorhanden)
-        if heartbeats_after_last_change:
-            heartbeats_after_last_change.sort(key=lambda x: x[0])  # Sortiere nach Zeitstempel
-            latest_hb_ts, latest_hb_y = heartbeats_after_last_change[-1]  # Neuester
-            hb_ts = [latest_hb_ts]
-            hb_y = [latest_hb_y]
+        # GEÄNDERT: Filtere Heartbeats - nur den neuesten nach der letzten echten Änderung
+        hb_ts, hb_y = [], []
+        if change_ts:  # Wenn es echte Änderungen gibt
+            last_change_ts = change_ts[-1]  # Letzter Change-Zeitpunkt
+            
+            # Sammle alle Heartbeats nach der letzten Änderung
+            heartbeats_after_last_change = []
+            for e in entries:
+                try:
+                    if e.get("kind") == "heartbeat":
+                        ts = _to_naive_berlin(datetime.fromisoformat(e["timestamp"]))
+                        yv = date_to_days(e["date"])
+                        if ts is None or yv is None:
+                            continue
+                        if ts > last_change_ts:  # Nur Heartbeats nach letzter Änderung
+                            heartbeats_after_last_change.append((ts, yv))
+                except Exception:
+                    continue
+            
+            # Wähle nur den neuesten Heartbeat (falls vorhanden)
+            if heartbeats_after_last_change:
+                heartbeats_after_last_change.sort(key=lambda x: x[0])  # Sortiere nach Zeitstempel
+                latest_hb_ts, latest_hb_y = heartbeats_after_last_change[-1]  # Neuester
+                hb_ts = [latest_hb_ts]
+                hb_y = [latest_hb_y]
 
-    now_de  = _to_naive_berlin(get_german_time())
-    year_ref = now_de.year
+        now_de  = _to_naive_berlin(get_german_time())
+        year_ref = now_de.year
 
-    # ---------- Plot-Setup ----------
-    try: plt.style.use("seaborn-v0_8-darkgrid")
-    except Exception: pass
-    fig, ax = plt.subplots(figsize=(12, 7))
+        # ---------- Plot-Setup ----------
+        try: plt.style.use("seaborn-v0_8-darkgrid")
+        except Exception: pass
+        fig, ax = plt.subplots(figsize=(12, 7))
 
-    # Historische Punkte + Labels (nur die letzten 8 beschriften, versetzt)
-    ax.scatter(change_ts, change_y, s=90, zorder=5, label="Änderungen (historisch)", alpha=0.9, color=COL_ALT)
-    last_k = max(0, len(change_ts) - 8)
-    for i, (ts, y, lbl) in enumerate(zip(change_ts[last_k:], change_y[last_k:], change_labels[last_k:])):
-        dy = 10 if i % 2 == 0 else -14
-        ax.annotate(lbl, (ts, y), xytext=(6, dy), textcoords="offset points",
-                    fontsize=8.5, alpha=0.85, ha="left", va="center")
+        # Historische Punkte + Labels (nur die letzten 8 beschriften, versetzt)
+        ax.scatter(change_ts, change_y, s=90, zorder=5, label="Änderungen (historisch)", alpha=0.9, color=COL_ALT)
+        last_k = max(0, len(change_ts) - 8)
+        for i, (ts, y, lbl) in enumerate(zip(change_ts[last_k:], change_y[last_k:], change_labels[last_k:])):
+            dy = 10 if i % 2 == 0 else -14
+            ax.annotate(lbl, (ts, y), xytext=(6, dy), textcoords="offset points",
+                        fontsize=8.5, alpha=0.85, ha="left", va="center")
 
-    # Heute & aktueller Punkt
-    ax.axvline(now_de, linewidth=1.0, linestyle=":", alpha=0.8)
-    ax.scatter([change_ts[-1]], [change_y[-1]], s=100, zorder=6, label="Aktuell", color=COL_NEU)
+        # Heute & aktueller Punkt
+        ax.axvline(now_de, linewidth=1.0, linestyle=":", alpha=0.8)
+        ax.scatter([change_ts[-1]], [change_y[-1]], s=100, zorder=6, label="Aktuell", color=COL_NEU)
 
-    # Zielhöhen (horizontale Linien)
-    target_map = {TARGET_DATES[0]: date_to_days(TARGET_DATES[0]), TARGET_DATES[1]: date_to_days(TARGET_DATES[1])}
-    for tname, ty in target_map.items():
-        if ty is not None:
-            ax.axhline(ty, linestyle=":", linewidth=1.0, alpha=0.5)
-            ax.text(change_ts[0], ty, f" {tname}", va="center", ha="left", fontsize=9)
+        # Zielhöhen (horizontale Linien)
+        target_map = {TARGET_DATES[0]: date_to_days(TARGET_DATES[0]), TARGET_DATES[1]: date_to_days(TARGET_DATES[1])}
+        for tname, ty in target_map.items():
+            if ty is not None:
+                ax.axhline(ty, linestyle=":", linewidth=1.0, alpha=0.5)
+                ax.text(change_ts[0], ty, f" {tname}", va="center", ha="left", fontsize=9)
 
-    # feines Zeitraster (6h) für glatte Linien
-    first_ts = change_ts[0]
-    left_bound  = min(change_ts[0], now_de - timedelta(days=3)) - timedelta(days=1)
-    right_bound = now_de + timedelta(days=40)
-    nsteps = int(max(1, (right_bound - left_bound).total_seconds() // (6 * 3600)))
-    grid_ts = [left_bound + timedelta(hours=6 * i) for i in range(nsteps + 1)]
-    grid_bd = [_bizdays_float(first_ts, t) for t in grid_ts]
+        # feines Zeitraster (6h) für glatte Linien
+        first_ts = change_ts[0]
+        left_bound  = min(change_ts[0], now_de - timedelta(days=3)) - timedelta(days=1)
+        right_bound = now_de + timedelta(days=40)
+        nsteps = int(max(1, (right_bound - left_bound).total_seconds() // (6 * 3600)))
+        grid_ts = [left_bound + timedelta(hours=6 * i) for i in range(nsteps + 1)]
+        grid_bd = [_bizdays_float(first_ts, t) for t in grid_ts]
 
-    # ---------- ALT-Linie + ETAs ----------
-    alt_eta = {}  # name -> (t*, y*)
-    if forecast and float(forecast.get("slope", 0.0)) > 0.0:
-        m_old = float(forecast["slope"])
-        y_now = forecast.get("current_trend_days", change_y[-1])
-        b_old = y_now - m_old * _bizdays_float(first_ts, now_de)
+        # ---------- ALT-Linie + ETAs ----------
+        alt_eta = {}  # name -> (t*, y*)
+        if forecast and float(forecast.get("slope", 0.0)) > 0.0:
+            m_old = float(forecast["slope"])
+            y_now = forecast.get("current_trend_days", change_y[-1])
+            b_old = y_now - m_old * _bizdays_float(first_ts, now_de)
 
-        y_old = np.array([m_old * bd + b_old for bd in grid_bd])
-        ax.plot(
-            grid_ts, y_old, linestyle=(0, (6, 4)), linewidth=2.0,
-            label=f"ALT: {forecast.get('model_name','Linear')} (R²={float(forecast.get('r_squared',0.0)):.2f})",
-            color=COL_ALT, alpha=0.95
-        )
+            y_old = np.array([m_old * bd + b_old for bd in grid_bd])
+            ax.plot(
+                grid_ts, y_old, linestyle=(0, (6, 4)), linewidth=2.0,
+                label=f"ALT: {forecast.get('model_name','Linear')} (R²={float(forecast.get('r_squared',0.0)):.2f})",
+                color=COL_ALT, alpha=0.95
+            )
 
-        for name, ty in target_map.items():
-            if ty is None: continue
-            t_star = _solve_time_for_level(m_old, b_old, ty, first_ts, now_de, sign_positive=(m_old > 0))
-            if t_star:
-                y_star = m_old * _bizdays_float(first_ts, t_star) + b_old
-                alt_eta[name] = (t_star, y_star)
+            for name, ty in target_map.items():
+                if ty is None: continue
+                t_star = _solve_time_for_level(m_old, b_old, ty, first_ts, now_de, sign_positive=(m_old > 0))
+                if t_star:
+                    y_star = m_old * _bizdays_float(first_ts, t_star) + b_old
+                    alt_eta[name] = (t_star, y_star)
 
-    # ---------- NEU-Linie + ETAs ----------
-    neu_eta = {}
-    try:
-        from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
-        from datetime import time as _time
+        # ---------- NEU-Linie + ETAs ----------
+        neu_eta = {}
+        try:
+            from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
+            from datetime import time as _time
 
-        rows = [{"timestamp": e["timestamp"], "date": e["date"]} for e in entries]
-        if len(rows) >= REGRESSION_MIN_POINTS:
-            cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
-            imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
+            rows = [{"timestamp": e["timestamp"], "date": e["date"]} for e in entries]
+            if len(rows) >= REGRESSION_MIN_POINTS:
+                cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
+                imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
 
-            hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute) / 60.0
-            m_new = float(imodel.ts_.b * hours_per_day)
+                hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute) / 60.0
+                m_new = float(imodel.ts_.b * hours_per_day)
 
-            y_curr = date_to_days(current_date) or (change_y[-1] if change_y else None)
-            if y_curr is not None and m_new is not None:
-                b_new = y_curr - m_new * _bizdays_float(first_ts, now_de)
-                y_new = np.array([m_new * bd + b_new for bd in grid_bd])
-                ax.plot(grid_ts, y_new, linewidth=2.6, label="NEU: integrierte Regression",
-                        color=COL_NEU, alpha=0.95)
+                y_curr = date_to_days(current_date) or (change_y[-1] if change_y else None)
+                if y_curr is not None and m_new is not None:
+                    b_new = y_curr - m_new * _bizdays_float(first_ts, now_de)
+                    y_new = np.array([m_new * bd + b_new for bd in grid_bd])
+                    ax.plot(grid_ts, y_new, linewidth=2.6, label="NEU: integrierte Regression",
+                            color=COL_NEU, alpha=0.95)
 
-                for name, ty in target_map.items():
-                    if ty is None: continue
-                    t_star = _solve_time_for_level(m_new, b_new, ty, first_ts, now_de, sign_positive=(m_new > 0))
-                    if t_star:
-                        y_star = m_new * _bizdays_float(first_ts, t_star) + b_new
-                        neu_eta[name] = (t_star, y_star)
-    except ImportError:
-        pass
-    except Exception as e:
-        print(f"⚠️ NEU-Regression konnte nicht gezeichnet werden: {e}")
+                    for name, ty in target_map.items():
+                        if ty is None: continue
+                        t_star = _solve_time_for_level(m_new, b_new, ty, first_ts, now_de, sign_positive=(m_new > 0))
+                        if t_star:
+                            y_star = m_new * _bizdays_float(first_ts, t_star) + b_new
+                            neu_eta[name] = (t_star, y_star)
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"⚠️ NEU-Regression konnte nicht gezeichnet werden: {e}")
 
-    # ---------- Sterne & Labels (ALT oben, NEU unten) ----------
-    def _plot_eta(name, alt_pt, neu_pt):
-        if alt_pt:
-            ax.plot([alt_pt[0]], [alt_pt[1]], marker="*", markersize=12, linestyle="None",
-                    zorder=7, color=COL_ALT)
-            ax.axvline(alt_pt[0], linestyle="--", linewidth=0.8, alpha=0.6, color=COL_ALT)
-            ax.annotate(f"ALT ETA {name}", (alt_pt[0], alt_pt[1]),
-                        xytext=(6, 9), textcoords="offset points", ha="left", va="bottom", fontsize=9,
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
-        if neu_pt:
-            ax.plot([neu_pt[0]], [neu_pt[1]], marker="*", markersize=12, linestyle="None",
-                    zorder=7, color=COL_NEU)
-            ax.axvline(neu_pt[0], linestyle="--", linewidth=0.8, alpha=0.6, color=COL_NEU)
-            ax.annotate(f"NEU ETA {name}", (neu_pt[0], neu_pt[1]),
-                        xytext=(6, -12), textcoords="offset points", ha="left", va="top", fontsize=9,
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
+        # ---------- Sterne & Labels (ALT oben, NEU unten) ----------
+        def _plot_eta(name, alt_pt, neu_pt):
+            if alt_pt:
+                ax.plot([alt_pt[0]], [alt_pt[1]], marker="*", markersize=12, linestyle="None",
+                        zorder=7, color=COL_ALT)
+                ax.axvline(alt_pt[0], linestyle="--", linewidth=0.8, alpha=0.6, color=COL_ALT)
+                ax.annotate(f"ALT ETA {name}", (alt_pt[0], alt_pt[1]),
+                            xytext=(6, 9), textcoords="offset points", ha="left", va="bottom", fontsize=9,
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
+            if neu_pt:
+                ax.plot([neu_pt[0]], [neu_pt[1]], marker="*", markersize=12, linestyle="None",
+                        zorder=7, color=COL_NEU)
+                ax.axvline(neu_pt[0], linestyle="--", linewidth=0.8, alpha=0.6, color=COL_NEU)
+                ax.annotate(f"NEU ETA {name}", (neu_pt[0], neu_pt[1]),
+                            xytext=(6, -12), textcoords="offset points", ha="left", va="top", fontsize=9,
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
 
-    _plot_eta("25", alt_eta.get("25 July"), neu_eta.get("25 July"))
-    _plot_eta("28", alt_eta.get("28 July"), neu_eta.get("28 July"))
+        _plot_eta("25", alt_eta.get("25 July"), neu_eta.get("25 July"))
+        _plot_eta("28", alt_eta.get("28 July"), neu_eta.get("28 July"))
 
-    # ---------- Achsenbegrenzungen ----------
-    eta_dates = [p[0] for p in list(alt_eta.values()) + list(neu_eta.values()) if p]
-    right_edge = max(eta_dates) if eta_dates else change_ts[-1]
-    left_edge  = min(change_ts[0], now_de - timedelta(days=3))
-    ax.set_xlim(left_edge - timedelta(days=1), right_edge + timedelta(days=1))
+        # ---------- Achsenbegrenzungen ----------
+        eta_dates = [p[0] for p in list(alt_eta.values()) + list(neu_eta.values()) if p]
+        right_edge = max(eta_dates) if eta_dates else change_ts[-1]
+        left_edge  = min(change_ts[0], now_de - timedelta(days=3))
+        ax.set_xlim(left_edge - timedelta(days=1), right_edge + timedelta(days=1))
 
-    y_min = min(change_y)
-    y_max = max([*change_y, *(v for v in target_map.values() if v is not None)])
-    ax.set_ylim(y_min - 2, y_max + 2)
+        y_min = min(change_y)
+        y_max = max([*change_y, *(v for v in target_map.values() if v is not None)])
+        ax.set_ylim(y_min - 2, y_max + 2)
 
-    # ---------- Heartbeats als Kreuze auf y ----------
-    if hb_ts:
-        ax.scatter(
-            hb_ts, hb_y,
-            marker='x', s=60, linewidths=1.8,
-            color=COL_HB, alpha=0.9,
-            label="Heartbeats (NEU)"
-        )
-        # Optionale, dezente Führungslinien:
-        # ylo, yhi = ax.get_ylim()
-        # ax.vlines(hb_ts, ylo + 0.01*(yhi-ylo), hb_y, colors=COL_HB, linewidth=0.8, alpha=0.35)
+        # ---------- Heartbeats als Kreuze auf y ----------
+        if hb_ts:
+            ax.scatter(
+                hb_ts, hb_y,
+                marker='x', s=60, linewidths=1.8,
+                color=COL_HB, alpha=0.9,
+                label="Heartbeats (NEU)"
+            )
 
-    # ---------- Achsenformat ----------
-    ax.set_title("Fortschritt & Prognose — ALT vs. NEU")
-    ax.set_xlabel("Datum")
-    ax.set_ylabel("Verarbeitungsdatum")
+        # ---------- Achsenformat ----------
+        ax.set_title("Fortschritt & Prognose — ALT vs. NEU")
+        ax.set_xlabel("Datum")
+        ax.set_ylabel("Verarbeitungsdatum")
 
-    ax.xaxis.set_major_locator(mdates.DayLocator(interval=2))
-    ax.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
-    ax.tick_params(axis="x", which="major", labelsize=9)
-    ax.tick_params(axis="x", which="minor", length=3)
+        ax.xaxis.set_major_locator(mdates.DayLocator(interval=2))
+        ax.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
+        ax.tick_params(axis="x", which="major", labelsize=9)
+        ax.tick_params(axis="x", which="minor", length=3)
 
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=8, steps=[1, 2, 3, 5]))
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, pos: _fmt_day_of_year(v, pos, year_ref)))
-    ax.tick_params(axis="y", labelsize=9)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=8, steps=[1, 2, 3, 5]))
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, pos: _fmt_day_of_year(v, pos, year_ref)))
+        ax.tick_params(axis="y", labelsize=9)
 
-    ax.legend(loc="upper left", ncol=2, fontsize=9)
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
+        ax.legend(loc="upper left", ncol=2, fontsize=9)
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
 
-    # ---------- Export ----------
-    try:
+        # ---------- Export ----------
+        BytesIO = _get_bytesio()
         buf = BytesIO()
         plt.savefig(buf, format="png", dpi=110, bbox_inches="tight")
         buf.seek(0)
-        plt.close()
+        
+        # Clean up immediately to save memory
+        plt.close(fig)
+        del fig, ax
+        
         return buf
+        
     except Exception as e:
         print(f"⚠️ Diagramm konnte nicht erzeugt werden: {e}")
-        try: plt.close()
-        except Exception: pass
+        try: 
+            plt.close('all')  # Clean up any open figures
+        except Exception: 
+            pass
         return None
 
 def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=None, parse_mode='HTML'):
@@ -1146,6 +1213,7 @@ def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=
         return False
     
     try:
+        requests = _get_requests()
         if photo_buffer:
             # Send photo with caption
             url = f"{TELEGRAM_API_BASE}{bot_token}/sendPhoto"
@@ -1238,39 +1306,118 @@ def migrate_json_files():
     except Exception as e:
         print(f"⚠️ Fehler bei History-Migration: {e}")
 
-def load_status():
-    """Lädt Status mit Fehlerbehandlung und Validierung"""
+# Cache loaded data to avoid redundant file I/O
+_loaded_status = None
+_loaded_history = None
+_status_last_modified = 0
+_history_last_modified = 0
+
+def load_status(force_reload=False):
+    """Lädt Status mit Caching und Fehlerbehandlung"""
+    global _loaded_status, _status_last_modified
+    
     try:
+        # Check if we need to reload
+        if not force_reload and _loaded_status is not None:
+            try:
+                current_mtime = os.path.getmtime(STATUS_FILE)
+                if current_mtime <= _status_last_modified:
+                    return _loaded_status.copy()  # Return copy to prevent mutations
+            except OSError:
+                pass  # File might not exist, proceed with normal loading
+        
         with open(STATUS_FILE, 'r') as f:
             status = json.load(f)
-        if not isinstance(status, dict):
-            print("⚠️ Status ist kein Dictionary, verwende Standardwerte")
-            return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
-        if 'last_date' not in status:
-            print("⚠️ last_date fehlt in status.json, verwende Standardwert")
-            status['last_date'] = "10 July"
-        if 'last_check' not in status:
-            status['last_check'] = None
-        if 'pre_cas_date' not in status:
-            status['pre_cas_date'] = None
-        if 'cas_date' not in status:
-            status['cas_date'] = None
-        if 'last_updated_seen_utc' not in status:
-            status['last_updated_seen_utc'] = None
-        print(f"✅ Status geladen: {status['last_date']}")
-        return status
+        
+        _status_last_modified = os.path.getmtime(STATUS_FILE)
+    except OSError:
+        _status_last_modified = 0
     except FileNotFoundError:
         print("ℹ️ status.json nicht gefunden, erstelle neue Datei")
-        return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
+        status = {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
+        _status_last_modified = 0
     except json.JSONDecodeError as e:
         print(f"❌ Fehler beim Parsen von status.json: {e}")
         print("Verwende Standardwerte")
-        return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
+        status = {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
+        _status_last_modified = 0
     except Exception as e:
         print(f"❌ Unerwarteter Fehler beim Laden von status.json: {e}")
-        return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
+        status = {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
+        _status_last_modified = 0
+    
+    # Validate and normalize loaded data
+    if not isinstance(status, dict):
+        print("⚠️ Status ist kein Dictionary, verwende Standardwerte")
+        status = {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
+    
+    # Ensure required fields exist
+    for field in ['last_date', 'last_check', 'pre_cas_date', 'cas_date', 'last_updated_seen_utc']:
+        if field not in status:
+            status[field] = "10 July" if field == 'last_date' else None
+    
+    if not status['last_date']:
+        print("⚠️ last_date fehlt in status.json, verwende Standardwert")
+        status['last_date'] = "10 July"
+    
+    print(f"✅ Status geladen: {status['last_date']}")
+    _loaded_status = status.copy()
+    return status
+
+def load_history(force_reload=False):
+    """Lädt Historie mit Caching und Fehlerbehandlung"""
+    global _loaded_history, _history_last_modified
+    
+    try:
+        # Check if we need to reload
+        if not force_reload and _loaded_history is not None:
+            try:
+                current_mtime = os.path.getmtime(HISTORY_FILE)
+                if current_mtime <= _history_last_modified:
+                    return _loaded_history.copy()  # Return copy to prevent mutations
+            except OSError:
+                pass  # File might not exist, proceed with normal loading
+        
+        with open(HISTORY_FILE, 'r') as f:
+            history = json.load(f)
+        
+        _history_last_modified = os.path.getmtime(HISTORY_FILE)
+    except OSError:
+        _history_last_modified = 0
+    except FileNotFoundError:
+        print("ℹ️ history.json nicht gefunden, erstelle neue Datei")
+        history = {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+        _history_last_modified = 0
+    except json.JSONDecodeError as e:
+        print(f"❌ Fehler beim Parsen von history.json: {e}")
+        history = {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+        _history_last_modified = 0
+    except Exception as e:
+        print(f"❌ Unerwarteter Fehler beim Laden von history.json: {e}")
+        history = {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+        _history_last_modified = 0
+    
+    # Validate and normalize loaded data  
+    if not isinstance(history, dict) or 'changes' not in history:
+        print("⚠️ History ist ungültig, verwende leere Historie")
+        history = {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+    
+    if not isinstance(history['changes'], list):
+        print("⚠️ History changes ist keine Liste, verwende leere Historie")
+        history = {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+    
+    # Ensure all required arrays exist
+    for field in ['pre_cas_changes', 'cas_changes', 'observations']:
+        if field not in history:
+            history[field] = []
+    
+    print(f"✅ Historie geladen: {len(history['changes'])} Änderungen, {len(history.get('observations', []))} Beobachtungen")
+    _loaded_history = history.copy()
+    return history
 def save_status(status):
-    """Speichert Status mit Validierung und Verifikation"""
+    """Speichert Status mit Validierung und Cache-Invalidierung"""
+    global _loaded_status, _status_last_modified
+    
     # Validiere dass last_date gesetzt ist
     if not status.get('last_date'):
         print("❌ Fehler: last_date ist leer, Status wird nicht gespeichert")
@@ -1295,6 +1442,10 @@ def save_status(status):
         with open(STATUS_FILE, 'w') as f:
             json.dump(status, f, indent=2)
         
+        # Update cache
+        _loaded_status = status.copy()
+        _status_last_modified = os.path.getmtime(STATUS_FILE)
+        
         # Verifiziere dass es korrekt gespeichert wurde
         with open(STATUS_FILE, 'r') as f:
             saved = json.load(f)
@@ -1308,6 +1459,7 @@ def save_status(status):
                 # Restore backup
                 if os.path.exists(STATUS_FILE + '.backup'):
                     os.rename(STATUS_FILE + '.backup', STATUS_FILE)
+                _loaded_status = None  # Invalidate cache
                 return False
                 
     except Exception as e:
@@ -1315,50 +1467,15 @@ def save_status(status):
         # Restore backup
         if os.path.exists(STATUS_FILE + '.backup'):
             os.rename(STATUS_FILE + '.backup', STATUS_FILE)
+        _loaded_status = None  # Invalidate cache
         return False
-
-def load_history():
-    """Lädt Historie mit Fehlerbehandlung"""
-    try:
-        with open(HISTORY_FILE, 'r') as f:
-            history = json.load(f)
-            
-        # Validiere die geladenen Daten
-        if not isinstance(history, dict) or 'changes' not in history:
-            print("⚠️ History ist ungültig, verwende leere Historie")
-            return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
-            
-        if not isinstance(history['changes'], list):
-            print("⚠️ History changes ist keine Liste, verwende leere Historie")
-            return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
-        
-        # Stelle sicher dass neue Arrays existieren
-        if 'pre_cas_changes' not in history:
-            history['pre_cas_changes'] = []
-        if 'cas_changes' not in history:
-            history['cas_changes'] = []
-        if 'observations' not in history:
-            history['observations'] = []
-            
-        print(f"✅ Historie geladen: {len(history['changes'])} Änderungen, {len(history.get('observations', []))} Beobachtungen")
-        return history
-    except FileNotFoundError:
-        print("ℹ️ history.json nicht gefunden, erstelle neue Datei")
-        return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
-    except json.JSONDecodeError as e:
-        print(f"❌ Fehler beim Parsen von history.json: {e}")
-        return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
-    except Exception as e:
-        print(f"❌ Unerwarteter Fehler beim Laden von history.json: {e}")
-        return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
 
 def get_history():
     """Backward-compat wrapper to load history."""
     return load_history()
-
-
-def save_history(history):
-    """Speichert Historie mit Validierung"""
+    """Speichert Historie mit Validierung und Cache-Invalidierung"""
+    global _loaded_history, _history_last_modified
+    
     try:
         # Validiere die Historie
         if not isinstance(history, dict) or 'changes' not in history:
@@ -1367,10 +1484,16 @@ def save_history(history):
             
         with open(HISTORY_FILE, 'w') as f:
             json.dump(history, f, indent=2)
+        
+        # Update cache
+        _loaded_history = history.copy()
+        _history_last_modified = os.path.getmtime(HISTORY_FILE)
+        
         print(f"✅ Historie gespeichert: {len(history['changes'])} Änderungen")
         return True
     except Exception as e:
         print(f"❌ Fehler beim Speichern von history.json: {e}")
+        _loaded_history = None  # Invalidate cache
         return False
 
 def date_to_days(date_str):
@@ -1463,8 +1586,8 @@ def fetch_processing_dates():
     """Holt alle Verarbeitungsdaten von der LSE-Webseite"""
     try:
         print("Rufe LSE-Webseite ab...")
-        response = requests.get(URL, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
+        BeautifulSoup = _get_beautifulsoup()
+        response = _get_cached_page(URL, REQUEST_HEADERS, REQUEST_TIMEOUT)
         
         soup = BeautifulSoup(response.text, 'html.parser')
         full_text = soup.get_text()
@@ -1532,15 +1655,17 @@ def fetch_processing_dates():
         
         return dates
         
-    except requests.exceptions.Timeout:
-        print("❌ Timeout beim Abrufen der Webseite")
-        return {'all_other': None, 'pre_cas': None, 'cas': None}
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Netzwerkfehler beim Abrufen der Webseite: {e}")
-        return {'all_other': None, 'pre_cas': None, 'cas': None}
     except Exception as e:
-        print(f"❌ Unerwarteter Fehler beim Abrufen der Webseite: {e}")
-        return {'all_other': None, 'pre_cas': None, 'cas': None}
+        requests = _get_requests()  # Ensure we have access to exceptions
+        if isinstance(e, requests.exceptions.Timeout):
+            print("❌ Timeout beim Abrufen der Webseite")
+            return {'all_other': None, 'pre_cas': None, 'cas': None}
+        elif isinstance(e, requests.exceptions.RequestException):
+            print(f"❌ Netzwerkfehler beim Abrufen der Webseite: {e}")
+            return {'all_other': None, 'pre_cas': None, 'cas': None}
+        else:
+            print(f"❌ Unerwarteter Fehler beim Abrufen der Webseite: {e}")
+            return {'all_other': None, 'pre_cas': None, 'cas': None}
 
 def send_gmail(subject, body, recipients):
     """Sendet E-Mail über Gmail an spezifische Empfänger"""
@@ -1557,6 +1682,7 @@ def send_gmail(subject, body, recipients):
     
     print(f"Sende E-Mail an {len(recipients)} Empfänger: {', '.join(recipients)}")
     
+    smtplib, MIMEText = _get_email()
     success_count = 0
     for recipient in recipients:
         msg = MIMEText(body)
@@ -1675,11 +1801,16 @@ def main():
     if current_date:
         print(f"Aktuelles Datum für 'all other graduate applicants': {current_date}")
         
+        # Check if we can skip expensive operations
+        skip_expensive = should_skip_expensive_operations(current_date, status, IS_MANUAL)
+        if skip_expensive and not IS_MANUAL:
+            print("⚡ Skipping expensive operations (no change detected)")
+        
         # Bei manuellem Check immer Status senden (NUR für all other applicants)
         if IS_MANUAL:
             # Berechne aktuellen Trend und erstelle vollständige Prognose
-            forecast = calculate_regression_forecast(history)
-            forecast_text = create_forecast_text(forecast) or ""
+            forecast = calculate_regression_forecast(history) if not skip_expensive else None
+            forecast_text = create_forecast_text(forecast) or "" if forecast else ""
             
             telegram_msg = f"""<b>📊 LSE Status Check Ergebnis</b>
 
@@ -1696,10 +1827,11 @@ def main():
             send_telegram(telegram_msg)
             
             # Erstelle und sende Graph
-            graph_buffer = create_progression_graph(history, current_date, forecast)
-            if graph_buffer:
-                graph_caption = f"📈 Progression der LSE Verarbeitungsdaten\nAktuell: {current_date}"
-                send_telegram_photo(graph_buffer, graph_caption)
+            if not skip_expensive:
+                graph_buffer = create_progression_graph(history, current_date, forecast)
+                if graph_buffer:
+                    graph_caption = f"📈 Progression der LSE Verarbeitungsdaten\nAktuell: {current_date}"
+                    send_telegram_photo(graph_buffer, graph_caption)
         
         # WICHTIG: Prüfe ob sich das Datum wirklich geändert hat
         if current_date != status['last_date']:
@@ -1724,9 +1856,12 @@ def main():
             if not save_history(history):
                 print("❌ Fehler beim Speichern der Historie!")
             
-            # Berechne Prognose
-            forecast = calculate_regression_forecast(history)
-            forecast_text = create_forecast_text(forecast) or ""
+            # Berechne Prognose nur wenn nötig
+            forecast = None
+            forecast_text = ""
+            if not skip_expensive:
+                forecast = calculate_regression_forecast(history)
+                forecast_text = create_forecast_text(forecast) or ""
             
             # Erstelle E-Mail-Inhalt
             subject = f"LSE Status Update: Neues Datum {current_date}"
@@ -1767,11 +1902,12 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
                 
                 send_telegram(telegram_msg)
                 
-                # Sende Graph als separates Bild
-                graph_buffer = create_progression_graph(history, current_date, forecast)
-                if graph_buffer:
-                    graph_caption = f"📈 Progression Update\nNeues Datum: {current_date}"
-                    send_telegram_photo(graph_buffer, graph_caption)
+                # Sende Graph als separates Bild (nur wenn nicht übersprungen)
+                if not skip_expensive:
+                    graph_buffer = create_progression_graph(history, current_date, forecast)
+                    if graph_buffer:
+                        graph_caption = f"📈 Progression Update\nNeues Datum: {current_date}"
+                        send_telegram_photo(graph_buffer, graph_caption)
             else:
                 # Manueller Check: Spezielle Nachricht bei Änderung mit Graph
                 telegram_msg = f"""<b>🚨 ÄNDERUNG GEFUNDEN!</b>
@@ -1790,11 +1926,12 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
                 
                 send_telegram(telegram_msg)
                 
-                # Sende Graph
-                graph_buffer = create_progression_graph(history, current_date, forecast)
-                if graph_buffer:
-                    graph_caption = f"📈 Änderung erkannt!\nVon {status['last_date']} auf {current_date}"
-                    send_telegram_photo(graph_buffer, graph_caption)
+                # Sende Graph (nur wenn nicht übersprungen)
+                if not skip_expensive:
+                    graph_buffer = create_progression_graph(history, current_date, forecast)
+                    if graph_buffer:
+                        graph_caption = f"📈 Änderung erkannt!\nVon {status['last_date']} auf {current_date}"
+                        send_telegram_photo(graph_buffer, graph_caption)
             
             # Sende E-Mails
             emails_sent = False
@@ -1820,11 +1957,12 @@ Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
 <a href="{URL}">📄 Jetzt zur LSE Webseite</a>"""
                 send_telegram(telegram_special)
                 
-                # Sende speziellen Graph für Zieldatum
-                graph_buffer = create_progression_graph(history, current_date, forecast)
-                if graph_buffer:
-                    graph_caption = f"🎯 ZIELDATUM ERREICHT: {current_date}!"
-                    send_telegram_photo(graph_buffer, graph_caption)
+                # Sende speziellen Graph für Zieldatum (nur wenn nicht übersprungen)
+                if not skip_expensive:
+                    graph_buffer = create_progression_graph(history, current_date, forecast)
+                    if graph_buffer:
+                        graph_caption = f"🎯 ZIELDATUM ERREICHT: {current_date}!"
+                        send_telegram_photo(graph_buffer, graph_caption)
             
             if emails_sent or os.environ.get('TELEGRAM_BOT_TOKEN'):
                 # KRITISCH: Update Status IMMER nach einer erkannten Änderung
