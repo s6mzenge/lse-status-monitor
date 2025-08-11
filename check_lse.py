@@ -15,12 +15,26 @@ from typing import Dict, List, Optional
 from collections import defaultdict
 import time
 import sys
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 from io import BytesIO
 import base64
 import warnings
 warnings.filterwarnings('ignore')
+
+# Lazy imports for heavy dependencies
+_matplotlib_imported = False
+_matplotlib_plt = None
+_matplotlib_mdates = None
+
+def _get_matplotlib():
+    """Lazy import matplotlib only when needed for graph generation"""
+    global _matplotlib_imported, _matplotlib_plt, _matplotlib_mdates
+    if not _matplotlib_imported:
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+        _matplotlib_plt = plt
+        _matplotlib_mdates = mdates
+        _matplotlib_imported = True
+    return _matplotlib_plt, _matplotlib_mdates
 
 
 # === Konfiguration und Konstanten (ergänzt) ===
@@ -56,28 +70,92 @@ def add_business_days(start_dt, n):
     return current
 
 
-# Versuche erweiterte Bibliotheken zu importieren
-try:
-    from scipy import stats
-    from sklearn.linear_model import HuberRegressor, RANSACRegressor
-    from sklearn.preprocessing import PolynomialFeatures
-    from sklearn.pipeline import make_pipeline
-    ADVANCED_REGRESSION = True
-except ImportError:
-    print("⚠️ Erweiterte Regression nicht verfügbar. Installiere: pip install scikit-learn scipy")
-    ADVANCED_REGRESSION = False
+# Lazy imports for advanced regression libraries
+_advanced_regression_imported = False
+_scipy_stats = None
+_sklearn_modules = {}
+
+def _get_advanced_regression():
+    """Lazy import advanced regression libraries only when needed"""
+    global _advanced_regression_imported, _scipy_stats, _sklearn_modules
+    if not _advanced_regression_imported:
+        try:
+            from scipy import stats
+            from sklearn.linear_model import HuberRegressor, RANSACRegressor
+            from sklearn.preprocessing import PolynomialFeatures
+            from sklearn.pipeline import make_pipeline
+            
+            _scipy_stats = stats
+            _sklearn_modules = {
+                'HuberRegressor': HuberRegressor,
+                'RANSACRegressor': RANSACRegressor,
+                'PolynomialFeatures': PolynomialFeatures,
+                'make_pipeline': make_pipeline
+            }
+            _advanced_regression_imported = True
+            return True
+        except ImportError:
+            _advanced_regression_imported = True  # Don't try again
+            return False
+    return _scipy_stats is not None
+
+# Check if advanced regression is available (cached)
+ADVANCED_REGRESSION = _get_advanced_regression()
 
 URL = "https://www.lse.ac.uk/study-at-lse/Graduate/News/Current-processing-times"
 STATUS_FILE = "status.json"
 HISTORY_FILE = "history.json"
 
-from zoneinfo import ZoneInfo
+# Cache for JSON data to avoid repeated file I/O
+_status_cache = None
+_history_cache = None
+_status_dirty = False
+_history_dirty = False
+
+# HTTP session for reusing connections
+_http_session = None
+
+def _get_http_session():
+    """Get or create HTTP session for connection reuse"""
+    global _http_session
+    if _http_session is None:
+        import requests
+        _http_session = requests.Session()
+        _http_session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        })
+    return _http_session
+
+def cleanup_resources():
+    """Clean up resources like HTTP session and large cache objects"""
+    global _http_session, _matplotlib_imported, _status_cache, _history_cache
+    
+    if _http_session:
+        _http_session.close()
+        _http_session = None
+    
+    # Clear matplotlib if it was imported to free memory
+    if _matplotlib_imported:
+        plt, _ = _get_matplotlib()
+        plt.close('all')  # Close all open figures
+    
+    # Don't clear cache as it might be needed for final saves
+    print("✅ Resources cleaned up")
+
+# Cache German timezone for reuse
+_german_tz = ZoneInfo("Europe/Berlin")
+
 def get_german_time():
-    return datetime.now(ZoneInfo("Europe/Berlin"))
+    """Optimized function to get German time using cached timezone"""
+    return datetime.now(_german_tz)
 
 # ===== Compact forecast rendering (ALT vs. NEU) =====
 import math
-from zoneinfo import ZoneInfo
 
 def _now_berlin():
     from zoneinfo import ZoneInfo
@@ -719,8 +797,8 @@ def create_progression_graph(history, current_date, forecast=None):
     Gibt BytesIO (PNG) zurück oder None.
     """
     from io import BytesIO
-    import matplotlib.pyplot as plt
-    import matplotlib.dates as mdates
+    # Use lazy imports for matplotlib
+    plt, mdates = _get_matplotlib()
     from matplotlib.ticker import FuncFormatter, MaxNLocator
     import numpy as np
     from datetime import datetime, timedelta
@@ -1155,42 +1233,65 @@ def migrate_json_files():
         print(f"⚠️ Fehler bei History-Migration: {e}")
 
 def load_status():
-    """Lädt Status mit Fehlerbehandlung und Validierung"""
+    """Lädt Status mit Fehlerbehandlung, Validierung und Caching"""
+    global _status_cache
+    
+    # Return cached version if available
+    if _status_cache is not None:
+        return _status_cache.copy()
+    
     try:
         with open(STATUS_FILE, 'r') as f:
             status = json.load(f)
         if not isinstance(status, dict):
             print("⚠️ Status ist kein Dictionary, verwende Standardwerte")
-            return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
-        if 'last_date' not in status:
-            print("⚠️ last_date fehlt in status.json, verwende Standardwert")
-            status['last_date'] = "10 July"
-        if 'last_check' not in status:
-            status['last_check'] = None
-        if 'pre_cas_date' not in status:
-            status['pre_cas_date'] = None
-        if 'cas_date' not in status:
-            status['cas_date'] = None
-        if 'last_updated_seen_utc' not in status:
-            status['last_updated_seen_utc'] = None
+            status = {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
+        else:
+            # Ensure all required fields exist
+            if 'last_date' not in status:
+                print("⚠️ last_date fehlt in status.json, verwende Standardwert")
+                status['last_date'] = "10 July"
+            if 'last_check' not in status:
+                status['last_check'] = None
+            if 'pre_cas_date' not in status:
+                status['pre_cas_date'] = None
+            if 'cas_date' not in status:
+                status['cas_date'] = None
+            if 'last_updated_seen_utc' not in status:
+                status['last_updated_seen_utc'] = None
+        
         print(f"✅ Status geladen: {status['last_date']}")
-        return status
+        _status_cache = status.copy()
+        return status.copy()
+        
     except FileNotFoundError:
         print("ℹ️ status.json nicht gefunden, erstelle neue Datei")
-        return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
+        status = {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
+        _status_cache = status.copy()
+        return status.copy()
     except json.JSONDecodeError as e:
         print(f"❌ Fehler beim Parsen von status.json: {e}")
         print("Verwende Standardwerte")
-        return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
+        status = {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
+        _status_cache = status.copy()
+        return status.copy()
     except Exception as e:
         print(f"❌ Unerwarteter Fehler beim Laden von status.json: {e}")
-        return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
+        status = {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
+        _status_cache = status.copy()
+        return status.copy()
 def save_status(status):
-    """Speichert Status mit Validierung und Verifikation"""
+    """Speichert Status mit Validierung, Verifikation und Cache-Update"""
+    global _status_cache, _status_dirty
+    
     # Validiere dass last_date gesetzt ist
     if not status.get('last_date'):
         print("❌ Fehler: last_date ist leer, Status wird nicht gespeichert")
         return False
+    
+    # Update cache first
+    _status_cache = status.copy()
+    _status_dirty = True
     
     # Erstelle Backup bevor wir speichern
     try:
@@ -1216,6 +1317,7 @@ def save_status(status):
             saved = json.load(f)
             if saved.get('last_date') == status['last_date']:
                 print(f"✅ Status erfolgreich gespeichert: {status['last_date']}")
+                _status_dirty = False
                 return True
             else:
                 print(f"❌ FEHLER: Status nicht korrekt gespeichert!")
@@ -1234,7 +1336,13 @@ def save_status(status):
         return False
 
 def load_history():
-    """Lädt Historie mit Fehlerbehandlung"""
+    """Lädt Historie mit Fehlerbehandlung und Caching"""
+    global _history_cache
+    
+    # Return cached version if available
+    if _history_cache is not None:
+        return _history_cache.copy()
+    
     try:
         with open(HISTORY_FILE, 'r') as f:
             history = json.load(f)
@@ -1242,31 +1350,39 @@ def load_history():
         # Validiere die geladenen Daten
         if not isinstance(history, dict) or 'changes' not in history:
             print("⚠️ History ist ungültig, verwende leere Historie")
-            return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
-            
-        if not isinstance(history['changes'], list):
-            print("⚠️ History changes ist keine Liste, verwende leere Historie")
-            return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
-        
-        # Stelle sicher dass neue Arrays existieren
-        if 'pre_cas_changes' not in history:
-            history['pre_cas_changes'] = []
-        if 'cas_changes' not in history:
-            history['cas_changes'] = []
-        if 'observations' not in history:
-            history['observations'] = []
+            history = {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+        else:
+            if not isinstance(history['changes'], list):
+                print("⚠️ History changes ist keine Liste, verwende leere Historie")
+                history = {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+            else:
+                # Stelle sicher dass neue Arrays existieren
+                if 'pre_cas_changes' not in history:
+                    history['pre_cas_changes'] = []
+                if 'cas_changes' not in history:
+                    history['cas_changes'] = []
+                if 'observations' not in history:
+                    history['observations'] = []
             
         print(f"✅ Historie geladen: {len(history['changes'])} Änderungen, {len(history.get('observations', []))} Beobachtungen")
-        return history
+        _history_cache = history.copy()
+        return history.copy()
+        
     except FileNotFoundError:
         print("ℹ️ history.json nicht gefunden, erstelle neue Datei")
-        return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+        history = {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+        _history_cache = history.copy()
+        return history.copy()
     except json.JSONDecodeError as e:
         print(f"❌ Fehler beim Parsen von history.json: {e}")
-        return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+        history = {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+        _history_cache = history.copy()
+        return history.copy()
     except Exception as e:
         print(f"❌ Unerwarteter Fehler beim Laden von history.json: {e}")
-        return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+        history = {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+        _history_cache = history.copy()
+        return history.copy()
 
 def get_history():
     """Backward-compat wrapper to load history."""
@@ -1274,16 +1390,23 @@ def get_history():
 
 
 def save_history(history):
-    """Speichert Historie mit Validierung"""
+    """Speichert Historie mit Validierung und Cache-Update"""
+    global _history_cache, _history_dirty
+    
     try:
         # Validiere die Historie
         if not isinstance(history, dict) or 'changes' not in history:
             print("❌ Fehler: Historie ist ungültig")
             return False
+        
+        # Update cache first
+        _history_cache = history.copy()
+        _history_dirty = True
             
         with open(HISTORY_FILE, 'w') as f:
             json.dump(history, f, indent=2)
         print(f"✅ Historie gespeichert: {len(history['changes'])} Änderungen")
+        _history_dirty = False
         return True
     except Exception as e:
         print(f"❌ Fehler beim Speichern von history.json: {e}")
@@ -1376,22 +1499,19 @@ def extract_last_updated(text):
 
 
 def fetch_processing_dates():
-    """Holt alle Verarbeitungsdaten von der LSE-Webseite"""
+    """Holt alle Verarbeitungsdaten von der LSE-Webseite mit optimierter HTTP-Session"""
     try:
         print("Rufe LSE-Webseite ab...")
-        response = requests.get(URL, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        }, timeout=30)
+        # Use optimized HTTP session
+        session = _get_http_session()
+        response = session.get(URL, timeout=30)
         response.raise_for_status()
         
+        # Parse only once and extract text only once
         soup = BeautifulSoup(response.text, 'html.parser')
         full_text = soup.get_text()
-        # Parse Last updated
+        
+        # Parse Last updated once
         last_up_dt = extract_last_updated(full_text)
         
         # Initialisiere Rückgabewerte
@@ -1868,6 +1988,9 @@ Mögliche Gründe:
             print(f"   cas_date: {final_status.get('cas_date') or 'Nicht getrackt'}")
     except Exception as e:
         print(f"   Fehler beim Lesen des finalen Status: {e}")
+    
+    # Clean up resources before exit
+    cleanup_resources()
 
 if __name__ == "__main__":
     main()
