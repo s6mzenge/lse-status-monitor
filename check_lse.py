@@ -105,6 +105,9 @@ def _cal_days_until(dt, now=None):
         return None
     if now is None:
         now = _now_berlin()
+    # Falls dt naive ist (z.B. aus ALT-Regression), als Berlin interpretieren
+    if getattr(dt, "tzinfo", None) is None:
+        dt = dt.replace(tzinfo=ZoneInfo("Europe/Berlin"))
     secs = (dt - now).total_seconds()
     return max(0, int(math.ceil(secs / 86400.0)))
 
