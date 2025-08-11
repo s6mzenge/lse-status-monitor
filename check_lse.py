@@ -106,29 +106,7 @@ def _simulate_weekday_path(current_date, current_gap_days, weekday_means, max_st
         steps += 1
     return d, steps
 
-def _bootstrap_eta(x, gap, fit_func, current_x, n=200, random_seed=42):
-    rng = np.random.default_rng(random_seed)
-    a, b = fit_func(x, gap)
-    base_res = gap - (a + b*x)
-    if len(base_res) < 2 or abs(b) < 1e-9:
-        return None
-    etas = []
-    for _ in range(n):
-        resampled = rng.choice(base_res, size=len(base_res), replace=True)
-        y_boot = (a + b*x) + resampled
-        a_b, b_b = fit_func(x, y_boot)
-        if abs(b_b) < 1e-9:
-            continue
-        x_star = -a_b / b_b
-        etas.append(x_star - current_x)
-    if not etas:
-        return None
-    etas = np.array(etas)
-    return {
-        "p50": float(np.percentile(etas, 50)),
-        "p80": float(np.percentile(etas, 80)),
-        "p95": float(np.percentile(etas, 95)),
-    }
+
 
 def _fit_multivariate(x, features, target):
     Xcols = [np.ones_like(x, dtype=float), x.astype(float)]
@@ -1274,12 +1252,7 @@ Mögliche Gründe:
             print(f"   pre_cas_date: {final_status.get('pre_cas_date') or 'Nicht getrackt'}")
             print(f"   cas_date: {final_status.get('cas_date') or 'Nicht getrackt'}")
     except Exception as e:
-        print(f"   Fehler beim Lesen des finalen Status: {e}")
-
-if __name__ == "__main__":
-    main()
-
-# ===== Robust regression helpers (appended) =====
+        print(f"   Fehler beim Lesen des finalen Status: {e}")# ===== Robust regression helpers (appended) =====
 def _monotonic_smooth(y):
     y = np.array(y, dtype=float)
     for i in range(1, len(y)):
@@ -1382,3 +1355,6 @@ def _bootstrap_eta(x, y, solver_fn, y_targets, b=300, rng=None):
         else:
             out[t] = (np.percentile(arr, 10), np.percentile(arr, 50), np.percentile(arr, 90))
     return out
+
+if __name__ == '__main__':
+    main()
