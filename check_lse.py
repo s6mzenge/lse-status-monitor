@@ -26,6 +26,8 @@ warnings.filterwarnings('ignore')
 # === Konfiguration und Konstanten (ergänzt) ===
 REGRESSION_MIN_POINTS: int = 2
 CONFIDENCE_LEVEL: float = 1.96  # 95%-Konfidenzniveau
+COMPACT_OUTPUT: bool = True        # kurze, strukturierte Prognose
+SHOW_DIAGNOSTICS: bool = False     # lange Vergleichs-/Debug-Blöcke
 # === Business-day helpers (x-axis skips weekends) ===
 
 def business_days_elapsed(start_dt, end_dt):
