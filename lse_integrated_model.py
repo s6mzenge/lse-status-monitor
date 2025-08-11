@@ -21,7 +21,8 @@ class BusinessCalendar:
     start: time = time(10, 0)  # 10:00
     end: time = time(16, 0)    # 16:00
     # UK Bank Holidays (YYYY-MM-DD). Can be empty.
-    holidays: Tuple[str, ...] = field(default_factory=tuple)
+    holidays: Tuple[str, ...] = ("2025-08-25",)
+
 
     def _is_business_day(self, d: date) -> bool:
         if d.weekday() >= 5:  # Sat, Sun
