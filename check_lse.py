@@ -531,14 +531,6 @@ def create_enhanced_forecast_text(forecast):
                 if 'r2' in data:
                     text += f"   • {name.capitalize()}: R²={data['r2']:.3f}\n"
 
-    except ImportError as _e:
-        print(f"❌ Import-Fehler bei erweiterter Prognose: {_e}")
-        text += "\n⚠️ Erweiterte Prognose nicht verfügbar (Modul fehlt)\n"
-    except Exception as _e:
-        print(f"❌ Fehler bei erweiterter Prognose: {type(_e).__name__}: {str(_e)}")
-        text += f"\n⚠️ Erweiterte Prognose fehlgeschlagen: {str(_e)[:200]}\n"
-        import traceback
-        traceback.print_exc()
     return text
 
 def create_forecast_text(forecast):
@@ -595,6 +587,12 @@ def create_progression_graph(history, current_date, forecast=None):
             # Plot Trendlinie mit Modellname wenn verfügbar
             model_label = f'Trend ({forecast.get("model_name", "Linear")}, R²={forecast["r_squared"]:.2f})'
             ax.plot(future_timestamps, future_y, 'r--', alpha=0.5, linewidth=2, label=model_label)
+
+            future_y = np.array([forecast['slope'] * business_days_elapsed(first_timestamp, ts) + intercept
+                     for ts in future_timestamps])
+            upper_bound = future_y + CONFIDENCE_LEVEL * std_error
+            lower_bound = future_y - CONFIDENCE_LEVEL * std_error
+
             
             # Zeige Konfidenzintervall wenn verfügbar
             if 'std_error' in forecast and ADVANCED_REGRESSION:
