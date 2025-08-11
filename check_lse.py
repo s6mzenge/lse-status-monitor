@@ -796,12 +796,9 @@ def main():
         
         # Bei manuellem Check immer Status senden (NUR für all other applicants)
         if IS_MANUAL:
-            # Berechne aktuellen Trend wenn möglich
+            # Berechne aktuellen Trend und erstelle vollständige Prognose
             forecast = calculate_regression_forecast(history)
-            trend_text = ""
-            if forecast and forecast['slope'] > 0:
-                if forecast['days_until_25_july'] and forecast['days_until_25_july'] > 0:
-                    trend_text = f"\n\n📈 <b>Prognose:</b> 25 July in ~{forecast['days_until_25_july']:.0f} Tagen"
+            forecast_text = create_forecast_text(forecast)
             
             telegram_msg = f"""<b>📊 LSE Status Check Ergebnis</b>
 
@@ -809,7 +806,8 @@ def main():
 <b>Letzter Stand:</b> {status['last_date']}
 <b>Status:</b> {"🔔 ÄNDERUNG ERKANNT!" if current_date != status['last_date'] else "✅ Keine Änderung"}
 
-<b>Zeitpunkt:</b> {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}{trend_text}
+<b>Zeitpunkt:</b> {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
+{forecast_text}
 
 <a href="{URL}">📄 LSE Webseite öffnen</a>"""
             
