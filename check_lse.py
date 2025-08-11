@@ -71,14 +71,9 @@ URL = "https://www.lse.ac.uk/study-at-lse/Graduate/News/Current-processing-times
 STATUS_FILE = "status.json"
 HISTORY_FILE = "history.json"
 
+from zoneinfo import ZoneInfo
 def get_german_time():
-    """Gibt die aktuelle Zeit in deutscher Zeitzone zurück (UTC+2 für Sommerzeit)"""
-    utc_time = datetime.utcnow()
-    # Deutschland ist UTC+1 (Winter) oder UTC+2 (Sommer)
-    # Hier verwenden wir UTC+2 für Sommerzeit
-    # Im Winter auf hours=1 ändern
-    german_time = utc_time + timedelta(hours=2)
-    return german_time
+    return datetime.now(ZoneInfo("Europe/Berlin"))
 
 # ===== Compact forecast rendering (ALT vs. NEU) =====
 import math
