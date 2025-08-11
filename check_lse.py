@@ -20,7 +20,7 @@ from io import BytesIO
 from config import (
     LSE_URL, STATUS_FILE, HISTORY_FILE, REGRESSION_MIN_POINTS, CONFIDENCE_LEVEL,
     TARGET_DATES, REQUEST_TIMEOUT, REQUEST_HEADERS, GMAIL_SMTP_SERVER, 
-    GMAIL_SMTP_PORT, TELEGRAM_API_BASE, UK_HOLIDAYS
+    GMAIL_SMTP_PORT, TELEGRAM_API_BASE
 )
 
 # Lazy imports for heavy dependencies - only loaded when needed
@@ -59,7 +59,7 @@ def business_days_elapsed(start_dt, end_dt):
     Nutzt nur das Datum (keine Uhrzeiten). Für denselben Kalendertag -> 0.
     '''
     np = _get_numpy()
-    s = np.datetime64(start.date(), 'D')
+    s = np.datetime64(start_dt.date(), 'D')
     e = np.datetime64(end_dt.date(), 'D')
     # np.busday_count zählt Werktage im Intervall [s, e)
     return int(np.busday_count(s, e))
@@ -615,7 +615,7 @@ def compute_integrated_model_metrics(history):
         return None  # zu wenig für integriertes Modell
 
     # ---- Kalender / Konstanten ----
-    cal = BusinessCalendar(tz=LON, start=start_dt, end=end_dt, holidays=UK_HOLIDAYS)
+    cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
     tz_out = BER
 
     # ---- (1) ETA-Backtest: kleines Grid ----
@@ -948,7 +948,7 @@ def create_progression_graph(history, current_date, forecast=None):
 
         rows = [{"timestamp": e["timestamp"], "date": e["date"]} for e in entries]
         if len(rows) >= REGRESSION_MIN_POINTS:
-            cal = BusinessCalendar(tz=LON, start=start_dt, end=end_dt, holidays=UK_HOLIDAYS)
+            cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
             imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
 
             hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute) / 60.0
