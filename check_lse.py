@@ -17,6 +17,36 @@ import base64
 import warnings
 warnings.filterwarnings('ignore')
 
+# === Business-day helpers (x-axis skips weekends) ===
+
+def business_days_elapsed(start_dt, end_dt):
+    '''
+    Zählt Arbeitstage (Mo–Fr) zwischen start_dt (inkl.) und end_dt (exkl.).
+    Nutzt nur das Datum (keine Uhrzeiten). Für denselben Kalendertag -> 0.
+    '''
+    s = np.datetime64(start_dt.date(), 'D')
+    e = np.datetime64(end_dt.date(), 'D')
+    # np.busday_count zählt Werktage im Intervall [s, e)
+    return int(np.busday_count(s, e))
+
+def add_business_days(start_dt, n):
+    '''
+    Addiert n Arbeitstage (Mo–Fr) auf start_dt und gibt das resultierende Datum zurück.
+    n kann negativ sein. Bruchteile werden zur nächsten ganzen Zahl nach oben gerundet,
+    da Vorhersagen in ganzen Kalendertagen kommuniziert werden.
+    '''
+    from math import ceil
+    steps = int(ceil(n)) if n >= 0 else -int(ceil(abs(n)))
+    current = start_dt
+    step = 1 if steps >= 0 else -1
+    remaining = abs(steps)
+    while remaining > 0:
+        current = current + timedelta(days=step)
+        if current.weekday() < 5:  # Mo–Fr
+            remaining -= 1
+    return current
+
+
 # Versuche erweiterte Bibliotheken zu importieren
 try:
     from scipy import stats
@@ -68,7 +98,7 @@ def calculate_advanced_regression_forecast(history, current_date=None):
             if first_timestamp is None:
                 first_timestamp = timestamp
                 
-            days_elapsed = (timestamp - first_timestamp).total_seconds() / 86400
+            days_elapsed = business_days_elapsed(first_timestamp, timestamp)
             data_points.append((days_elapsed, date_days, timestamp))
         except Exception as e:
             print(f"⚠️ Fehler beim Verarbeiten: {e}")
@@ -182,7 +212,7 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     
     # 7. PROGNOSEN
     current_time = get_german_time()
-    current_days_elapsed = (current_time - first_timestamp).total_seconds() / 86400
+    current_days_elapsed = business_days_elapsed(first_timestamp, current_time)
     current_predicted_days = best_slope * current_days_elapsed + best_intercept
     
     # Zieldaten
@@ -202,14 +232,17 @@ def calculate_advanced_regression_forecast(history, current_date=None):
             days_until_lower = max(0, days_until - confidence_margin)
             days_until_upper = days_until + confidence_margin
             
+            
             predictions[target_name] = {
                 "days": days_until,
                 "days_lower": days_until_lower,
                 "days_upper": days_until_upper,
-                "date": current_time + timedelta(days=days_until) if days_until > 0 else None,
-                "date_lower": current_time + timedelta(days=days_until_upper) if days_until_upper > 0 else None,
-                "date_upper": current_time + timedelta(days=days_until_lower) if days_until_lower > 0 else None,
+                # Termine werden auf Basis von Geschäftstagen (Mo–Fr) berechnet
+                "date": add_business_days(current_time, days_until) if days_until > 0 else None,
+                "date_lower": add_business_days(current_time, days_until_upper) if days_until_upper > 0 else None,
+                "date_upper": add_business_days(current_time, days_until_lower) if days_until_lower > 0 else None,
             }
+
             
             # Für Legacy-Kompatibilität
             if target_name == "25 July":
@@ -282,7 +315,7 @@ def create_enhanced_forecast_text(forecast):
                 if target_name in forecast['predictions']:
                     pred = forecast['predictions'][target_name]
                     if pred['days'] and pred['days'] > 0:
-                        date_pred = get_german_time() + timedelta(days=pred['days'])
+                        date_pred = pred.get('date', get_german_time() + timedelta(days=pred['days']))
                         text += f"📅 {target_name} wird voraussichtlich erreicht:\n"
                         text += f"   • In {pred['days']:.0f} Tagen"
                         
@@ -359,18 +392,18 @@ def create_progression_graph(history, current_date, forecast=None):
         
         # Wenn Regression verfügbar ist, zeichne Trendlinie
         if forecast and forecast['slope'] > 0:
-            # Erstelle Trendlinie
+            # Erstelle Trendlinie (x = Geschäftstage seit erstem Timestamp)
             first_timestamp = timestamps[0]
-            x_days = [(ts - first_timestamp).total_seconds() / 86400 for ts in timestamps]
             
-            # Erweitere die Linie in die Zukunft
-            future_days = 30  # 30 Tage in die Zukunft projizieren
-            last_x = x_days[-1]
-            future_x = np.linspace(0, last_x + future_days, 100)
-            future_y = forecast['slope'] * future_x + (forecast['current_trend_days'] - forecast['slope'] * ((get_german_time() - first_timestamp).total_seconds() / 86400))
+            # Erzeuge Kalendertag-Gitter und berechne Vorhersage auf Basis der Geschäftstage
+            horizon_days = (timestamps[-1] - first_timestamp).days + 30  # 30 Tage in die Zukunft projizieren
+            future_timestamps = [first_timestamp + timedelta(days=i) for i in range(horizon_days + 1)]
             
-            # Konvertiere zurück zu Timestamps für x-Achse
-            future_timestamps = [first_timestamp + timedelta(days=d) for d in future_x]
+            # Achsenabschnitt so bestimmen, dass die Linie durch den aktuellen Schätzwert geht
+            intercept = forecast['current_trend_days'] - forecast['slope'] * business_days_elapsed(first_timestamp, get_german_time())
+            
+            # y(t) = slope * BusinessDays(first_timestamp, t) + intercept
+            future_y = [forecast['slope'] * business_days_elapsed(first_timestamp, ts) + intercept for ts in future_timestamps]
             
             # Plot Trendlinie mit Modellname wenn verfügbar
             model_label = f'Trend ({forecast.get("model_name", "Linear")}, R²={forecast["r_squared"]:.2f})'
@@ -393,7 +426,7 @@ def create_progression_graph(history, current_date, forecast=None):
                     if 'predictions' in forecast and target_name in forecast['predictions']:
                         pred = forecast['predictions'][target_name]
                         if pred['days'] and pred['days'] > 0:
-                            target_timestamp = get_german_time() + timedelta(days=pred['days'])
+                            target_timestamp = pred.get('date', get_german_time() + timedelta(days=pred['days']))
                             ax.axhline(y=target_days, color='green', linestyle=':', alpha=0.3)
                             ax.scatter([target_timestamp], [target_days], color='green', s=150, marker='*', 
                                       zorder=6, alpha=0.7)
@@ -411,7 +444,7 @@ def create_progression_graph(history, current_date, forecast=None):
                         # Fallback auf alte Methode
                         days_until_key = f'days_until_{target_name.lower().replace(" ", "_")}'
                         if days_until_key in forecast and forecast[days_until_key] and forecast[days_until_key] > 0:
-                            target_timestamp = get_german_time() + timedelta(days=forecast[days_until_key])
+                            target_timestamp = add_business_days(get_german_time(), forecast[days_until_key])
                             ax.axhline(y=target_days, color='green', linestyle=':', alpha=0.3)
                             ax.scatter([target_timestamp], [target_days], color='green', s=150, marker='*', 
                                       zorder=6, alpha=0.7)
