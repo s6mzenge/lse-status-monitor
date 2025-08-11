@@ -106,8 +106,6 @@ def _simulate_weekday_path(current_date, current_gap_days, weekday_means, max_st
         steps += 1
     return d, steps
 
-
-
 def _fit_multivariate(x, features, target):
     Xcols = [np.ones_like(x, dtype=float), x.astype(float)]
     names = ["intercept", "x"]
@@ -145,6 +143,128 @@ def get_german_time():
     german_time = utc_time + timedelta(hours=2)
     return german_time
 
+# ===== Date conversion helpers (moved here before they are used) =====
+def date_to_days(date_str):
+    """Konvertiert ein Datum wie '10 July' in Tage seit dem 1. Januar"""
+    try:
+        # Füge das aktuelle Jahr hinzu
+        current_year = get_german_time().year
+        date_obj = datetime.strptime(f"{date_str} {current_year}", "%d %B %Y")
+        jan_first = datetime(current_year, 1, 1)
+        return (date_obj - jan_first).days
+    except:
+        return None
+
+def days_to_date(days):
+    """Konvertiert Tage seit 1. Januar zurück in ein Datum"""
+    current_year = get_german_time().year
+    jan_first = datetime(current_year, 1, 1)
+    target_date = jan_first + timedelta(days=int(days))
+    return target_date.strftime("%d %B").lstrip("0")
+
+# ===== Robust regression helpers (moved here before they are used) =====
+def _monotonic_smooth(y):
+    y = np.array(y, dtype=float)
+    for i in range(1, len(y)):
+        if y[i] < y[i-1]:
+            y[i] = y[i-1]
+    return y
+
+def _pairwise_slopes(x, y):
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    n = len(x); sl = []
+    for i in range(n):
+        for j in range(i+1, n):
+            dx = x[j] - x[i]
+            if dx != 0:
+                sl.append((y[j]-y[i]) / dx)
+    return np.array(sl, dtype=float) if sl else np.array([0.0])
+
+def _theil_sen(x, y):
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    b = np.median(_pairwise_slopes(x, y))
+    a = np.median(y - b*x)
+    return a, b
+
+def _ols(x, y, w=None):
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    if w is None:
+        n = len(x); Sx = x.sum(); Sy = y.sum()
+        Sxx = (x*x).sum(); Sxy = (x*y).sum()
+        den = n*Sxx - Sx*Sx
+        if den == 0:
+            return y.mean(), 0.0
+        b = (n*Sxy - Sx*Sy) / den
+        a = (Sy - b*Sx) / n
+        return a, b
+    else:
+        w = np.asarray(w, dtype=float); W = w.sum()
+        if W == 0:
+            return y.mean(), 0.0
+        xw = (w*x).sum()/W; yw = (w*y).sum()/W
+        Sxx = (w*(x-xw)*(x-xw)).sum()
+        if Sxx == 0:
+            return yw, 0.0
+        b = (w*(x-xw)*(y-yw)).sum()/Sxx
+        a = yw - b*xw
+        return a, b
+
+def _ewls(x, y, half_life_bdays=10, w_robust=None):
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    if len(x) == 0:
+        return (y.mean() if len(y) else 0.0), 0.0
+    age = x.max() - x
+    lam = np.log(2.0) / max(1e-9, half_life_bdays)
+    w = np.exp(-lam * age)
+    if w_robust is not None:
+        w = w * np.asarray(w_robust, dtype=float)
+    return _ols(x, y, w=w)
+
+def _recent_window_ols(x, y, k=10):
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    if len(x) <= 1:
+        return (y.mean() if len(y) else 0.0), 0.0
+    idx = max(0, len(x)-int(k))
+    return _ols(x[idx:], y[idx:])
+
+def _hampel_weights(increments, scale=None, k=3.0):
+    inc = np.asarray(increments, dtype=float)
+    med = np.median(inc)
+    mad = np.median(np.abs(inc - med)) if scale is None else scale
+    if mad == 0:
+        return np.ones_like(inc)
+    z = np.abs(inc - med) / (1.4826*mad)
+    w = np.ones_like(inc)
+    w[z > k] = 0.3
+    return w
+
+def _bootstrap_eta(x, y, solver_fn, y_targets, b=300, rng=None):
+    rng = np.random.default_rng(rng)
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    n = len(x)
+    if n < 2:
+        return {t: (np.nan, np.nan, np.nan) for t in y_targets}
+    samples = {t: [] for t in y_targets}
+    for _ in range(int(b)):
+        idx = rng.integers(0, n, size=n)
+        xb, yb = x[idx], y[idx]
+        order = np.argsort(xb)
+        xb, yb = xb[order], yb[order]
+        a1,b1 = solver_fn(xb, yb)
+        for t in y_targets:
+            if b1 <= 0:
+                est = np.nan
+            else:
+                est = (t - a1)/b1
+            samples[t].append(est)
+    out = {}
+    for t, arr in samples.items():
+        arr = np.array([v for v in arr if np.isfinite(v)])
+        if len(arr) == 0:
+            out[t] = (np.nan, np.nan, np.nan)
+        else:
+            out[t] = (np.percentile(arr, 10), np.percentile(arr, 50), np.percentile(arr, 90))
+    return out
 
 def create_progression_graph(history, current_date, forecast=None):
     """Erstellt ein Diagramm mit der Progression (x=Beobachtungszeit, y=Verarbeitungsdatum in Tagen seit 1. Jan).
@@ -253,7 +373,6 @@ def create_progression_graph(history, current_date, forecast=None):
     except Exception as e:
         print("Fehler beim Erstellen des Diagramms:", e)
         return None
-
 
 def send_telegram_photo(photo_buffer, caption, parse_mode='HTML'):
     """Sendet ein Foto über Telegram Bot"""
@@ -538,27 +657,7 @@ def save_history(history):
         print(f"❌ Fehler beim Speichern von history.json: {e}")
         return False
 
-def date_to_days(date_str):
-    """Konvertiert ein Datum wie '10 July' in Tage seit dem 1. Januar"""
-    try:
-        # Füge das aktuelle Jahr hinzu
-        current_year = get_german_time().year
-        date_obj = datetime.strptime(f"{date_str} {current_year}", "%d %B %Y")
-        jan_first = datetime(current_year, 1, 1)
-        return (date_obj - jan_first).days
-    except:
-        return None
-
-def days_to_date(days):
-    """Konvertiert Tage seit 1. Januar zurück in ein Datum"""
-    current_year = get_german_time().year
-    jan_first = datetime(current_year, 1, 1)
-    target_date = jan_first + timedelta(days=int(days))
-    return target_date.strftime("%d %B").lstrip("0")
-
-
 def calculate_regression_forecast(history):
-
     """Berechnet robuste Regression (Business Days) + Bootstrap-Intervalle fuer die 'all other applicants'-Schlange"""
     half_life = float(os.getenv("REG_HALFLIFE_BDAYS", "10"))
     recent_k  = int(os.getenv("REG_RECENT_K", "10"))
@@ -693,6 +792,7 @@ def calculate_regression_forecast(history):
             "28_july": bands_28
         }
     }
+
 def extract_all_other_date(text):
     """Extrahiert nur das Datum für 'all other graduate applicants'"""
     text = ' '.join(text.split())
@@ -747,9 +847,7 @@ def extract_cas_date(text):
         return match.group(1).strip()
     return None
 
-
 def create_forecast_text(forecast):
-
     """Erstellt einen Prognosetext basierend auf der Regression"""
     if not forecast:
         return "\n📊 Prognose: Noch nicht genügend Daten für eine zuverlässige Vorhersage."
@@ -792,6 +890,7 @@ def create_forecast_text(forecast):
             text += "✅ Die Vorhersage basiert auf einem stabilen Trend.\n"
 
     return text
+
 def fetch_processing_dates():
     """Holt alle Verarbeitungsdaten von der LSE-Webseite"""
     try:
@@ -1252,109 +1351,7 @@ Mögliche Gründe:
             print(f"   pre_cas_date: {final_status.get('pre_cas_date') or 'Nicht getrackt'}")
             print(f"   cas_date: {final_status.get('cas_date') or 'Nicht getrackt'}")
     except Exception as e:
-        print(f"   Fehler beim Lesen des finalen Status: {e}")# ===== Robust regression helpers (appended) =====
-def _monotonic_smooth(y):
-    y = np.array(y, dtype=float)
-    for i in range(1, len(y)):
-        if y[i] < y[i-1]:
-            y[i] = y[i-1]
-    return y
+        print(f"   Fehler beim Lesen des finalen Status: {e}")
 
-def _pairwise_slopes(x, y):
-    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
-    n = len(x); sl = []
-    for i in range(n):
-        for j in range(i+1, n):
-            dx = x[j] - x[i]
-            if dx != 0:
-                sl.append((y[j]-y[i]) / dx)
-    return np.array(sl, dtype=float) if sl else np.array([0.0])
-
-def _theil_sen(x, y):
-    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
-    b = np.median(_pairwise_slopes(x, y))
-    a = np.median(y - b*x)
-    return a, b
-
-def _ols(x, y, w=None):
-    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
-    if w is None:
-        n = len(x); Sx = x.sum(); Sy = y.sum()
-        Sxx = (x*x).sum(); Sxy = (x*y).sum()
-        den = n*Sxx - Sx*Sx
-        if den == 0:
-            return y.mean(), 0.0
-        b = (n*Sxy - Sx*Sy) / den
-        a = (Sy - b*Sx) / n
-        return a, b
-    else:
-        w = np.asarray(w, dtype=float); W = w.sum()
-        if W == 0:
-            return y.mean(), 0.0
-        xw = (w*x).sum()/W; yw = (w*y).sum()/W
-        Sxx = (w*(x-xw)*(x-xw)).sum()
-        if Sxx == 0:
-            return yw, 0.0
-        b = (w*(x-xw)*(y-yw)).sum()/Sxx
-        a = yw - b*xw
-        return a, b
-
-def _ewls(x, y, half_life_bdays=10, w_robust=None):
-    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
-    if len(x) == 0:
-        return (y.mean() if len(y) else 0.0), 0.0
-    age = x.max() - x
-    lam = np.log(2.0) / max(1e-9, half_life_bdays)
-    w = np.exp(-lam * age)
-    if w_robust is not None:
-        w = w * np.asarray(w_robust, dtype=float)
-    return _ols(x, y, w=w)
-
-def _recent_window_ols(x, y, k=10):
-    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
-    if len(x) <= 1:
-        return (y.mean() if len(y) else 0.0), 0.0
-    idx = max(0, len(x)-int(k))
-    return _ols(x[idx:], y[idx:])
-
-def _hampel_weights(increments, scale=None, k=3.0):
-    inc = np.asarray(increments, dtype=float)
-    med = np.median(inc)
-    mad = np.median(np.abs(inc - med)) if scale is None else scale
-    if mad == 0:
-        return np.ones_like(inc)
-    z = np.abs(inc - med) / (1.4826*mad)
-    w = np.ones_like(inc)
-    w[z > k] = 0.3
-    return w
-
-def _bootstrap_eta(x, y, solver_fn, y_targets, b=300, rng=None):
-    rng = np.random.default_rng(rng)
-    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
-    n = len(x)
-    if n < 2:
-        return {t: (np.nan, np.nan, np.nan) for t in y_targets}
-    samples = {t: [] for t in y_targets}
-    for _ in range(int(b)):
-        idx = rng.integers(0, n, size=n)
-        xb, yb = x[idx], y[idx]
-        order = np.argsort(xb)
-        xb, yb = xb[order], yb[order]
-        a1,b1 = solver_fn(xb, yb)
-        for t in y_targets:
-            if b1 <= 0:
-                est = np.nan
-            else:
-                est = (t - a1)/b1
-            samples[t].append(est)
-    out = {}
-    for t, arr in samples.items():
-        arr = np.array([v for v in arr if np.isfinite(v)])
-        if len(arr) == 0:
-            out[t] = (np.nan, np.nan, np.nan)
-        else:
-            out[t] = (np.percentile(arr, 10), np.percentile(arr, 50), np.percentile(arr, 90))
-    return out
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
