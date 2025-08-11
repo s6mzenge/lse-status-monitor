@@ -615,7 +615,7 @@ def compute_integrated_model_metrics(history):
         return None  # zu wenig für integriertes Modell
 
     # ---- Kalender / Konstanten ----
-    cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
+    cal = BusinessCalendar(tz=LON, start=start_dt, end=end_dt, holidays=UK_HOLIDAYS)
     tz_out = BER
 
     # ---- (1) ETA-Backtest: kleines Grid ----
@@ -948,7 +948,7 @@ def create_progression_graph(history, current_date, forecast=None):
 
         rows = [{"timestamp": e["timestamp"], "date": e["date"]} for e in entries]
         if len(rows) >= REGRESSION_MIN_POINTS:
-            cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
+            cal = BusinessCalendar(tz=LON, start=start_dt, end=end_dt, holidays=UK_HOLIDAYS)
             imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
 
             hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute) / 60.0
