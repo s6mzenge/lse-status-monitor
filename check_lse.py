@@ -328,158 +328,86 @@ def calculate_regression_forecast(history):
     return calculate_advanced_regression_forecast(history)
 
 def create_enhanced_forecast_text(forecast):
-    """Erstellt erweiterten Prognosetext mit mehr Details wenn verfügbar"""
+    """Erstellt den Prognosetext. Kurzfassung per COMPACT_OUTPUT, Details optional."""
     if not forecast:
         return "\n📊 Prognose: Noch nicht genügend Daten für eine zuverlässige Vorhersage."
-    
-    text = "\n📊 PROGNOSEN basierend auf bisherigen Änderungen:\n"
-    
-    # Zeige verwendetes Modell wenn erweiterte Regression verfügbar
-    if 'model_name' in forecast and ADVANCED_REGRESSION:
-        text += f"📈 Bestes Modell: {forecast['model_name']} "
-    
-    text += f"(R²={forecast['r_squared']:.2f}, {forecast['data_points']} Datenpunkte)\n\n"
-    
-    if forecast['slope'] <= 0:
-        text += "⚠️ Die Daten zeigen keinen Fortschritt oder sogar Rückschritte.\n"
-    else:
-        text += f"📈 Durchschnittlicher Fortschritt: {forecast['slope']:.1f} Tage pro Tag\n"
-        
-        # Zeige Trend-Analyse wenn verfügbar
-        if 'trend_analysis' in forecast and forecast['trend_analysis'] != "unbekannt":
+
+    # Basiswerte
+    model_name = forecast.get("model_name", "Linear")
+    r2 = forecast.get("r_squared", 0.0)
+    n = forecast.get("data_points", 0)
+    slope = forecast.get("slope", 0.0)
+    trend = forecast.get("trend_analysis", "unbekannt")
+    preds = forecast.get("predictions", {}) or {}
+    p25 = preds.get("25 July", {})
+    p28 = preds.get("28 July", {})
+
+    def _fmt_target(p):
+        if not p:
+            return "—"
+        days = p.get("days", None)
+        date = p.get("date", None)
+        band = p.get("days_range", None)
+        left = f"{days} Tage" if days is not None else "—"
+        if band and isinstance(band, (list, tuple)) and len(band) == 2:
+            left += f" ({band[0]}–{band[1]})"
+        right = f"— Am {date}" if date else ""
+        return f"{left} {right}"
+
+    # -------- Kurzfassung ----------
+    if COMPACT_OUTPUT:
+        # Kopf
+        lines = []
+        lines.append("\n📊 PROGNOSE")
+        lines.append(f"• Modell: {model_name} (R²={r2:.2f}, n={n})")
+
+        # Trend
+        if slope <= 0:
+            lines.append("• Trend: ⚠️ kein Fortschritt")
+        else:
             emoji = {"beschleunigend": "🚀", "verlangsamend": "🐌", "konstant": "➡️"}
-            text += f"{emoji.get(forecast['trend_analysis'], '❓')} Trend: {forecast['trend_analysis'].upper()}\n"
-        
-        text += "\n"
-        
-        # Verwende erweiterte Prognosen wenn verfügbar
-        if 'predictions' in forecast and forecast['predictions']:
-            for target_name in ["25 July", "28 July"]:
-                if target_name in forecast['predictions']:
-                    pred = forecast['predictions'][target_name]
-                    if pred['days'] and pred['days'] > 0:
-                        date_pred = pred.get('date', get_german_time() + timedelta(days=pred['days']))
-                        text += f"📅 {target_name} wird voraussichtlich erreicht:\n"
-                        text += f"   • In {pred['days']:.0f} Tagen"
-                        
-                        # Zeige Konfidenzintervall wenn verfügbar
-                        if 'days_lower' in pred and 'days_upper' in pred and ADVANCED_REGRESSION:
-                            text += f" ({pred['days_lower']:.0f}-{pred['days_upper']:.0f} Tage)\n"
-                        else:
-                            text += "\n"
-                        
-                        text += f"   • Am {date_pred.strftime('%d. %B %Y')}\n\n"
+            lines.append(f"• Tempo: {slope:.1f} Tage/Tag")
+            if trend and trend != "unbekannt":
+                lines.append(f"• Trend: {emoji.get(trend,'❓')} {trend.capitalize()}")
+
+        # Ziele
+        lines.append("• 25 July: " + _fmt_target(p25))
+        lines.append("• 28 July: " + _fmt_target(p28))
+
+        # Optionaler kurzer Hinweis auf Stabilität
+        if slope > 0 and trend in {"konstant", "beschleunigend", "verlangsamend"}:
+            lines.append("• Hinweis: Vorhersage basiert auf aktuellem Trend")
+
+        text = "\n".join(lines)
+
+    # -------- Langfassung / Diagnostik ----------
+    else:
+        text = "\n📊 PROGNOSEN basierend auf bisherigen Änderungen:\n"
+        text += f"📈 Bestes Modell: {model_name} (R²={r2:.2f}, {n} Datenpunkte)\n\n"
+        if slope <= 0:
+            text += "⚠️ Die Daten zeigen keinen Fortschritt oder sogar Rückschritte.\n"
         else:
-            # Fallback auf alte Methode
-            if forecast.get('days_until_25_july') is not None and forecast['days_until_25_july'] > 0:
-                date_25 = get_german_time() + timedelta(days=forecast['days_until_25_july'])
-                text += f"📅 25 July wird voraussichtlich erreicht:\n"
-                text += f"   • In {forecast['days_until_25_july']:.0f} Tagen\n"
-                text += f"   • Am {date_25.strftime('%d. %B %Y')}\n\n"
-            
-            if forecast.get('days_until_28_july') is not None and forecast['days_until_28_july'] > 0:
-                date_28 = get_german_time() + timedelta(days=forecast['days_until_28_july'])
-                text += f"📅 28 July wird voraussichtlich erreicht:\n"
-                text += f"   • In {forecast['days_until_28_july']:.0f} Tagen\n"
-                text += f"   • Am {date_28.strftime('%d. %B %Y')}\n\n"
-        
-        # Qualitätshinweis
-        if forecast['r_squared'] < 0.5:
-            text += "⚠️ Hinweis: Die Vorhersage ist unsicher (niedrige Korrelation).\n"
-        elif forecast['r_squared'] > 0.8:
-            text += "✅ Die Vorhersage basiert auf einem stabilen Trend.\n"
-        
-        # Zeige Modellvergleich wenn mehrere Modelle verfügbar
-        if ADVANCED_REGRESSION and 'models' in forecast and len(forecast['models']) > 1:
-            text += "\n🔬 Modell-Vergleich:\n"
-            for name, data in sorted(forecast['models'].items(), key=lambda x: x[1].get('r2', 0), reverse=True):
-                if 'r2' in data:
-                    text += f"   • {name.capitalize()}: R²={data['r2']:.3f}\n"
-    
-    
-    # --- Ergänzung: Integrierte Regression (Theil–Sen ⊕ LOESS, GeschäftsSTUNDEN) ---
-    try:
-        from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
-        from datetime import time as _time
-        import numpy as _np
+            emoji = {"beschleunigend": "🚀", "verlangsamend": "🐌", "konstant": "➡️"}
+            text += f"📈 Durchschnittlicher Fortschritt: {slope:.1f} Tage pro Tag\n"
+            if trend and trend != "unbekannt":
+                text += f"{emoji.get(trend,'❓')} Trend: {trend.upper()}\n"
+            text += "\n"
+            text += "📅 25 July: " + _fmt_target(p25) + "\n"
+            text += "📅 28 July: " + _fmt_target(p28) + "\n"
 
-        # Lade Historie und verwende die existierende Funktion zum Kombinieren
-        hist = get_history()
-        
-        # KORREKTUR: Verwende _iter_observations_or_changes um ALLE Datenpunkte zu bekommen
-        all_entries = _iter_observations_or_changes(hist)
-        rows = [
-            {"timestamp": entry["timestamp"], "date": entry["date"]}
-            for entry in all_entries
-        ]
-        
-        print(f"🔍 Erweiterte Regression: {len(rows)} Datenpunkte gefunden")  # Debug
-        
-        if len(rows) >= REGRESSION_MIN_POINTS:
-            cal = BusinessCalendar(tz=LON, start=_time(10,0), end=_time(16,0), holidays=tuple([]))
-            imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
+        # Diagnose-Block nur falls explizit gewünscht
+        if SHOW_DIAGNOSTICS:
+            models = forecast.get("models", {})
+            if models:
+                text += "\n🔬 Modell-Vergleich (R²):\n"
+                order = ["linear", "robust", "weighted", "polynomial"]
+                for key in order:
+                    if key in models:
+                        r2m = models[key].get("r2", None)
+                        if r2m is not None:
+                            label = key.capitalize()
+                            text += f"   • {label}: R²={r2m:.3f}\n"
 
-            # Güte (R²) auf beobachteten Punkten für das geblendete Modell
-            x_obs = imodel.x_
-            y_obs = imodel.y_
-            y_hat = _np.array([imodel._blend_predict_scalar(float(v)) for v in x_obs])
-            ss_res = float(_np.sum((y_obs - y_hat)**2))
-            ss_tot = float(_np.sum((y_obs - _np.mean(y_obs))**2))
-            r2_new = 1 - ss_res/ss_tot if ss_tot > 0 else 0.0
-
-            # Durchschnittlicher Fortschritt in "Tage pro Geschäftstag"
-            hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute)/60.0
-            avg_prog_new = imodel.ts_.b * hours_per_day  # y pro Business-Day
-
-            # Vorhersagen (Zeit nur für interne Berechnung; in der Nachricht nur Datum/„in X Tagen“)
-            pred25 = imodel.predict_datetime("25 July", tz_out=BER)
-            pred28 = imodel.predict_datetime("28 July", tz_out=BER)
-
-            now_de = get_german_time()
-            def _biz_days_until(dt):
-                return business_days_elapsed(now_de, dt)
-
-            def _fmt_date_only(dt):
-                return dt.strftime('%d. %B %Y')
-
-            days25 = _biz_days_until(pred25["when_point"])
-            days28 = _biz_days_until(pred28["when_point"])
-
-            # Visuell ergänzte Sektion
-            text += "\n<b>📊 PROGNOSEN basierend auf bisherigen Änderungen (Vergleich):</b>\n"
-            text += f"• Alte Regression: R²={forecast['r_squared']:.2f}, {forecast['data_points']} Datenpunkte\n"
-            text += f"• Neue Regression: R²={r2_new:.2f}, {len(rows)} Datenpunkte\n\n"
-
-            text += "<b>📈 Durchschnittlicher Fortschritt</b>\n"
-            if forecast['slope'] > 0:
-                emoji = {"beschleunigend": "🚀", "verlangsamend": "🐌", "konstant": "➡️"}
-                trend_txt = ''
-                if 'trend_analysis' in forecast and forecast['trend_analysis'] != 'unbekannt':
-                    trend_txt = f"\n{emoji.get(forecast['trend_analysis'], '❓')} Trend: {forecast['trend_analysis'].upper()}"
-                text += f"• Alte Regression: {forecast['slope']:.1f} Tage pro Tag{trend_txt}\n"
-            else:
-                text += "• Alte Regression: —\n"
-            text += f"• Neue Regression: {avg_prog_new:.1f} Tage pro Tag\n\n"
-
-            text += "<b>📅 25 July wird voraussichtlich erreicht</b>\n"
-            text += "• Alte Regression: siehe oben\n"
-            text += f"• Neue Regression: In {days25:.0f} Tagen — Am {_fmt_date_only(pred25['when_point'])}\n\n"
-
-            text += "<b>📅 28 July wird voraussichtlich erreicht</b>\n"
-            text += "• Alte Regression: siehe oben\n"
-            text += f"• Neue Regression: In {days28:.0f} Tagen — Am {_fmt_date_only(pred28['when_point'])}\n"
-        else:
-            # Zu wenig Daten für integrierte Regression
-            pass
-
-    except ImportError as _e:
-        print(f"❌ Import-Fehler bei erweiterter Prognose: {_e}")
-        text += "\n⚠️ Erweiterte Prognose nicht verfügbar (Modul fehlt)\n"
-    except Exception as _e:
-        print(f"❌ Fehler bei erweiterter Prognose: {type(_e).__name__}: {str(_e)}")
-        text += f"\n⚠️ Erweiterte Prognose fehlgeschlagen: {str(_e)[:200]}\n"
-        import traceback
-        traceback.print_exc()
     return text
 
 def create_forecast_text(forecast):
