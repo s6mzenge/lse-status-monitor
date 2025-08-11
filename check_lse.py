@@ -539,8 +539,8 @@ def create_forecast_text(forecast):
 
 def create_progression_graph(history, current_date, forecast=None):
     """
-    ALT vs. NEU mit ETAs (25/28 July), Heartbeats (NEU) und
-    kompakten Achsen + Datumsbeschriftung.
+    ALT vs. NEU mit ETAs (25/28 July), Heartbeats (NEU),
+    kompakten Achsen & Datumsbeschriftung – ohne Unsicherheitsflächen.
     Gibt BytesIO (PNG) zurück oder None.
     """
     from io import BytesIO
@@ -565,9 +565,8 @@ def create_progression_graph(history, current_date, forecast=None):
             return None
 
     def _days_to_dt(year, doy):
-        # wandelt "Tag des Jahres" -> Datum (naiv, Berlin)
         try:
-            doy_i = int(round(float(doy)))
+            doy_i = float(doy)
             start = datetime(year, 1, 1)
             return (start + timedelta(days=doy_i - 1)).replace(tzinfo=None)
         except Exception:
@@ -577,13 +576,12 @@ def create_progression_graph(history, current_date, forecast=None):
         dt = _days_to_dt(year, v)
         return dt.strftime('%d %b') if dt else ''
 
-    # --- Daten sammeln (Änderungen + Heartbeats) ---
+    # --- Daten sammeln ---
     data = list(_iter_observations_or_changes(history))
     if len(data) < REGRESSION_MIN_POINTS:
         return None
 
-    change_ts, change_y, change_labels = [], [], []
-    hb_ts = []
+    change_ts, change_y, change_labels, hb_ts = [], [], [], []
     for e in data:
         try:
             ts = _to_naive_berlin(datetime.fromisoformat(e["timestamp"]))
@@ -593,92 +591,76 @@ def create_progression_graph(history, current_date, forecast=None):
             if e.get("kind") == "heartbeat":
                 hb_ts.append(ts)
             else:
-                change_ts.append(ts)
-                change_y.append(yv)
-                change_labels.append(e["date"])
+                change_ts.append(ts); change_y.append(yv); change_labels.append(e["date"])
         except Exception:
             continue
-
     if not change_ts:
         return None
 
-    # chronologisch sortieren
+    # chronologisch
     ordered = sorted(zip(change_ts, change_y, change_labels), key=lambda r: r[0])
     change_ts, change_y, change_labels = [list(t) for t in zip(*ordered)]
 
-    now_de = _to_naive_berlin(get_german_time())
-    year_ref = now_de.year  # für y-Achsen-Labels
+    now_de  = _to_naive_berlin(get_german_time())
+    year_ref = now_de.year
 
     # --- Plot ---
-    try:
-        plt.style.use("seaborn-v0_8-darkgrid")
-    except Exception:
-        pass
+    try: plt.style.use("seaborn-v0_8-darkgrid")
+    except Exception: pass
     fig, ax = plt.subplots(figsize=(12, 7))
 
-    # Historische Änderungen (nur letzte ~8 beschriften, versetzt)
+    # Punkte; nur die letzten 8 beschriften, versetzt
     ax.scatter(change_ts, change_y, s=90, zorder=5, label="Änderungen (historisch)", alpha=0.9)
     last_k = max(0, len(change_ts) - 8)
     for i, (ts, y, lbl) in enumerate(zip(change_ts[last_k:], change_y[last_k:], change_labels[last_k:])):
-        dy = 10 if (i % 2 == 0) else -14  # alternierende Offsets
+        dy = 10 if i % 2 == 0 else -14
         ax.annotate(lbl, (ts, y), xytext=(6, dy), textcoords="offset points",
-                    fontsize=8.5, alpha=0.8, ha="left", va="center")
+                    fontsize=8.5, alpha=0.85, ha="left", va="center")
 
-    # Heute / Aktuell
+    # Heute + Aktuell
     ax.axvline(now_de, linewidth=1.0, linestyle=":", alpha=0.8)
     ax.scatter([change_ts[-1]], [change_y[-1]], s=100, zorder=6, label="Aktuell")
 
-    # Zielniveaus
+    # Ziele
     target_map = {"25 July": date_to_days("25 July"), "28 July": date_to_days("28 July")}
     for tname, ty in target_map.items():
         if ty is not None:
             ax.axhline(ty, linestyle=":", linewidth=1.0, alpha=0.5)
-            # linkes Label, leicht nach links unten versetzt
             ax.text(change_ts[0], ty, f" {tname}", va="center", ha="left", fontsize=9)
 
-    # Zeitgitter (Kalendertage) – reicht später bis zur spätesten ETA
+    # Zeitgitter (wird am Ende an ETAs angepasst)
     first_ts = change_ts[0]
     grid_left = first_ts - timedelta(days=1)
-    grid_right_prov = now_de + timedelta(days=30)  # provisorisch, wird gleich ersetzt
+    grid_right_prov = now_de + timedelta(days=30)
     grid_ts = [grid_left + timedelta(days=i) for i in range((grid_right_prov - grid_left).days + 1)]
     grid_bd = [business_days_elapsed(first_ts, t) for t in grid_ts]
 
-    # ===== ALT (beste alte Regression) =====
+    # ---------- ALT ----------
     alt_eta_dates = []
+    alt_eta_points = []  # (x, y) für Sterne exakt auf Linie
     if forecast and float(forecast.get("slope", 0.0)) > 0.0:
+        slope_old = float(forecast["slope"])
         current_trend_days = forecast.get("current_trend_days", change_y[-1])
-        intercept_old = current_trend_days - forecast["slope"] * business_days_elapsed(first_ts, now_de)
-        y_old = np.array([forecast["slope"] * bd + intercept_old for bd in grid_bd])
+        intercept_old = current_trend_days - slope_old * business_days_elapsed(first_ts, now_de)
+        y_old = np.array([slope_old * bd + intercept_old for bd in grid_bd])
 
         label_old = f"ALT: {forecast.get('model_name', 'Linear')} (R²={float(forecast.get('r_squared', 0.0)):.2f})"
-        ax.plot(grid_ts, y_old, linestyle="--", linewidth=1.8, label=label_old, alpha=0.95)
-
-        if ADVANCED_REGRESSION and "std_error" in forecast:
-            try:
-                se = float(forecast.get("std_error", 0.0))
-                if se > 0:
-                    ax.fill_between(grid_ts, y_old - CONFIDENCE_LEVEL * se, y_old + CONFIDENCE_LEVEL * se,
-                                    alpha=0.12, label="ALT: Unsicherheit")
-            except Exception:
-                pass
+        ax.plot(grid_ts, y_old, linestyle="--", linewidth=2.0, label=label_old, alpha=0.95)
 
         for tname, ty in target_map.items():
-            if ty is None:
+            if ty is None: 
                 continue
-            pred = (forecast.get("predictions") or {}).get(tname)
-            if pred and pred.get("date"):
-                eta_dt = _to_naive_berlin(pred["date"])
-            else:
-                bd_eta = (ty - intercept_old) / forecast["slope"]
-                eta_dt = first_ts + timedelta(days=int(round(bd_eta)))
-            alt_eta_dates.append(eta_dt)
-            ax.plot([eta_dt], [ty], marker="*", markersize=12, linestyle="None", zorder=7)
-            ax.axvline(eta_dt, linestyle="--", linewidth=0.8, alpha=0.6)
-            ax.text(eta_dt + timedelta(days=0.4), ty, f"ALT ETA {tname.split()[0]}",
-                    va="center", ha="left", fontsize=9)
+            # Business-Day an der Zielhöhe (analytisch, fraktional!)
+            bd_eta = (ty - intercept_old) / slope_old
+            eta_dt = first_ts + timedelta(days=float(bd_eta))
+            # y auf der ALT-Linie (soll ~ty sein, garantiert aber perfekte Position auf Linie)
+            y_star = slope_old * bd_eta + intercept_old
+            alt_eta_dates.append(_to_naive_berlin(eta_dt))
+            alt_eta_points.append((_to_naive_berlin(eta_dt), float(y_star)))
 
-    # ===== NEU (integrierte Regression) + Heartbeats =====
+    # ---------- NEU ----------
     neu_eta_dates = []
+    neu_eta_points = []
     try:
         from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
         from datetime import time as _time
@@ -689,77 +671,78 @@ def create_progression_graph(history, current_date, forecast=None):
             imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
 
             hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute) / 60.0
-            slope_new = imodel.ts_.b * hours_per_day
+            slope_new = float(imodel.ts_.b * hours_per_day)
 
             current_y = date_to_days(current_date) or (change_y[-1] if change_y else None)
             if current_y is not None and slope_new is not None:
                 intercept_new = current_y - slope_new * business_days_elapsed(first_ts, now_de)
-                # Neue x-Achse (grid) aktualisieren wir gleich nach den ETA-Berechnungen
-                # Fürs Erste auf provisorischem grid zeichnen:
                 y_new = np.array([slope_new * bd + intercept_new for bd in grid_bd])
-                ax.plot(grid_ts, y_new, linewidth=2.2, label="NEU: integrierte Regression", alpha=0.95)
+                ax.plot(grid_ts, y_new, linewidth=2.4, label="NEU: integrierte Regression", alpha=0.95)
 
-                try:
-                    x_obs = imodel.x_
-                    y_obs = imodel.y_
-                    y_hat = np.array([imodel._blend_predict_scalar(float(xx)) for xx in x_obs])
-                    se_new = float(np.sqrt(np.mean((y_obs - y_hat) ** 2)))
-                    if se_new > 0:
-                        ax.fill_between(grid_ts, y_new - CONFIDENCE_LEVEL * se_new, y_new + CONFIDENCE_LEVEL * se_new,
-                                        alpha=0.10, label="NEU: Unsicherheit")
-                except Exception:
-                    pass
+                # ETAs NEU: Zeit aus Modell, y exakt auf unserer gezeichneten Linie
+                pred25 = imodel.predict_datetime("25 July", tz_out=BER)
+                pred28 = imodel.predict_datetime("28 July", tz_out=BER)
+                for tname, pred in (("25 July", pred25), ("28 July", pred28)):
+                    if pred and pred.get("when_point"):
+                        dt = _to_naive_berlin(pred["when_point"])
+                        bd = business_days_elapsed(first_ts, dt)
+                        y_star = slope_new * bd + intercept_new
+                        neu_eta_dates.append(dt)
+                        neu_eta_points.append((dt, float(y_star)))
 
-                try:
-                    pred25 = imodel.predict_datetime("25 July", tz_out=BER)
-                    pred28 = imodel.predict_datetime("28 July", tz_out=BER)
-                    if pred25 and pred25.get("when_point"):
-                        dt25 = _to_naive_berlin(pred25["when_point"])
-                        neu_eta_dates.append(dt25)
-                        ax.plot([dt25], [target_map["25 July"]], marker="*", markersize=12, linestyle="None", zorder=7)
-                        ax.axvline(dt25, linestyle="--", linewidth=0.8, alpha=0.6)
-                        ax.text(dt25 + timedelta(days=0.4), target_map["25 July"], "NEU ETA 25",
-                                va="center", ha="left", fontsize=9)
-                    if pred28 and pred28.get("when_point"):
-                        dt28 = _to_naive_berlin(pred28["when_point"])
-                        neu_eta_dates.append(dt28)
-                        ax.plot([dt28], [target_map["28 July"]], marker="*", markersize=12, linestyle="None", zorder=7)
-                        ax.axvline(dt28, linestyle="--", linewidth=0.8, alpha=0.6)
-                        ax.text(dt28 + timedelta(days=0.4), target_map["28 July"], "NEU ETA 28",
-                                va="center", ha="left", fontsize=9)
-                except Exception:
-                    pass
-
-            # Heartbeats als Rug-Ticks (unten)
+            # Heartbeats (unten)
             if hb_ts:
                 ymin, ymax = ax.get_ylim()
                 hb_y = [ymin + 0.02 * (ymax - ymin)] * len(hb_ts)
                 ax.plot(hb_ts, hb_y, marker="|", linestyle="None", label="Heartbeats (NEU)")
-
     except ImportError:
         pass
     except Exception as e:
         print(f"⚠️ NEU-Regression konnte nicht gezeichnet werden: {e}")
 
-    # ===== Achsenbegrenzung & Format =====
-    # X-Ende: späteste aller ETAs (ALT/NEU), sonst letzter Messpunkt
+    # Sterne & Labels – nicht überlappend: ALT oben, NEU unten (je Ziel)
+    def plot_eta_pair(name, alt_pt, neu_pt):
+        # Sterne
+        if alt_pt:
+            ax.plot([alt_pt[0]], [alt_pt[1]], marker="*", markersize=12, linestyle="None", zorder=7)
+            ax.axvline(alt_pt[0], linestyle="--", linewidth=0.8, alpha=0.6)
+            ax.annotate(f"ALT ETA {name}", (alt_pt[0], alt_pt[1]),
+                        xytext=(6, 9), textcoords="offset points", ha="left", va="bottom", fontsize=9)
+        if neu_pt:
+            ax.plot([neu_pt[0]], [neu_pt[1]], marker="*", markersize=12, linestyle="None", zorder=7)
+            ax.axvline(neu_pt[0], linestyle="--", linewidth=0.8, alpha=0.6)
+            ax.annotate(f"NEU ETA {name}", (neu_pt[0], neu_pt[1]),
+                        xytext=(6, -12), textcoords="offset points", ha="left", va="top", fontsize=9)
+
+    # Zuordnen nach Ziel
+    # (Wir haben Points in Reihenfolge 25,28 – matchen defensiv per Nähe zur Target-Höhe)
+    def _match(points, target_day):
+        if not points: return None
+        pts = sorted(points, key=lambda p: abs(p[1] - target_day))
+        return pts[0]
+
+    t25, t28 = target_map["25 July"], target_map["28 July"]
+    plot_eta_pair("25", _match(alt_eta_points, t25), _match(neu_eta_points, t25))
+    plot_eta_pair("28", _match(alt_eta_points, t28), _match(neu_eta_points, t28))
+
+    # Achsenbegrenzung an spätester ETA
     eta_all = [d for d in (alt_eta_dates + neu_eta_dates) if d is not None]
     right_edge = max(eta_all) if eta_all else change_ts[-1]
-    left_edge = min(change_ts[0], now_de - timedelta(days=3))
+    left_edge  = min(change_ts[0], now_de - timedelta(days=3))
     ax.set_xlim(left_edge - timedelta(days=1), right_edge + timedelta(days=1))
 
-    # Y-Bereich: kompakt um Daten/Targets herum
+    # y kompakt
     y_min = min(change_y)
     y_max = max([*change_y, *(v for v in target_map.values() if v is not None)])
-    pad = 3  # Tage
+    pad = 2
     ax.set_ylim(y_min - pad, y_max + pad)
 
-    # Achsenbeschriftungen & Ticks
+    # Achsenformat
     ax.set_title("Fortschritt & Prognose — ALT vs. NEU")
     ax.set_xlabel("Datum")
     ax.set_ylabel("Verarbeitungsdatum")
 
-    # x: mehr Markierungen
+    # x: dicht
     try:
         ax.xaxis.set_major_locator(mdates.DayLocator(interval=2))
         ax.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
@@ -769,8 +752,8 @@ def create_progression_graph(history, current_date, forecast=None):
     except Exception:
         pass
 
-    # y: echte Datumslabels (aus Tag-des-Jahres)
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=8, steps=[1, 2, 3, 5, 10]))
+    # y: echte Datumslabels
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=8, steps=[1, 2, 3, 5]))
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, pos: _fmt_day_of_year(v, pos, year_ref)))
     ax.tick_params(axis="y", labelsize=9)
 
@@ -787,10 +770,8 @@ def create_progression_graph(history, current_date, forecast=None):
         return buf
     except Exception as e:
         print(f"⚠️ Diagramm konnte nicht erzeugt werden: {e}")
-        try:
-            plt.close()
-        except Exception:
-            pass
+        try: plt.close()
+        except Exception: pass
         return None
 
 def send_telegram_photo(photo_buffer, caption, parse_mode='HTML'):
