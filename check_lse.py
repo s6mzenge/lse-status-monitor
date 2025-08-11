@@ -80,6 +80,70 @@ def get_german_time():
     german_time = utc_time + timedelta(hours=2)
     return german_time
 
+# ===== Compact forecast rendering (ALT vs. NEU) =====
+import math
+from zoneinfo import ZoneInfo
+
+def _now_berlin():
+    return get_german_time().astimezone(ZoneInfo("Europe/Berlin"))
+
+def _short_date(d):  # "14 Aug"
+    if d is None:
+        return "—"
+    return d.astimezone(ZoneInfo("Europe/Berlin")).strftime("%d %b").replace(".", "")
+
+def _cal_days_until(dt, now=None):
+    """Kalendertage (inkl. Wochenende), aufgerundet."""
+    if not dt:
+        return None
+    if now is None:
+        now = _now_berlin()
+    secs = (dt - now).total_seconds()
+    return max(0, int(math.ceil(secs / 86400.0)))
+
+def _diff_days(neu_dt, alt_dt):
+    """Differenz NEU vs. ALT in Kalendertagen als kurzer Text."""
+    if not neu_dt or not alt_dt:
+        return ""
+    d = (neu_dt.date() - alt_dt.date()).days
+    if d == 0:
+        return " (=)"
+    sign = "+" if d > 0 else "−"
+    return f" ({sign}{abs(d)} Tag{'e' if abs(d)!=1 else ''} ggü. 🔵)"
+
+def render_compact_bullets(eta25_old_dt, eta25_new_dt,
+                           eta28_old_dt, eta28_new_dt,
+                           r2_old, pts_old, slope_old,
+                           r2_new, pts_new, slope_new,
+                           hb_count=None):
+    """Kompakte, mobilfreundliche Prognose als Bullet-Liste."""
+    now = _now_berlin()
+
+    def line_for(dt):
+        if not dt:
+            return "—"
+        return f"{_short_date(dt)} (in {_cal_days_until(dt, now)} Tagen)"
+
+    hb_badge = f" HB×{hb_count}" if hb_count not in (None, 0) else ""
+
+    parts = []
+    parts.append("🎨 <b>Legende:</b> 🔵 ALT (linear) · 🟠 NEU (integriert)")
+    parts.append("\n📌 <b>Kurzprognose</b>")
+
+    parts.append("🎯 <b>25 July</b>")
+    parts.append(f"🔵 {line_for(eta25_old_dt)}")
+    parts.append(f"🟠 {line_for(eta25_new_dt)}{_diff_days(eta25_new_dt, eta25_old_dt)}")
+
+    parts.append("\n🎯 <b>28 July</b>")
+    parts.append(f"🔵 {line_for(eta28_old_dt)}")
+    parts.append(f"🟠 {line_for(eta28_new_dt)}{_diff_days(eta28_new_dt, eta28_old_dt)}")
+
+    parts.append("\n📐 <b>Modelle</b>")
+    parts.append(f"R²: 🔵 {r2_old:.2f} ({pts_old}) · 🟠 {r2_new:.2f} ({pts_new}){hb_badge}")
+    parts.append(f"Fortschritt: 🔵 {slope_old:.1f} d/Tag · 🟠 {slope_new:.1f} d/Tag")
+
+    return "\n".join(parts)
+# ====================================================
 
 
 def _iter_observations_or_changes(history: Dict) -> List[Dict]:
