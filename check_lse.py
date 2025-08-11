@@ -149,6 +149,7 @@ def cleanup_resources():
 
 # Cache German timezone for reuse
 _german_tz = ZoneInfo("Europe/Berlin")
+_utc_tz = ZoneInfo("UTC")
 
 def get_german_time():
     """Optimized function to get German time using cached timezone"""
@@ -158,19 +159,16 @@ def get_german_time():
 import math
 
 def _now_berlin():
-    from zoneinfo import ZoneInfo
-    dt = get_german_time()
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=ZoneInfo("Europe/Berlin"))
-    return dt.astimezone(ZoneInfo("Europe/Berlin"))
+    """Optimized function that returns timezone-aware German time"""
+    return get_german_time()
 
 def _short_date(d):  # "14 Aug"
+    """Optimized date formatting with cached timezone"""
     if d is None:
         return "—"
-    from zoneinfo import ZoneInfo
     if d.tzinfo is None:
-        d = d.replace(tzinfo=ZoneInfo("Europe/Berlin"))
-    return d.astimezone(ZoneInfo("Europe/Berlin")).strftime("%d %b").replace(".", "")
+        d = d.replace(tzinfo=_german_tz)
+    return d.astimezone(_german_tz).strftime("%d %b").replace(".", "")
 
 def _cal_days_until(dt, now=None):
     """Kalendertage (inkl. Wochenende), aufgerundet."""
@@ -180,7 +178,7 @@ def _cal_days_until(dt, now=None):
         now = _now_berlin()
     # Falls dt naive ist (z.B. aus ALT-Regression), als Berlin interpretieren
     if getattr(dt, "tzinfo", None) is None:
-        dt = dt.replace(tzinfo=ZoneInfo("Europe/Berlin"))
+        dt = dt.replace(tzinfo=_german_tz)
     secs = (dt - now).total_seconds()
     return max(0, int(math.ceil(secs / 86400.0)))
 
@@ -1412,11 +1410,27 @@ def save_history(history):
         print(f"❌ Fehler beim Speichern von history.json: {e}")
         return False
 
+# Cache current year for date calculations
+_current_year = None
+_last_year_check = None
+
+def _get_current_year():
+    """Get current year with caching to avoid repeated datetime calls"""
+    global _current_year, _last_year_check
+    now = datetime.now()
+    
+    # Check if we need to refresh the year (in case we cross year boundary)
+    if _last_year_check is None or (now - _last_year_check).days > 0:
+        _current_year = get_german_time().year
+        _last_year_check = now
+    
+    return _current_year
+
 def date_to_days(date_str):
-    """Konvertiert ein Datum wie '10 July' in Tage seit dem 1. Januar"""
+    """Konvertiert ein Datum wie '10 July' in Tage seit dem 1. Januar mit optimierter Jahres-Berechnung"""
     try:
-        # Füge das aktuelle Jahr hinzu
-        current_year = get_german_time().year
+        # Nutze gecachtes Jahr
+        current_year = _get_current_year()
         date_obj = datetime.strptime(f"{date_str} {current_year}", "%d %B %Y")
         jan_first = datetime(current_year, 1, 1)
         return (date_obj - jan_first).days
@@ -1424,8 +1438,8 @@ def date_to_days(date_str):
         return None
 
 def days_to_date(days):
-    """Konvertiert Tage seit 1. Januar zurück in ein Datum"""
-    current_year = get_german_time().year
+    """Konvertiert Tage seit 1. Januar zurück in ein Datum mit optimierter Jahres-Berechnung"""
+    current_year = _get_current_year()
     jan_first = datetime(current_year, 1, 1)
     target_date = jan_first + timedelta(days=int(days))
     return target_date.strftime("%d %B").lstrip("0")
@@ -1622,7 +1636,13 @@ def send_gmail(subject, body, recipients):
 
 def main():
     print("="*50)
-    print(f"LSE Status Check - {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}")
+    # Calculate timestamps once for efficiency
+    current_time_german = get_german_time()
+    current_time_utc = datetime.utcnow()
+    current_time_str = current_time_german.strftime('%d.%m.%Y %H:%M:%S')
+    current_time_utc_iso = current_time_utc.isoformat()
+    
+    print(f"LSE Status Check - {current_time_str}")
     
     # Zeige ob erweiterte Regression verfügbar ist
     if ADVANCED_REGRESSION:
@@ -1692,7 +1712,7 @@ def main():
     if current_dates['pre_cas'] and current_dates['pre_cas'] != status.get('pre_cas_date'):
         print(f"\n📝 Pre-CAS Änderung (stilles Tracking): {status.get('pre_cas_date') or 'Unbekannt'} → {current_dates['pre_cas']}")
         history['pre_cas_changes'].append({
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": current_time_utc_iso,
             "date": current_dates['pre_cas'],
             "from": status.get('pre_cas_date')
         })
@@ -1704,7 +1724,7 @@ def main():
     if current_dates['cas'] and current_dates['cas'] != status.get('cas_date'):
         print(f"\n📝 CAS Änderung (stilles Tracking): {status.get('cas_date') or 'Unbekannt'} → {current_dates['cas']}")
         history['cas_changes'].append({
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": current_time_utc_iso,
             "date": current_dates['cas'],
             "from": status.get('cas_date')
         })
@@ -1730,7 +1750,7 @@ def main():
 <b>Letzter Stand:</b> {status['last_date']}
 <b>Status:</b> {"🔔 ÄNDERUNG ERKANNT!" if current_date != status['last_date'] else "✅ Keine Änderung"}
 
-<b>Zeitpunkt:</b> {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
+<b>Zeitpunkt:</b> {current_time_str}
 {forecast_text}
 
 <a href="{URL}">📄 LSE Webseite öffnen</a>"""
@@ -1758,7 +1778,7 @@ def main():
             
             # Speichere in Historie mit UTC Zeit (für Konsistenz)
             history["changes"].append({
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": current_time_utc_iso,
                 "date": current_date,
                 "from": status['last_date']
             })
@@ -1784,7 +1804,7 @@ def main():
 Von: {status['last_date']}
 Auf: {current_date}
 
-Zeitpunkt der Erkennung: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
+Zeitpunkt der Erkennung: {current_time_str}
 
 Link zur Seite: {URL}{manual_hint}"""
             
@@ -1873,7 +1893,7 @@ Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
                 # KRITISCH: Update Status IMMER nach einer erkannten Änderung
                 # Update Status nur bei erfolgreicher Benachrichtigung
                 status['last_date'] = current_date
-                status['last_check'] = datetime.utcnow().isoformat()
+                status['last_check'] = current_time_utc_iso
                 
                 # KRITISCH: Speichere Status mehrfach mit Verifikation
                 print("\n🔄 Speichere aktualisierten Status...")
@@ -1909,7 +1929,7 @@ Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
                 print("⚠️  Status wurde NICHT aktualisiert (keine Benachrichtigung erfolgreich)")
         else:
             print("✅ Keine Änderung - alles beim Alten.")
-            status['last_check'] = datetime.utcnow().isoformat()  # UTC für Konsistenz
+            status['last_check'] = current_time_utc_iso  # UTC für Konsistenz
             # Speichere auch bei keiner Änderung den aktualisierten Timestamp
             save_status(status)
     else:
@@ -1921,7 +1941,7 @@ Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
 
 Konnte das Datum nicht von der Webseite extrahieren!
 
-<b>Zeitpunkt:</b> {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
+<b>Zeitpunkt:</b> {current_time_str}
 <b>Letztes bekanntes Datum:</b> {status['last_date']}
 
 Bitte prüfe die Webseite manuell.
@@ -1934,7 +1954,7 @@ Bitte prüfe die Webseite manuell.
         subject = "LSE Monitor WARNUNG: Datum nicht gefunden"
         body = f"""WARNUNG: Der LSE Monitor konnte das Datum nicht von der Webseite extrahieren!
 
-Zeitpunkt: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
+Zeitpunkt: {current_time_str}
 Letztes bekanntes Datum: {status['last_date']}
 
 Bitte überprüfe:
@@ -1953,7 +1973,7 @@ Der Monitor wird weiterhin prüfen."""
 Konnte das Datum nicht von der Webseite extrahieren!
 
 Letztes bekanntes Datum: <b>{status['last_date']}</b>
-Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
+Zeit: {current_time_str}
 
 Mögliche Gründe:
 • Webseite nicht erreichbar
@@ -1965,7 +1985,7 @@ Mögliche Gründe:
             send_telegram(telegram_warning)
         
         # Speichere trotzdem den Status (mit last_check Update)
-        status['last_check'] = datetime.utcnow().isoformat()
+        status['last_check'] = current_time_utc_iso
         save_status(status)
     
     print("\n" + "="*50)
