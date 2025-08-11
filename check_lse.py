@@ -539,9 +539,8 @@ def create_forecast_text(forecast):
 
 def create_progression_graph(history, current_date, forecast=None):
     """
-    ALT vs. NEU mit ETAs (25/28 July), Heartbeats (NEU),
-    glatten Regressionslinien (fraktionale Business-Days),
-    kompakten Achsen & Datumsbeschriftung – ohne Unsicherheitsflächen.
+    ALT vs. NEU mit echten Schnittpunkt-ETAs (25/28 July), gut sichtbaren Heartbeats,
+    glatten Regressionslinien (fraktionale Business-Days) und kompakten Achsen.
     Gibt BytesIO (PNG) zurück oder None.
     """
     from io import BytesIO
@@ -552,17 +551,17 @@ def create_progression_graph(history, current_date, forecast=None):
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
-    # Farben
-    COL_ALT = "#1f77b4"  # Matplotlib-Blau
-    COL_NEU = "#ff7f0e"  # Matplotlib-Orange
-    COL_HB  = "#2ca02c"
+    COL_ALT = "#1f77b4"   # blau
+    COL_NEU = "#ff7f0e"   # orange
+    COL_HB  = "#2ca02c"   # grün
 
+    # ----- Zeit-/Datum-Helfer -----
     def _to_naive_berlin(dt_like):
-        if dt_like is None:
-            return None
+        if dt_like is None: return None
         if isinstance(dt_like, datetime):
             if dt_like.tzinfo is None:
-                return dt_like.replace(tzinfo=ZoneInfo("Europe/Berlin")).astimezone(ZoneInfo("Europe/Berlin")).replace(tzinfo=None)
+                return dt_like.replace(tzinfo=ZoneInfo("Europe/Berlin")).astimezone(
+                    ZoneInfo("Europe/Berlin")).replace(tzinfo=None)
             return dt_like.astimezone(ZoneInfo("Europe/Berlin")).replace(tzinfo=None)
         try:
             dtx = datetime.fromisoformat(str(dt_like))
@@ -570,24 +569,22 @@ def create_progression_graph(history, current_date, forecast=None):
         except Exception:
             return None
 
-    # kontinuierliche (fraktionale) Business-Days: volle Werktage + Tagesanteil an Werktagen
+    # kontinuierliche (fraktionale) Business-Days
     def _bizdays_float(start: datetime, t: datetime) -> float:
         import numpy as _np
         s0 = datetime(start.year, start.month, start.day)
         t0 = datetime(t.year, t.month, t.day)
         full = float(_np.busday_count(_np.datetime64(s0.date()), _np.datetime64(t0.date())))
         def _frac(d: datetime) -> float:
-            is_bd = bool(_np.is_busday(_np.datetime64(d.date())))
-            if not is_bd:
+            if not bool(_np.is_busday(_np.datetime64(d.date()))):
                 return 0.0
             return (d - datetime(d.year, d.month, d.day)).total_seconds() / 86400.0
         return full + _frac(t) - _frac(s0)
 
     def _days_to_dt(year, doy):
         try:
-            doy_f = float(doy)
             start = datetime(year, 1, 1)
-            return (start + timedelta(days=doy_f - 1)).replace(tzinfo=None)
+            return (start + timedelta(days=float(doy) - 1)).replace(tzinfo=None)
         except Exception:
             return None
 
@@ -595,7 +592,44 @@ def create_progression_graph(history, current_date, forecast=None):
         dt = _days_to_dt(year, v)
         return dt.strftime('%d %b') if dt else ''
 
-    # --- Daten sammeln ---
+    # invertiert y(t)=m*BD(t)+b -> t*, per Bisektion (garantiert Schnittpunkt)
+    def _solve_time_for_level(slope, intercept, y_target, t0, t_hint, sign_positive=True):
+        if slope is None or slope == 0:
+            return None
+        # Startintervall: rund um hint (heute), dann nach außen expandieren bis wir y_target bracketen
+        low  = t_hint - timedelta(days=5)
+        high = t_hint + timedelta(days=20)
+
+        def f(t):  # y(t)
+            return slope * _bizdays_float(t0, t) + intercept
+
+        # Bracketing – monotone Funktion
+        # Expandieren bis f(low) <= y <= f(high) (bei positiver Steigung)
+        max_expand = 20
+        if sign_positive:
+            while f(low)  > y_target and max_expand > 0: low  -= timedelta(days=10); max_expand -= 1
+            while f(high) < y_target and max_expand > 0: high += timedelta(days=10); max_expand -= 1
+        else:
+            while f(low)  < y_target and max_expand > 0: low  -= timedelta(days=10); max_expand -= 1
+            while f(high) > y_target and max_expand > 0: high += timedelta(days=10); max_expand -= 1
+
+        # Falls nicht gebracketed: Abbruch
+        if (f(low) - y_target) * (f(high) - y_target) > 0:
+            return None
+
+        # Bisektion
+        for _ in range(50):
+            mid = low + (high - low) / 2
+            val = f(mid)
+            if abs(val - y_target) < 1e-6:  # genügend genau
+                return mid
+            if (val < y_target) == sign_positive:
+                low = mid
+            else:
+                high = mid
+        return mid
+
+    # ----- Daten sammeln -----
     data = list(_iter_observations_or_changes(history))
     if len(data) < REGRESSION_MIN_POINTS:
         return None
@@ -616,68 +650,65 @@ def create_progression_graph(history, current_date, forecast=None):
     if not change_ts:
         return None
 
-    # chronologisch
     ordered = sorted(zip(change_ts, change_y, change_labels), key=lambda r: r[0])
     change_ts, change_y, change_labels = [list(t) for t in zip(*ordered)]
 
     now_de  = _to_naive_berlin(get_german_time())
     year_ref = now_de.year
 
-    # --- Plot ---
+    # ----- Plot-Grundgerüst -----
     try: plt.style.use("seaborn-v0_8-darkgrid")
     except Exception: pass
     fig, ax = plt.subplots(figsize=(12, 7))
 
-    # Punkte; nur die letzten 8 beschriften, versetzt
-    ax.scatter(change_ts, change_y, s=90, zorder=5, label="Änderungen (historisch)", alpha=0.9, color="#1f77b4")
+    # Historische Punkte + Labels (nur die letzten 8)
+    ax.scatter(change_ts, change_y, s=90, zorder=5, label="Änderungen (historisch)", alpha=0.9, color=COL_ALT)
     last_k = max(0, len(change_ts) - 8)
     for i, (ts, y, lbl) in enumerate(zip(change_ts[last_k:], change_y[last_k:], change_labels[last_k:])):
         dy = 10 if i % 2 == 0 else -14
         ax.annotate(lbl, (ts, y), xytext=(6, dy), textcoords="offset points",
                     fontsize=8.5, alpha=0.85, ha="left", va="center")
 
-    # Heute + Aktuell
+    # Heute + aktueller Punkt
     ax.axvline(now_de, linewidth=1.0, linestyle=":", alpha=0.8)
-    ax.scatter([change_ts[-1]], [change_y[-1]], s=100, zorder=6, label="Aktuell", color="#ff7f0e")
+    ax.scatter([change_ts[-1]], [change_y[-1]], s=100, zorder=6, label="Aktuell", color=COL_NEU)
 
-    # Ziele
+    # Zielhöhen
     target_map = {"25 July": date_to_days("25 July"), "28 July": date_to_days("28 July")}
     for tname, ty in target_map.items():
         if ty is not None:
             ax.axhline(ty, linestyle=":", linewidth=1.0, alpha=0.5)
             ax.text(change_ts[0], ty, f" {tname}", va="center", ha="left", fontsize=9)
 
-    # Zeitgitter (fein, 6-Stunden Raster für glatte Linien)
+    # feines Zeitraster (6h) für glatte Linien
     first_ts = change_ts[0]
-    grid_left = first_ts - timedelta(days=1)
-    grid_right_prov = now_de + timedelta(days=30)
-    nsteps = int(max(1, (grid_right_prov - grid_left).total_seconds() // (6 * 3600)))
-    grid_ts = [grid_left + timedelta(hours=6 * i) for i in range(nsteps + 1)]
+    left_bound  = min(change_ts[0], now_de - timedelta(days=3)) - timedelta(days=1)
+    right_bound = now_de + timedelta(days=40)
+    nsteps = int(max(1, (right_bound - left_bound).total_seconds() // (6 * 3600)))
+    grid_ts = [left_bound + timedelta(hours=6 * i) for i in range(nsteps + 1)]
     grid_bd = [_bizdays_float(first_ts, t) for t in grid_ts]
 
-    # ---------- ALT ----------
-    alt_eta_dates, alt_eta_points = [], []
+    # ----- ALT-Linie -----
+    alt_eta_pts = {}  # name -> (t,y)
     if forecast and float(forecast.get("slope", 0.0)) > 0.0:
-        slope_old = float(forecast["slope"])
-        current_trend_days = forecast.get("current_trend_days", change_y[-1])
-        intercept_old = current_trend_days - slope_old * _bizdays_float(first_ts, now_de)
-        y_old = np.array([slope_old * bd + intercept_old for bd in grid_bd])
+        m_old = float(forecast["slope"])
+        y_now = forecast.get("current_trend_days", change_y[-1])
+        b_old = y_now - m_old * _bizdays_float(first_ts, now_de)
+        y_old = np.array([m_old * bd + b_old for bd in grid_bd])
+        ax.plot(grid_ts, y_old, linestyle=(0, (6, 4)), linewidth=2.0,
+                label=f"ALT: {forecast.get('model_name','Linear')} (R²={float(forecast.get('r_squared',0.0)):.2f})",
+                color=COL_ALT, alpha=0.95)
 
-        label_old = f"ALT: {forecast.get('model_name', 'Linear')} (R²={float(forecast.get('r_squared', 0.0)):.2f})"
-        ax.plot(grid_ts, y_old, linestyle=(0, (6, 4)), linewidth=2.0, label=label_old, color=COL_ALT, alpha=0.95)
+        # echte Schnittpunkte ALT ∩ (y = target)
+        for name, ty in target_map.items():
+            if ty is None: continue
+            t_star = _solve_time_for_level(m_old, b_old, ty, first_ts, now_de, sign_positive=(m_old>0))
+            if t_star:
+                y_star = m_old * _bizdays_float(first_ts, t_star) + b_old
+                alt_eta_pts[name] = (t_star, y_star)
 
-        for tname, ty in target_map.items():
-            if ty is None:
-                continue
-            bd_eta = (ty - intercept_old) / slope_old  # fraktional
-            eta_dt = first_ts + timedelta(days=float(bd_eta))
-            y_star = slope_old * bd_eta + intercept_old
-            eta_dt = _to_naive_berlin(eta_dt)
-            alt_eta_dates.append(eta_dt)
-            alt_eta_points.append((eta_dt, float(y_star)))
-
-    # ---------- NEU ----------
-    neu_eta_dates, neu_eta_points = [], []
+    # ----- NEU-Linie -----
+    neu_eta_pts = {}
     try:
         from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
         from datetime import time as _time
@@ -688,88 +719,75 @@ def create_progression_graph(history, current_date, forecast=None):
             imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
 
             hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute) / 60.0
-            slope_new = float(imodel.ts_.b * hours_per_day)
+            m_new = float(imodel.ts_.b * hours_per_day)
 
-            current_y = date_to_days(current_date) or (change_y[-1] if change_y else None)
-            if current_y is not None and slope_new is not None:
-                intercept_new = current_y - slope_new * _bizdays_float(first_ts, now_de)
-                y_new = np.array([slope_new * bd + intercept_new for bd in grid_bd])
-                ax.plot(grid_ts, y_new, linewidth=2.6, label="NEU: integrierte Regression", color=COL_NEU, alpha=0.95)
+            y_curr = date_to_days(current_date) or (change_y[-1] if change_y else None)
+            if y_curr is not None and m_new is not None:
+                b_new = y_curr - m_new * _bizdays_float(first_ts, now_de)
+                y_new = np.array([m_new * bd + b_new for bd in grid_bd])
+                ax.plot(grid_ts, y_new, linewidth=2.6, label="NEU: integrierte Regression",
+                        color=COL_NEU, alpha=0.95)
 
-                # ETAs NEU
-                pred25 = imodel.predict_datetime("25 July", tz_out=BER)
-                pred28 = imodel.predict_datetime("28 July", tz_out=BER)
-                for tname, pred in (("25 July", pred25), ("28 July", pred28)):
-                    if pred and pred.get("when_point"):
-                        dt = _to_naive_berlin(pred["when_point"])
-                        bd = _bizdays_float(first_ts, dt)
-                        y_star = slope_new * bd + intercept_new
-                        neu_eta_dates.append(dt)
-                        neu_eta_points.append((dt, float(y_star)))
-
-            # Heartbeats (unten)
-            if hb_ts:
-                ymin, ymax = ax.get_ylim()
-                hb_y = [ymin + 0.02 * (ymax - ymin)] * len(hb_ts)
-                ax.plot(hb_ts, hb_y, marker="|", linestyle="None", label="Heartbeats (NEU)", color=COL_HB)
+                # echte Schnittpunkte NEU ∩ (y = target) – gleiche BD-Funktion wie gezeichnete Linie
+                for name, ty in target_map.items():
+                    if ty is None: continue
+                    t_star = _solve_time_for_level(m_new, b_new, ty, first_ts, now_de, sign_positive=(m_new>0))
+                    if t_star:
+                        y_star = m_new * _bizdays_float(first_ts, t_star) + b_new
+                        neu_eta_pts[name] = (t_star, y_star)
     except ImportError:
         pass
     except Exception as e:
         print(f"⚠️ NEU-Regression konnte nicht gezeichnet werden: {e}")
 
-    # Sterne & Labels – ALT oben, NEU unten
-    def plot_eta_pair(name, alt_pt, neu_pt):
+    # ----- Sterne + Labels (nicht überlappend: ALT oben, NEU unten) -----
+    def _plot_eta(name, alt_pt, neu_pt):
         if alt_pt:
-            ax.plot([alt_pt[0]], [alt_pt[1]], marker="*", markersize=12, linestyle="None", zorder=7, color=COL_ALT)
+            ax.plot([alt_pt[0]], [alt_pt[1]], marker="*", markersize=12, linestyle="None",
+                    zorder=7, color=COL_ALT)
             ax.axvline(alt_pt[0], linestyle="--", linewidth=0.8, alpha=0.6, color=COL_ALT)
             ax.annotate(f"ALT ETA {name}", (alt_pt[0], alt_pt[1]),
                         xytext=(6, 9), textcoords="offset points", ha="left", va="bottom", fontsize=9,
                         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
         if neu_pt:
-            ax.plot([neu_pt[0]], [neu_pt[1]], marker="*", markersize=12, linestyle="None", zorder=7, color=COL_NEU)
+            ax.plot([neu_pt[0]], [neu_pt[1]], marker="*", markersize=12, linestyle="None",
+                    zorder=7, color=COL_NEU)
             ax.axvline(neu_pt[0], linestyle="--", linewidth=0.8, alpha=0.6, color=COL_NEU)
             ax.annotate(f"NEU ETA {name}", (neu_pt[0], neu_pt[1]),
                         xytext=(6, -12), textcoords="offset points", ha="left", va="top", fontsize=9,
                         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
 
-    # Zuordnen nach Zielhöhe
-    def _match(points, target_day):
-        if not points: return None
-        pts = sorted(points, key=lambda p: abs(p[1] - target_day))
-        return pts[0]
+    _plot_eta("25", alt_eta_pts.get("25 July"), neu_eta_pts.get("25 July"))
+    _plot_eta("28", alt_eta_pts.get("28 July"), neu_eta_pts.get("28 July"))
 
-    t25, t28 = target_map["25 July"], target_map["28 July"]
-    plot_eta_pair("25", _match(alt_eta_points, t25), _match(neu_eta_points, t25))
-    plot_eta_pair("28", _match(alt_eta_points, t28), _match(neu_eta_points, t28))
-
-    # Achsenbegrenzung an spätester ETA
-    eta_all = [d for d in (alt_eta_dates + neu_eta_dates) if d is not None]
+    # ----- Achsen & Heartbeats -----
+    # X bis zur spätesten ETA
+    eta_all = [p[0] for p in list(alt_eta_pts.values()) + list(neu_eta_pts.values()) if p]
     right_edge = max(eta_all) if eta_all else change_ts[-1]
     left_edge  = min(change_ts[0], now_de - timedelta(days=3))
     ax.set_xlim(left_edge - timedelta(days=1), right_edge + timedelta(days=1))
 
-    # y kompakt
+    # Y eng führen
     y_min = min(change_y)
     y_max = max([*change_y, *(v for v in target_map.values() if v is not None)])
-    pad = 2
-    ax.set_ylim(y_min - pad, y_max + pad)
+    ax.set_ylim(y_min - 2, y_max + 2)
+
+    # Heartbeats als kurze vertikale Striche unten (jetzt nach set_ylim, damit sichtbar)
+    if hb_ts:
+        ylo, yhi = ax.get_ylim()
+        y0 = ylo + 0.02 * (yhi - ylo)
+        y1 = ylo + 0.10 * (yhi - ylo)
+        ax.vlines(hb_ts, y0, y1, colors=COL_HB, linewidth=1.4, label="Heartbeats (NEU)", alpha=0.9)
 
     # Achsenformat
     ax.set_title("Fortschritt & Prognose — ALT vs. NEU")
-    ax.set_xlabel("Datum")
-    ax.set_ylabel("Verarbeitungsdatum")
+    ax.set_xlabel("Datum"); ax.set_ylabel("Verarbeitungsdatum")
+    ax.xaxis.set_major_locator(mdates.DayLocator(interval=2))
+    ax.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
+    ax.tick_params(axis="x", which="major", labelsize=9)
+    ax.tick_params(axis="x", which="minor", length=3)
 
-    # x: dichter
-    try:
-        ax.xaxis.set_major_locator(mdates.DayLocator(interval=2))
-        ax.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
-        ax.tick_params(axis="x", which="major", labelsize=9)
-        ax.tick_params(axis="x", which="minor", length=3)
-    except Exception:
-        pass
-
-    # y: echte Datumslabels
     ax.yaxis.set_major_locator(MaxNLocator(nbins=8, steps=[1, 2, 3, 5]))
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, pos: _fmt_day_of_year(v, pos, year_ref)))
     ax.tick_params(axis="y", labelsize=9)
@@ -782,8 +800,7 @@ def create_progression_graph(history, current_date, forecast=None):
     try:
         buf = BytesIO()
         plt.savefig(buf, format="png", dpi=110, bbox_inches="tight")
-        buf.seek(0)
-        plt.close()
+        buf.seek(0); plt.close()
         return buf
     except Exception as e:
         print(f"⚠️ Diagramm konnte nicht erzeugt werden: {e}")
