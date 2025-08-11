@@ -436,61 +436,199 @@ def _old_regression_summary(forecast):
         "eta25": eta25, "eta28": eta28
     }
 
+# ===== ETA-Backtest & Recency-Blend Helpers =====
+import math
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+def _median(xs):
+    xs = sorted(xs)
+    n = len(xs)
+    if n == 0:
+        return float("inf")
+    mid = n // 2
+    if n % 2:
+        return xs[mid]
+    return 0.5 * (xs[mid-1] + xs[mid])
+
+def _to_aware_berlin(dt):
+    if dt is None:
+        return None
+    tz = ZoneInfo("Europe/Berlin")
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=tz)
+    return dt.astimezone(tz)
+
+def _hours_since(ts, now=None):
+    if ts is None:
+        return 0.0
+    now = _now_berlin() if now is None else _to_aware_berlin(now)
+    ts  = _to_aware_berlin(ts)
+    return max(0.0, (now - ts).total_seconds() / 3600.0)
+
+def _recency_weight(hours_since_change, tau_hours):
+    # Smooth 0→1: kurz nach Änderung ~0 (mehr TS), lange Ruhe ~1 (mehr LOESS)
+    # Center leicht unter tau_hours, damit Umschalten nicht zu spät kommt
+    denom = max(1e-6, 0.25 * tau_hours)
+    z = (hours_since_change - 0.75 * tau_hours) / denom
+    return 1.0 / (1.0 + math.exp(-z))  # Sigmoid
+
+def _subset_rows_until(rows_all, t_cut):
+    """Alle Punkte (inkl. Heartbeats) bis < t_cut."""
+    t_cut = _to_aware_berlin(t_cut)
+    out = []
+    for r in rows_all:
+        ts = _to_aware_berlin(r["timestamp"])
+        if ts < t_cut:
+            out.append(r)
+    return out
+
+def _eta_backtest_score(rows_all, rows_changes, cal, loess_frac, tau_hours, tz_out):
+    """
+    Rolling-Origin-Backtest auf Änderungspunkten:
+    Für jeden echten Change i: Trainiere auf < timestamp_i, predicte ETA für dessen 'date'.
+    Score = Median der |ETA_pred - ETA_true| in Tagen.
+    """
+    from lse_integrated_model import IntegratedRegressor
+    errors_days = []
+
+    # Brauchen einige Splits; starte erst, wenn genug Punkte zum Fitten da sind
+    MIN_TRAIN = 3
+    if len(rows_changes) <= MIN_TRAIN:
+        return float("inf")
+
+    for i in range(MIN_TRAIN, len(rows_changes)):
+        target_date_str = rows_changes[i]["date"]       # z.B. "15 July"
+        true_when       = _to_aware_berlin(rows_changes[i]["timestamp"])
+
+        train_rows = _subset_rows_until(rows_all, true_when)
+        if len(train_rows) < MIN_TRAIN:
+            continue
+
+        try:
+            im = IntegratedRegressor(cal=cal, loess_frac=loess_frac, tau_hours=tau_hours).fit(train_rows)
+            pred = im.predict_datetime(target_date_str, tz_out=tz_out)
+            if not pred or "when_point" not in pred or pred["when_point"] is None:
+                continue
+            pred_when = _to_aware_berlin(pred["when_point"])
+            err_days = abs((pred_when - true_when).total_seconds()) / 86400.0
+            errors_days.append(err_days)
+        except Exception:
+            # Bei Fehlern: diesen Split ignorieren
+            continue
+
+    if len(errors_days) == 0:
+        return float("inf")
+    return _median(errors_days)
+# ================================================
+
+
 def compute_integrated_model_metrics(history):
     """
-    Berechnet Kennzahlen der neuen integrierten Regression (Theil–Sen ⊕ LOESS)
-    inkl. Heartbeats. Gibt None zurück, wenn das Modul fehlt.
+    Integrierte Regression mit:
+      (1) Hyperparameter-Tuning per ETA-Backtest
+      (3) Recency-Blending (mehr LOESS nach längerer Ruhe, mehr TS direkt nach Change)
     """
-    try:
-        from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
-        from datetime import time as _time
-        import numpy as _np
-    except ImportError:
-        return None
+    from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
+    from datetime import time as _time
+    import numpy as _np
 
-    # Alle Punkte (Änderungen + Beobachtungen/Heartbeats)
-    rows = [{"timestamp": e["timestamp"], "date": e["date"]}
-            for e in _iter_observations_or_changes(history)]
-    if len(rows) < REGRESSION_MIN_POINTS:
-        return None
+    # ---- Daten aufbereiten: Changes & Heartbeats ----
+    # rows_all: alle Punkte (Änderungen + Heartbeats)
+    # rows_changes: nur echte Änderungen (für Backtest)
+    rows_all = []
+    rows_changes = []
+    heartbeats = 0
 
-    # Kalender/Modell
+    # history-Struktur: { "changes":[{timestamp, date, from}], "observations":[{timestamp, date, kind:'heartbeat'}], ... }
+    for ch in history.get("changes", []):
+        rows_changes.append({"timestamp": ch["timestamp"], "date": ch["date"]})
+        rows_all.append({"timestamp": ch["timestamp"], "date": ch["date"]})
+    for ob in history.get("observations", []):
+        if ob.get("kind") == "heartbeat":
+            heartbeats += 1
+        rows_all.append({"timestamp": ob["timestamp"], "date": ob["date"]})
+
+    # Sortieren
+    rows_all.sort(key=lambda r: _to_aware_berlin(r["timestamp"]))
+    rows_changes.sort(key=lambda r: _to_aware_berlin(r["timestamp"]))
+
+    # Mindestdaten
+    if len(rows_changes) < 3:
+        return None  # zu wenig für integriertes Modell
+
+    # ---- Kalender / Konstanten ----
     cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
-    imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
+    tz_out = BER
 
-    # R² auf beobachteten Punkten
+    # ---- (1) ETA-Backtest: kleines Grid ----
+    FRACS = [0.5, 0.6, 0.7]
+    TAUS  = [9.0, 12.0, 18.0]
+
+    best = {"score": float("inf"), "frac": 0.6, "tau": 12.0}
+    for frac in FRACS:
+        for tau in TAUS:
+            score = _eta_backtest_score(rows_all, rows_changes, cal, frac, tau, tz_out)
+            # Optional: leichte Regularisierung gegen zu hohe Glättung
+            score_reg = score + 0.02 * (frac - 0.6)**2 + 0.001 * (tau - 12.0)**2
+            if score_reg < best["score"]:
+                best = {"score": score_reg, "frac": frac, "tau": tau}
+
+    base_frac = best["frac"]
+    base_tau  = best["tau"]
+
+    # ---- (3) Recency-Blend: Parameter dynamisch anpassen ----
+    last_change_ts = _to_aware_berlin(rows_changes[-1]["timestamp"])
+    h_since = _hours_since(last_change_ts)
+    w = _recency_weight(h_since, base_tau)  # 0..1
+
+    # Bei frischer Änderung (w~0) → weniger LOESS / kürzere Tau,
+    # bei langer Ruhe (w~1) → mehr LOESS / längere Tau
+    eff_frac = max(0.35, min(0.85, base_frac * (0.85 + 0.30 * w)))
+    eff_tau  = max(6.0,  min(24.0,  base_tau  * (0.80 + 0.50 * w)))
+
+    # ---- Final fit mit effektiven Parametern ----
+    imodel = IntegratedRegressor(cal=cal, loess_frac=eff_frac, tau_hours=eff_tau).fit(rows_all)
+
+    # R² auf beobachteten Punkten (gegen die interne Blend-Vorhersage)
     x_obs = imodel.x_
     y_obs = imodel.y_
-    y_hat = _np.array([imodel._blend_predict_scalar(float(v)) for v in x_obs])
+    y_hat = _np.array([imodel._blend_predict_scalar(float(xv)) for xv in x_obs])
     ss_res = float(_np.sum((y_obs - y_hat) ** 2))
     ss_tot = float(_np.sum((y_obs - _np.mean(y_obs)) ** 2))
     r2_new = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
-    # Durchschnittlicher Fortschritt (Tage pro Business-Tag)
+    # Geschwindigkeit in "Tage pro Geschäftstag"
     hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute) / 60.0
-    avg_prog_new = imodel.ts_.b * hours_per_day
+    avg_prog_new = imodel.ts_.b * hours_per_day  # y pro Business-Day
 
-    # Vorhersagen
-    pred25 = imodel.predict_datetime("25 July", tz_out=BER)
-    pred28 = imodel.predict_datetime("28 July", tz_out=BER)
-    now_de = get_german_time()
-    d25 = business_days_elapsed(now_de, pred25["when_point"])
-    d28 = business_days_elapsed(now_de, pred28["when_point"])
+    # Vorhersagen (echte Datumsobjekte)
+    pred25 = imodel.predict_datetime("25 July", tz_out=tz_out)
+    pred28 = imodel.predict_datetime("28 July", tz_out=tz_out)
 
-    # Heartbeats zählen
-    heartbeats = sum(1 for o in history.get("observations", []) if o.get("kind") == "heartbeat")
+    def _fmt_eta(diff_days, when_dt):
+        if when_dt is None:
+            return "—"
+        return f"{when_dt.strftime('%d. %B %Y')} (in {int(round(diff_days))} Tagen)"
+
+    # Für "in X Tagen" verwenden wir Kalendertage (inkl. WE)
+    now_de = _now_berlin()
+    d25 = (pred25["when_point"] - now_de).total_seconds() / 86400.0 if pred25 and pred25.get("when_point") else None
+    d28 = (pred28["when_point"] - now_de).total_seconds() / 86400.0 if pred28 and pred28.get("when_point") else None
 
     return {
         "name": "NEU (integriert)",
         "r2": r2_new,
-        "points": len(rows),
+        "points": len(rows_all),
         "speed": f"{avg_prog_new:.1f} Tage/Tag",
-        "speed_val": float(avg_prog_new),                 # <-- neu: numerisch
-        "eta25": _fmt_eta(d25, pred25["when_point"]),
-        "eta28": _fmt_eta(d28, pred28["when_point"]),
-        "eta25_dt": pred25["when_point"],                 # <-- neu: echtes Datum
-        "eta28_dt": pred28["when_point"],                 # <-- neu: echtes Datum
-        "heartbeats": heartbeats
+        "speed_val": float(avg_prog_new),                 # numerisch
+        "eta25": _fmt_eta(d25, pred25["when_point"]) if d25 is not None else "—",
+        "eta28": _fmt_eta(d28, pred28["when_point"]) if d28 is not None else "—",
+        "eta25_dt": pred25["when_point"] if pred25 else None,
+        "eta28_dt": pred28["when_point"] if pred28 else None,
+        "heartbeats": heartbeats,
+        # Debug/Transparenz (optional):
+        "params": {"base_frac": base_frac, "base_tau": base_tau, "eff_frac": eff_frac, "eff_tau": eff_tau, "recency_w": w, "h_since_change": h_since, "backtest_score_med_days": best["score"]},
     }
 
 
