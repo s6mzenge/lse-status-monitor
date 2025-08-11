@@ -6,7 +6,12 @@ import re
 import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
 import numpy as np
+from typing import Dict, List, Optional
 from collections import defaultdict
 import time
 import sys
@@ -17,6 +22,10 @@ import base64
 import warnings
 warnings.filterwarnings('ignore')
 
+
+# === Konfiguration und Konstanten (ergänzt) ===
+REGRESSION_MIN_POINTS: int = 2
+CONFIDENCE_LEVEL: float = 1.96  # 95%-Konfidenzniveau
 # === Business-day helpers (x-axis skips weekends) ===
 
 def business_days_elapsed(start_dt, end_dt):
@@ -71,6 +80,37 @@ def get_german_time():
     german_time = utc_time + timedelta(hours=2)
     return german_time
 
+
+
+def _iter_observations_or_changes(history: Dict) -> List[Dict]:
+    """
+    Kombiniert observations und changes, normiert Timestamps auf ISO-UTC,
+    validiert Daten, sortiert aufsteigend.
+    """
+    out: List[Dict] = []
+    src = (history.get("observations", []) or []) + (history.get("changes", []) or [])
+    for e in src:
+        if not isinstance(e, dict):
+            continue
+        ts = e.get("timestamp")
+        dt = e.get("date")
+        if not ts or not dt:
+            continue
+        if not re.match(r'^\d{1,2}\s+\w+$', str(dt)):
+            continue
+        try:
+            s = str(ts).replace('Z', '+00:00')
+            dt_obj = datetime.fromisoformat(s)
+            if dt_obj.tzinfo is None:
+                dt_obj = dt_obj.replace(tzinfo=ZoneInfo("UTC"))
+            ts_iso = dt_obj.astimezone(ZoneInfo("UTC")).isoformat()
+        except Exception:
+            continue
+        kind = e.get("kind") or "change"
+        out.append({"timestamp": ts_iso, "date": dt, "kind": kind})
+    out.sort(key=lambda r: r["timestamp"])
+    return out
+
 def calculate_advanced_regression_forecast(history, current_date=None):
     """
     Erweiterte Regression mit mehreren Verbesserungen:
@@ -80,14 +120,14 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     - Konfidenzintervalle
     - Arbeitstagberechnung
     """
-    if len(history["changes"]) < 2:
+    source_data = _iter_observations_or_changes(history)
+    if len(source_data) < REGRESSION_MIN_POINTS:
         return None
     
     # Extrahiere Datenpunkte
     data_points = []
     first_timestamp = None
-    
-    for entry in history["changes"]:
+    for entry in _iter_observations_or_changes(history):
         try:
             timestamp = datetime.fromisoformat(entry["timestamp"])
             date_days = date_to_days(entry["date"])
@@ -104,7 +144,7 @@ def calculate_advanced_regression_forecast(history, current_date=None):
             print(f"⚠️ Fehler beim Verarbeiten: {e}")
             continue
     
-    if len(data_points) < 2:
+    if len(data_points) < REGRESSION_MIN_POINTS:
         return None
     
     x = np.array([p[0] for p in data_points]).reshape(-1, 1)
@@ -149,8 +189,9 @@ def calculate_advanced_regression_forecast(history, current_date=None):
                 best_intercept = intercept_robust
                 best_r2 = r2_robust
                 best_name = "Robust"
-        except:
-            pass
+        except (ValueError, TypeError, KeyError) as e:
+                print(f"⚠️ Modellberechnung fehlgeschlagen: {e}")
+                pass
         
         # 3. GEWICHTETE REGRESSION (neuere Daten wichtiger)
         try:
@@ -165,8 +206,9 @@ def calculate_advanced_regression_forecast(history, current_date=None):
                 best_intercept = weighted_intercept
                 best_r2 = r2_weighted
                 best_name = "Gewichtet"
-        except:
-            pass
+        except (ValueError, TypeError, KeyError) as e:
+                print(f"⚠️ Modellberechnung fehlgeschlagen: {e}")
+                pass
         
         # 4. POLYNOMIELLE REGRESSION (Grad 2) - nur für Information
         if len(data_points) >= 4:
@@ -176,7 +218,8 @@ def calculate_advanced_regression_forecast(history, current_date=None):
                 y_pred_poly = poly_model.predict(x)
                 r2_poly = 1 - np.sum((y - y_pred_poly)**2) / ss_tot if ss_tot > 0 else 0
                 models_comparison["polynomial"] = {"r2": r2_poly}
-            except:
+            except (ValueError, TypeError, KeyError) as e:
+                print(f"⚠️ Modellberechnung fehlgeschlagen: {e}")
                 pass
     
     # 5. MOVING AVERAGE der Geschwindigkeit
@@ -228,7 +271,7 @@ def calculate_advanced_regression_forecast(history, current_date=None):
             days_until = (target_days - current_predicted_days) / best_slope
             
             # Konfidenzintervall (95%)
-            confidence_margin = 1.96 * std_error / best_slope if best_slope > 0 else 0
+            confidence_margin = (CONFIDENCE_LEVEL * std_error / abs(best_slope)) if best_slope != 0 else 0
             days_until_lower = max(0, days_until - confidence_margin)
             days_until_upper = days_until + confidence_margin
             
@@ -289,7 +332,7 @@ def create_enhanced_forecast_text(forecast):
     if not forecast:
         return "\n📊 Prognose: Noch nicht genügend Daten für eine zuverlässige Vorhersage."
     
-    text = "\n📊 PROGNOSE basierend auf bisherigen Änderungen:\n"
+    text = "\n📊 PROGNOSEN basierend auf bisherigen Änderungen:\n"
     
     # Zeige verwendetes Modell wenn erweiterte Regression verfügbar
     if 'model_name' in forecast and ADVANCED_REGRESSION:
@@ -353,7 +396,82 @@ def create_enhanced_forecast_text(forecast):
                 if 'r2' in data:
                     text += f"   • {name.capitalize()}: R²={data['r2']:.3f}\n"
     
+    
+    # --- Ergänzung: Integrierte Regression (Theil–Sen ⊕ LOESS, GeschäftsSTUNDEN) ---
+    try:
+        from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
+        from datetime import time as _time
+        import numpy as _np
+
+        # Lade Historie von Datei (minimale Invasivität, keine Funktionsänderung nötig)
+        hist = get_history()
+        rows = [
+            {"timestamp": c["timestamp"], "date": c["date"], "from": c.get("from")}
+            for c in (hist.get("observations") or hist.get("changes", []))
+            if isinstance(c, dict) and "timestamp" in c and "date" in c
+        ]
+        if len(rows) >= REGRESSION_MIN_POINTS:
+            cal = BusinessCalendar(tz=LON, start=_time(10,0), end=_time(16,0), holidays=tuple([]))
+            imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
+
+            # Güte (R²) auf beobachteten Punkten für das geblendete Modell
+            x_obs = imodel.x_
+            y_obs = imodel.y_
+            y_hat = _np.array([imodel._blend_predict_scalar(float(v)) for v in x_obs])
+            ss_res = float(_np.sum((y_obs - y_hat)**2))
+            ss_tot = float(_np.sum((y_obs - _np.mean(y_obs))**2))
+            r2_new = 1 - ss_res/ss_tot if ss_tot > 0 else 0.0
+
+            # Durchschnittlicher Fortschritt in "Tage pro Geschäftstag"
+            hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute)/60.0
+            avg_prog_new = imodel.ts_.b * hours_per_day  # y pro Business-Day
+
+            # Vorhersagen (Zeit nur für interne Berechnung; in der Nachricht nur Datum/„in X Tagen“)
+            pred25 = imodel.predict_datetime("25 July", tz_out=BER)
+            pred28 = imodel.predict_datetime("28 July", tz_out=BER)
+
+            now_de = get_german_time()
+            def _biz_days_until(dt):
+                return business_days_elapsed(now_de, dt)
+
+            def _fmt_date_only(dt):
+                return dt.strftime('%d. %B %Y')
+
+            days25 = _biz_days_until(pred25["when_point"])
+            days28 = _biz_days_until(pred28["when_point"])
+
+            # Visuell ergänzte Sektion
+            text += "\n<b>📊 PROGNOSEN basierend auf bisherigen Änderungen (Vergleich):</b>\n"
+            text += f"• Alte Regression: R²={forecast['r_squared']:.2f}, {forecast['data_points']} Datenpunkte\n"
+            text += f"• Neue Regression: R²={r2_new:.2f}, {len(rows)} Datenpunkte\n\n"
+
+            text += "<b>📈 Durchschnittlicher Fortschritt</b>\n"
+            if forecast['slope'] > 0:
+                emoji = {"beschleunigend": "🚀", "verlangsamend": "🐌", "konstant": "➡️"}
+                trend_txt = ''
+                if 'trend_analysis' in forecast and forecast['trend_analysis'] != 'unbekannt':
+                    trend_txt = f"\n{emoji.get(forecast['trend_analysis'], '❓')} Trend: {forecast['trend_analysis'].upper()}"
+                text += f"• Alte Regression: {forecast['slope']:.1f} Tage pro Tag{trend_txt}\n"
+            else:
+                text += "• Alte Regression: —\n"
+            text += f"• Neue Regression: {avg_prog_new:.1f} Tage pro Tag\n\n"
+
+            text += "<b>📅 25 July wird voraussichtlich erreicht</b>\n"
+            text += "• Alte Regression: siehe oben\n"
+            text += f"• Neue Regression: In {days25:.0f} Tagen — Am {_fmt_date_only(pred25['when_point'])}\n\n"
+
+            text += "<b>📅 28 July wird voraussichtlich erreicht</b>\n"
+            text += "• Alte Regression: siehe oben\n"
+            text += f"• Neue Regression: In {days28:.0f} Tagen — Am {_fmt_date_only(pred28['when_point'])}\n"
+        else:
+            # Zu wenig Daten für integrierte Regression
+            pass
+
+    except Exception as _e:
+        # Wenn Modul nicht vorhanden oder Fehler: einfach nichts ergänzen
+        pass
     return text
+
 
 def create_forecast_text(forecast):
     """Wrapper für Rückwärtskompatibilität - ruft erweiterte Version auf"""
@@ -361,7 +479,8 @@ def create_forecast_text(forecast):
 
 def create_progression_graph(history, current_date, forecast=None):
     """Erstellt ein Diagramm mit der Progression der Verarbeitungsdaten"""
-    if len(history["changes"]) < 2:
+    source_data = _iter_observations_or_changes(history)
+    if len(source_data) < REGRESSION_MIN_POINTS:
         return None
     
     try:
@@ -374,7 +493,7 @@ def create_progression_graph(history, current_date, forecast=None):
         dates_numeric = []
         date_labels = []
         
-        for entry in history["changes"]:
+        for entry in _iter_observations_or_changes(history):
             timestamp = datetime.fromisoformat(entry["timestamp"])
             date_days = date_to_days(entry["date"])
             if date_days is not None:
@@ -412,8 +531,8 @@ def create_progression_graph(history, current_date, forecast=None):
             # Zeige Konfidenzintervall wenn verfügbar
             if 'std_error' in forecast and ADVANCED_REGRESSION:
                 std_error = forecast['std_error']
-                upper_bound = future_y + 1.96 * std_error
-                lower_bound = future_y - 1.96 * std_error
+                upper_bound = future_y + CONFIDENCE_LEVEL * std_error
+                lower_bound = future_y - CONFIDENCE_LEVEL * std_error
                 ax.fill_between(future_timestamps, lower_bound, upper_bound, 
                                color='red', alpha=0.1, label='95% Konfidenzintervall')
             
@@ -623,23 +742,29 @@ def send_telegram_papa(old_date, new_date):
         print(f"❌ Telegram-Fehler (Papa): {e}")
         return False
 
+
 def migrate_json_files():
     """Migriert die JSON-Dateien zur neuen Struktur ohne Datenverlust"""
     # Migriere status.json
     try:
         with open(STATUS_FILE, 'r') as f:
             status = json.load(f)
-        
-        # Füge neue Felder hinzu wenn nicht vorhanden
+        changed = False
         if 'pre_cas_date' not in status:
             status['pre_cas_date'] = None
             print("✅ Status-Migration: pre_cas_date hinzugefügt")
+            changed = True
         if 'cas_date' not in status:
             status['cas_date'] = None
             print("✅ Status-Migration: cas_date hinzugefügt")
-            
-        with open(STATUS_FILE, 'w') as f:
-            json.dump(status, f, indent=2)
+            changed = True
+        if 'last_updated_seen_utc' not in status:
+            status['last_updated_seen_utc'] = None
+            print("✅ Status-Migration: last_updated_seen_utc hinzugefügt")
+            changed = True
+        if changed:
+            with open(STATUS_FILE, 'w') as f:
+                json.dump(status, f, indent=2)
     except Exception as e:
         print(f"⚠️ Fehler bei Status-Migration: {e}")
     
@@ -647,17 +772,16 @@ def migrate_json_files():
     try:
         with open(HISTORY_FILE, 'r') as f:
             history = json.load(f)
-        
-        # Füge neue Arrays hinzu wenn nicht vorhanden
         if 'pre_cas_changes' not in history:
             history['pre_cas_changes'] = []
-            print("✅ History-Migration: pre_cas_changes hinzugefügt")
         if 'cas_changes' not in history:
             history['cas_changes'] = []
-            print("✅ History-Migration: cas_changes hinzugefügt")
-            
+        if 'observations' not in history:
+            history['observations'] = []
         with open(HISTORY_FILE, 'w') as f:
             json.dump(history, f, indent=2)
+    except FileNotFoundError:
+        pass
     except Exception as e:
         print(f"⚠️ Fehler bei History-Migration: {e}")
 
@@ -666,35 +790,32 @@ def load_status():
     try:
         with open(STATUS_FILE, 'r') as f:
             status = json.load(f)
-            
-        # Validiere die geladenen Daten
         if not isinstance(status, dict):
             print("⚠️ Status ist kein Dictionary, verwende Standardwerte")
-            return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None}
-            
+            return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
         if 'last_date' not in status:
             print("⚠️ last_date fehlt in status.json, verwende Standardwert")
             status['last_date'] = "10 July"
-        
-        # Stelle sicher dass neue Felder existieren
+        if 'last_check' not in status:
+            status['last_check'] = None
         if 'pre_cas_date' not in status:
             status['pre_cas_date'] = None
         if 'cas_date' not in status:
             status['cas_date'] = None
-            
+        if 'last_updated_seen_utc' not in status:
+            status['last_updated_seen_utc'] = None
         print(f"✅ Status geladen: {status['last_date']}")
         return status
     except FileNotFoundError:
         print("ℹ️ status.json nicht gefunden, erstelle neue Datei")
-        return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None}
+        return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
     except json.JSONDecodeError as e:
         print(f"❌ Fehler beim Parsen von status.json: {e}")
         print("Verwende Standardwerte")
-        return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None}
+        return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
     except Exception as e:
         print(f"❌ Unerwarteter Fehler beim Laden von status.json: {e}")
-        return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None}
-
+        return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
 def save_status(status):
     """Speichert Status mit Validierung und Verifikation"""
     # Validiere dass last_date gesetzt ist
@@ -752,29 +873,36 @@ def load_history():
         # Validiere die geladenen Daten
         if not isinstance(history, dict) or 'changes' not in history:
             print("⚠️ History ist ungültig, verwende leere Historie")
-            return {"changes": [], "pre_cas_changes": [], "cas_changes": []}
+            return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
             
         if not isinstance(history['changes'], list):
             print("⚠️ History changes ist keine Liste, verwende leere Historie")
-            return {"changes": [], "pre_cas_changes": [], "cas_changes": []}
+            return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
         
         # Stelle sicher dass neue Arrays existieren
         if 'pre_cas_changes' not in history:
             history['pre_cas_changes'] = []
         if 'cas_changes' not in history:
             history['cas_changes'] = []
+        if 'observations' not in history:
+            history['observations'] = []
             
-        print(f"✅ Historie geladen: {len(history['changes'])} Änderungen")
+        print(f"✅ Historie geladen: {len(history['changes'])} Änderungen, {len(history.get('observations', []))} Beobachtungen")
         return history
     except FileNotFoundError:
         print("ℹ️ history.json nicht gefunden, erstelle neue Datei")
-        return {"changes": [], "pre_cas_changes": [], "cas_changes": []}
+        return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
     except json.JSONDecodeError as e:
         print(f"❌ Fehler beim Parsen von history.json: {e}")
-        return {"changes": [], "pre_cas_changes": [], "cas_changes": []}
+        return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
     except Exception as e:
         print(f"❌ Unerwarteter Fehler beim Laden von history.json: {e}")
-        return {"changes": [], "pre_cas_changes": [], "cas_changes": []}
+        return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+
+def get_history():
+    """Backward-compat wrapper to load history."""
+    return load_history()
+
 
 def save_history(history):
     """Speichert Historie mit Validierung"""
@@ -863,6 +991,20 @@ def extract_cas_date(text):
     if match:
         return match.group(1).strip()
     return None
+def extract_last_updated(text):
+    """Extrahiert 'Last updated' als UTC-datetime; None wenn nicht gefunden."""
+    try:
+        m = re.search(r'Last\s+updated:\s*(\d{1,2}\s+\w+\s+\d{4}),\s*(\d{1,2}:\d{2})', text, re.IGNORECASE)
+        if not m:
+            return None
+        date_part, time_part = m.group(1), m.group(2)
+        naive = datetime.strptime(f"{date_part} {time_part}", "%d %B %Y %H:%M")
+        dt_lon = naive.replace(tzinfo=ZoneInfo("Europe/London"))
+        dt_utc = dt_lon.astimezone(ZoneInfo("UTC"))
+        return dt_utc
+    except Exception:
+        return None
+
 
 def fetch_processing_dates():
     """Holt alle Verarbeitungsdaten von der LSE-Webseite"""
@@ -880,12 +1022,15 @@ def fetch_processing_dates():
         
         soup = BeautifulSoup(response.text, 'html.parser')
         full_text = soup.get_text()
+        # Parse Last updated
+        last_up_dt = extract_last_updated(full_text)
         
         # Initialisiere Rückgabewerte
         dates = {
             'all_other': None,
             'pre_cas': None,
-            'cas': None
+            'cas': None,
+            'last_updated_utc': (last_up_dt.astimezone(ZoneInfo('UTC')).isoformat() if last_up_dt else None)
         }
         
         # Suche nach "all other graduate applicants" (existierende Logik)
@@ -1029,7 +1174,32 @@ def main():
     print("\nRufe LSE-Webseite ab...")
     current_dates = fetch_processing_dates()
     
-    # Stilles Tracking für Pre-CAS (keine Benachrichtigungen)
+    
+    # Heartbeat-Beobachtung (Seite aktualisiert, Datum gleich)
+    try:
+        last_up_iso = current_dates.get('last_updated_utc')
+        if last_up_iso:
+            prev_seen = status.get('last_updated_seen_utc')
+            is_new_update = (prev_seen != last_up_iso)
+        else:
+            is_new_update = False
+
+        if is_new_update:
+            status['last_updated_seen_utc'] = last_up_iso
+            save_status(status)
+            current_all_other = current_dates.get('all_other')
+            if current_all_other == status.get('last_date'):
+                history.setdefault('observations', [])
+                if not any(o.get('timestamp') == last_up_iso for o in history['observations']):
+                    history['observations'].append({
+                        'timestamp': last_up_iso,
+                        'date': current_all_other,
+                        'kind': 'heartbeat'
+                    })
+                    save_history(history)
+    except Exception as _e:
+        print(f"⚠️ Heartbeat-Logik übersprungen: {_e}")
+# Stilles Tracking für Pre-CAS (keine Benachrichtigungen)
     if current_dates['pre_cas'] and current_dates['pre_cas'] != status.get('pre_cas_date'):
         print(f"\n📝 Pre-CAS Änderung (stilles Tracking): {status.get('pre_cas_date') or 'Unbekannt'} → {current_dates['pre_cas']}")
         history['pre_cas_changes'].append({
