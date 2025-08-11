@@ -260,6 +260,44 @@ def send_telegram_papa(old_date, new_date):
         print(f"❌ Telegram-Fehler (Papa): {e}")
         return False
 
+def migrate_json_files():
+    """Migriert die JSON-Dateien zur neuen Struktur ohne Datenverlust"""
+    # Migriere status.json
+    try:
+        with open(STATUS_FILE, 'r') as f:
+            status = json.load(f)
+        
+        # Füge neue Felder hinzu wenn nicht vorhanden
+        if 'pre_cas_date' not in status:
+            status['pre_cas_date'] = None
+            print("✅ Status-Migration: pre_cas_date hinzugefügt")
+        if 'cas_date' not in status:
+            status['cas_date'] = None
+            print("✅ Status-Migration: cas_date hinzugefügt")
+            
+        with open(STATUS_FILE, 'w') as f:
+            json.dump(status, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ Fehler bei Status-Migration: {e}")
+    
+    # Migriere history.json
+    try:
+        with open(HISTORY_FILE, 'r') as f:
+            history = json.load(f)
+        
+        # Füge neue Arrays hinzu wenn nicht vorhanden
+        if 'pre_cas_changes' not in history:
+            history['pre_cas_changes'] = []
+            print("✅ History-Migration: pre_cas_changes hinzugefügt")
+        if 'cas_changes' not in history:
+            history['cas_changes'] = []
+            print("✅ History-Migration: cas_changes hinzugefügt")
+            
+        with open(HISTORY_FILE, 'w') as f:
+            json.dump(history, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ Fehler bei History-Migration: {e}")
+
 def load_status():
     """Lädt Status mit Fehlerbehandlung und Validierung"""
     try:
@@ -269,24 +307,30 @@ def load_status():
         # Validiere die geladenen Daten
         if not isinstance(status, dict):
             print("⚠️ Status ist kein Dictionary, verwende Standardwerte")
-            return {"last_date": "10 July", "last_check": None}
+            return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None}
             
         if 'last_date' not in status:
             print("⚠️ last_date fehlt in status.json, verwende Standardwert")
             status['last_date'] = "10 July"
+        
+        # Stelle sicher dass neue Felder existieren
+        if 'pre_cas_date' not in status:
+            status['pre_cas_date'] = None
+        if 'cas_date' not in status:
+            status['cas_date'] = None
             
         print(f"✅ Status geladen: {status['last_date']}")
         return status
     except FileNotFoundError:
         print("ℹ️ status.json nicht gefunden, erstelle neue Datei")
-        return {"last_date": "10 July", "last_check": None}
+        return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None}
     except json.JSONDecodeError as e:
         print(f"❌ Fehler beim Parsen von status.json: {e}")
         print("Verwende Standardwerte")
-        return {"last_date": "10 July", "last_check": None}
+        return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None}
     except Exception as e:
         print(f"❌ Unerwarteter Fehler beim Laden von status.json: {e}")
-        return {"last_date": "10 July", "last_check": None}
+        return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None}
 
 def save_status(status):
     """Speichert Status mit Validierung und Verifikation"""
@@ -345,23 +389,29 @@ def load_history():
         # Validiere die geladenen Daten
         if not isinstance(history, dict) or 'changes' not in history:
             print("⚠️ History ist ungültig, verwende leere Historie")
-            return {"changes": []}
+            return {"changes": [], "pre_cas_changes": [], "cas_changes": []}
             
         if not isinstance(history['changes'], list):
             print("⚠️ History changes ist keine Liste, verwende leere Historie")
-            return {"changes": []}
+            return {"changes": [], "pre_cas_changes": [], "cas_changes": []}
+        
+        # Stelle sicher dass neue Arrays existieren
+        if 'pre_cas_changes' not in history:
+            history['pre_cas_changes'] = []
+        if 'cas_changes' not in history:
+            history['cas_changes'] = []
             
         print(f"✅ Historie geladen: {len(history['changes'])} Änderungen")
         return history
     except FileNotFoundError:
         print("ℹ️ history.json nicht gefunden, erstelle neue Datei")
-        return {"changes": []}
+        return {"changes": [], "pre_cas_changes": [], "cas_changes": []}
     except json.JSONDecodeError as e:
         print(f"❌ Fehler beim Parsen von history.json: {e}")
-        return {"changes": []}
+        return {"changes": [], "pre_cas_changes": [], "cas_changes": []}
     except Exception as e:
         print(f"❌ Unerwarteter Fehler beim Laden von history.json: {e}")
-        return {"changes": []}
+        return {"changes": [], "pre_cas_changes": [], "cas_changes": []}
 
 def save_history(history):
     """Speichert Historie mit Validierung"""
@@ -483,6 +533,46 @@ def extract_all_other_date(text):
     
     return None
 
+def extract_pre_cas_date(text):
+    """Extrahiert das Datum für Pre-CAS"""
+    # Pattern 1: Suche nach Pre-CAS mit Datum in der gleichen Zeile
+    pattern1 = r'issuing\s+Pre-CAS.*?criteria\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+    match = re.search(pattern1, text, re.IGNORECASE | re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    
+    # Pattern 2: Suche nach Pre-CAS gefolgt von Datum in der Nähe (für Tabellen)
+    # Bereinige Text von mehrfachen Leerzeichen/Zeilenumbrüchen
+    clean_text = ' '.join(text.split())
+    
+    # Suche nach Pre-CAS und dem nächsten Datum danach
+    pattern2 = r'issuing\s+Pre-CAS\s+for\s+offer\s+holders.*?criteria\s+on:?\s*([^.]*?)(?:Please|We\s+are|$)'
+    match = re.search(pattern2, clean_text, re.IGNORECASE)
+    if match:
+        potential_text = match.group(1)
+        # Extrahiere das erste Datum aus diesem Bereich
+        date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+        date_match = re.search(date_pattern, potential_text, re.IGNORECASE)
+        if date_match:
+            return date_match.group(1).strip()
+    
+    # Pattern 3: Allgemeinere Suche - Pre-CAS gefolgt von einem Datum innerhalb von ~100 Zeichen
+    pattern3 = r'Pre-CAS[^0-9]{0,100}?(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+    match = re.search(pattern3, clean_text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    
+    return None
+
+def extract_cas_date(text):
+    """Extrahiert das Datum für CAS"""
+    # Suche nach CAS Pattern (aber nicht Pre-CAS)
+    pattern = r'issuing\s+CAS\s+to.*?Pre-CAS\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+    match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return None
+
 def create_forecast_text(forecast):
     """Erstellt einen Prognosetext basierend auf der Regression"""
     if not forecast:
@@ -515,8 +605,8 @@ def create_forecast_text(forecast):
     
     return text
 
-def fetch_processing_date():
-    """Holt das aktuelle Verarbeitungsdatum von der LSE-Webseite"""
+def fetch_processing_dates():
+    """Holt alle Verarbeitungsdaten von der LSE-Webseite"""
     try:
         print("Rufe LSE-Webseite ab...")
         response = requests.get(URL, headers={
@@ -530,8 +620,16 @@ def fetch_processing_date():
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
+        full_text = soup.get_text()
         
-        # Suche nach "all other graduate applicants"
+        # Initialisiere Rückgabewerte
+        dates = {
+            'all_other': None,
+            'pre_cas': None,
+            'cas': None
+        }
+        
+        # Suche nach "all other graduate applicants" (existierende Logik)
         for element in soup.find_all(string=re.compile(r'all other graduate applicants', re.IGNORECASE)):
             parent = element.parent
             while parent and parent.name not in ['td', 'th', 'tr']:
@@ -546,7 +644,8 @@ def fetch_processing_date():
                         if date:
                             print(f"Gefundene Daten in Zelle: {cell_text.strip()}")
                             print(f"Extrahiertes Datum für 'all other graduate applicants': {date}")
-                            return date
+                            dates['all_other'] = date
+                            break
                 else:
                     row = parent.find_parent('tr')
                     if row:
@@ -557,32 +656,41 @@ def fetch_processing_date():
                             if date:
                                 print(f"Gefundene Daten in Zelle: {cell_text.strip()}")
                                 print(f"Extrahiertes Datum für 'all other graduate applicants': {date}")
-                                return date
+                                dates['all_other'] = date
+                                break
         
-        # Fallback: Textsuche
-        full_text = soup.get_text()
-        pattern = r'all other graduate applicants[^0-9]*?((?:\d{1,2}\s+\w+\s*)+)'
-        match = re.search(pattern, full_text, re.IGNORECASE | re.DOTALL)
+        # Fallback für all other
+        if not dates['all_other']:
+            pattern = r'all other graduate applicants[^0-9]*?((?:\d{1,2}\s+\w+\s*)+)'
+            match = re.search(pattern, full_text, re.IGNORECASE | re.DOTALL)
+            
+            if match:
+                dates_text = match.group(1)
+                date = extract_all_other_date(dates_text)
+                if date:
+                    print(f"Datum durch Textsuche gefunden: {date}")
+                    dates['all_other'] = date
         
-        if match:
-            dates_text = match.group(1)
-            date = extract_all_other_date(dates_text)
-            if date:
-                print(f"Datum durch Textsuche gefunden: {date}")
-                return date
+        # Extrahiere Pre-CAS und CAS Daten
+        dates['pre_cas'] = extract_pre_cas_date(full_text)
+        dates['cas'] = extract_cas_date(full_text)
         
-        print("WARNUNG: Konnte das Datum nicht finden!")
-        return None
+        print(f"\n📋 Gefundene Daten:")
+        print(f"   All other applicants: {dates['all_other']}")
+        print(f"   Pre-CAS: {dates['pre_cas'] or 'Nicht gefunden'}")
+        print(f"   CAS: {dates['cas'] or 'Nicht gefunden'}")
+        
+        return dates
         
     except requests.exceptions.Timeout:
         print("❌ Timeout beim Abrufen der Webseite")
-        return None
+        return {'all_other': None, 'pre_cas': None, 'cas': None}
     except requests.exceptions.RequestException as e:
         print(f"❌ Netzwerkfehler beim Abrufen der Webseite: {e}")
-        return None
+        return {'all_other': None, 'pre_cas': None, 'cas': None}
     except Exception as e:
         print(f"❌ Unerwarteter Fehler beim Abrufen der Webseite: {e}")
-        return None
+        return {'all_other': None, 'pre_cas': None, 'cas': None}
 
 def send_gmail(subject, body, recipients):
     """Sendet E-Mail über Gmail an spezifische Empfänger"""
@@ -623,6 +731,9 @@ def main():
     print("="*50)
     print(f"LSE Status Check - {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}")
     
+    # Migriere JSON-Dateien falls nötig
+    migrate_json_files()
+    
     # Prüfe ob manueller Run via Telegram
     IS_MANUAL = os.environ.get('GITHUB_EVENT_NAME') == 'repository_dispatch'
     if IS_MANUAL:
@@ -646,15 +757,44 @@ def main():
     status = load_status()
     history = load_history()
     print(f"Letztes bekanntes Datum: {status['last_date']}")
+    print(f"Letztes Pre-CAS: {status.get('pre_cas_date') or 'Noch nicht getrackt'}")
+    print(f"Letztes CAS: {status.get('cas_date') or 'Noch nicht getrackt'}")
     
-    # Hole aktuelles Datum
+    # Hole alle aktuellen Daten
     print("\nRufe LSE-Webseite ab...")
-    current_date = fetch_processing_date()
+    current_dates = fetch_processing_dates()
+    
+    # Stilles Tracking für Pre-CAS (keine Benachrichtigungen)
+    if current_dates['pre_cas'] and current_dates['pre_cas'] != status.get('pre_cas_date'):
+        print(f"\n📝 Pre-CAS Änderung (stilles Tracking): {status.get('pre_cas_date') or 'Unbekannt'} → {current_dates['pre_cas']}")
+        history['pre_cas_changes'].append({
+            "timestamp": datetime.utcnow().isoformat(),
+            "date": current_dates['pre_cas'],
+            "from": status.get('pre_cas_date')
+        })
+        status['pre_cas_date'] = current_dates['pre_cas']
+        # Speichere sofort
+        save_history(history)
+    
+    # Stilles Tracking für CAS (keine Benachrichtigungen)
+    if current_dates['cas'] and current_dates['cas'] != status.get('cas_date'):
+        print(f"\n📝 CAS Änderung (stilles Tracking): {status.get('cas_date') or 'Unbekannt'} → {current_dates['cas']}")
+        history['cas_changes'].append({
+            "timestamp": datetime.utcnow().isoformat(),
+            "date": current_dates['cas'],
+            "from": status.get('cas_date')
+        })
+        status['cas_date'] = current_dates['cas']
+        # Speichere sofort
+        save_history(history)
+    
+    # Hauptlogik für "all other applicants" (mit Benachrichtigungen wie bisher)
+    current_date = current_dates['all_other']
     
     if current_date:
         print(f"Aktuelles Datum für 'all other graduate applicants': {current_date}")
         
-        # Bei manuellem Check immer Status senden
+        # Bei manuellem Check immer Status senden (NUR für all other applicants)
         if IS_MANUAL:
             # Berechne aktuellen Trend wenn möglich
             forecast = calculate_regression_forecast(history)
@@ -901,6 +1041,10 @@ Mögliche Gründe:
 <a href="{URL}">📄 Webseite manuell prüfen</a>"""
             
             send_telegram(telegram_warning)
+        
+        # Speichere trotzdem den Status (mit last_check Update)
+        status['last_check'] = datetime.utcnow().isoformat()
+        save_status(status)
     
     print("\n" + "="*50)
     
@@ -918,6 +1062,8 @@ Mögliche Gründe:
             final_status = json.load(f)
             print(f"   last_date: {final_status.get('last_date')}")
             print(f"   last_check: {final_status.get('last_check')}")
+            print(f"   pre_cas_date: {final_status.get('pre_cas_date') or 'Nicht getrackt'}")
+            print(f"   cas_date: {final_status.get('cas_date') or 'Nicht getrackt'}")
     except Exception as e:
         print(f"   Fehler beim Lesen des finalen Status: {e}")
 
