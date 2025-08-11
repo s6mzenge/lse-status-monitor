@@ -10,22 +10,47 @@ try:
     from zoneinfo import ZoneInfo
 except ImportError:
     from backports.zoneinfo import ZoneInfo
-import numpy as np
 from typing import Dict, List, Optional
 from collections import defaultdict
 import time
 import sys
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 from io import BytesIO
-import base64
-import warnings
-warnings.filterwarnings('ignore')
+
+# Import configuration
+from config import (
+    LSE_URL, STATUS_FILE, HISTORY_FILE, REGRESSION_MIN_POINTS, CONFIDENCE_LEVEL,
+    TARGET_DATES, REQUEST_TIMEOUT, REQUEST_HEADERS, GMAIL_SMTP_SERVER, 
+    GMAIL_SMTP_PORT, TELEGRAM_API_BASE
+)
+
+# Lazy imports for heavy dependencies - only loaded when needed
+_numpy = None
+_matplotlib_plt = None
+_matplotlib_dates = None
+_warnings = None
+
+def _get_numpy():
+    global _numpy
+    if _numpy is None:
+        import numpy as np
+        _numpy = np
+    return _numpy
+
+def _get_matplotlib():
+    global _matplotlib_plt, _matplotlib_dates, _warnings
+    if _matplotlib_plt is None:
+        import warnings
+        warnings.filterwarnings('ignore')
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+        _matplotlib_plt = plt
+        _matplotlib_dates = mdates
+        _warnings = warnings
+    return _matplotlib_plt, _matplotlib_dates
 
 
 # === Konfiguration und Konstanten (ergänzt) ===
-REGRESSION_MIN_POINTS: int = 2
-CONFIDENCE_LEVEL: float = 1.96  # 95%-Konfidenzniveau
+# Constants now imported from config.py
 # === Business-day helpers (x-axis skips weekends) ===
 
 def business_days_elapsed(start_dt, end_dt):
@@ -33,6 +58,7 @@ def business_days_elapsed(start_dt, end_dt):
     Zählt Arbeitstage (Mo–Fr) zwischen start_dt (inkl.) und end_dt (exkl.).
     Nutzt nur das Datum (keine Uhrzeiten). Für denselben Kalendertag -> 0.
     '''
+    np = _get_numpy()
     s = np.datetime64(start_dt.date(), 'D')
     e = np.datetime64(end_dt.date(), 'D')
     # np.busday_count zählt Werktage im Intervall [s, e)
@@ -56,20 +82,39 @@ def add_business_days(start_dt, n):
     return current
 
 
-# Versuche erweiterte Bibliotheken zu importieren
+# Lazy imports for optional advanced features
+_scipy_stats = None
+_sklearn_HuberRegressor = None
+_sklearn_RANSACRegressor = None
+_sklearn_PolynomialFeatures = None
+_sklearn_make_pipeline = None
+
+def _get_advanced_regression():
+    global _scipy_stats, _sklearn_HuberRegressor, _sklearn_RANSACRegressor, _sklearn_PolynomialFeatures, _sklearn_make_pipeline
+    try:
+        if _scipy_stats is None:
+            from scipy import stats
+            from sklearn.linear_model import HuberRegressor, RANSACRegressor
+            from sklearn.preprocessing import PolynomialFeatures
+            from sklearn.pipeline import make_pipeline
+            _scipy_stats = stats
+            _sklearn_HuberRegressor = HuberRegressor
+            _sklearn_RANSACRegressor = RANSACRegressor
+            _sklearn_PolynomialFeatures = PolynomialFeatures
+            _sklearn_make_pipeline = make_pipeline
+        return True, (_scipy_stats, _sklearn_HuberRegressor, _sklearn_RANSACRegressor, _sklearn_PolynomialFeatures, _sklearn_make_pipeline)
+    except ImportError:
+        return False, (None, None, None, None, None)
+
+# Check if advanced regression is available (but don't import yet)
+ADVANCED_REGRESSION = True
 try:
-    from scipy import stats
-    from sklearn.linear_model import HuberRegressor, RANSACRegressor
-    from sklearn.preprocessing import PolynomialFeatures
-    from sklearn.pipeline import make_pipeline
-    ADVANCED_REGRESSION = True
+    import scipy
+    import sklearn
 except ImportError:
-    print("⚠️ Erweiterte Regression nicht verfügbar. Installiere: pip install scikit-learn scipy")
     ADVANCED_REGRESSION = False
 
-URL = "https://www.lse.ac.uk/study-at-lse/Graduate/News/Current-processing-times"
-STATUS_FILE = "status.json"
-HISTORY_FILE = "history.json"
+URL = LSE_URL
 
 from zoneinfo import ZoneInfo
 def get_german_time():
@@ -189,6 +234,8 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     - Konfidenzintervalle
     - Arbeitstagberechnung
     """
+    np = _get_numpy()  # Lazy load numpy
+    
     source_data = _iter_observations_or_changes(history)
     if len(source_data) < REGRESSION_MIN_POINTS:
         return None
@@ -242,7 +289,9 @@ def calculate_advanced_regression_forecast(history, current_date=None):
         "linear": {"slope": slope_linear, "r2": r2_linear}
     }
     
-    if ADVANCED_REGRESSION:
+    # Only try advanced regression if available
+    advanced_available, (stats, HuberRegressor, RANSACRegressor, PolynomialFeatures, make_pipeline) = _get_advanced_regression()
+    if advanced_available:
         # 2. ROBUST REGRESSION (Outlier-resistent)
         try:
             huber = HuberRegressor(epsilon=1.5)
@@ -259,7 +308,7 @@ def calculate_advanced_regression_forecast(history, current_date=None):
                 best_r2 = r2_robust
                 best_name = "Robust"
         except (ValueError, TypeError, KeyError) as e:
-                print(f"⚠️ Modellberechnung fehlgeschlagen: {e}")
+                print(f"⚠️ Robust-Modell fehlgeschlagen: {e}")
                 pass
         
         # 3. GEWICHTETE REGRESSION (neuere Daten wichtiger)
@@ -276,7 +325,7 @@ def calculate_advanced_regression_forecast(history, current_date=None):
                 best_r2 = r2_weighted
                 best_name = "Gewichtet"
         except (ValueError, TypeError, KeyError) as e:
-                print(f"⚠️ Modellberechnung fehlgeschlagen: {e}")
+                print(f"⚠️ Gewichtetes Modell fehlgeschlagen: {e}")
                 pass
         
         # 4. POLYNOMIELLE REGRESSION (Grad 2) - nur für Information
@@ -288,7 +337,7 @@ def calculate_advanced_regression_forecast(history, current_date=None):
                 r2_poly = 1 - np.sum((y - y_pred_poly)**2) / ss_tot if ss_tot > 0 else 0
                 models_comparison["polynomial"] = {"r2": r2_poly}
             except (ValueError, TypeError, KeyError) as e:
-                print(f"⚠️ Modellberechnung fehlgeschlagen: {e}")
+                print(f"⚠️ Polynomielles Modell fehlgeschlagen: {e}")
                 pass
     
     # 5. MOVING AVERAGE der Geschwindigkeit
@@ -305,7 +354,7 @@ def calculate_advanced_regression_forecast(history, current_date=None):
             recent_velocities = velocities[-3:] if len(velocities) >= 3 else velocities
             recent_avg_velocity = np.mean(recent_velocities)
             
-            if ADVANCED_REGRESSION:
+            if advanced_available:
                 # Gewichteter Moving Average (neuere wichtiger)
                 weights_ma = np.exp(np.linspace(0, 2, len(velocities)))
                 weighted_avg_velocity = np.average(velocities, weights=weights_ma)
@@ -328,14 +377,14 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     current_predicted_days = best_slope * current_days_elapsed + best_intercept
     
     # Zieldaten
-    target_25_days = date_to_days("25 July")
-    target_28_days = date_to_days("28 July")
+    target_25_days = date_to_days(TARGET_DATES[0])  # "25 July" 
+    target_28_days = date_to_days(TARGET_DATES[1])  # "28 July"
     
     predictions = {}
     days_until_25 = None
     days_until_28 = None
     
-    for target_name, target_days in [("25 July", target_25_days), ("28 July", target_28_days)]:
+    for target_name, target_days in [(TARGET_DATES[0], target_25_days), (TARGET_DATES[1], target_28_days)]:
         if target_days and best_slope > 0:
             days_until = (target_days - current_predicted_days) / best_slope
             
@@ -357,9 +406,9 @@ def calculate_advanced_regression_forecast(history, current_date=None):
 
             
             # Für Legacy-Kompatibilität
-            if target_name == "25 July":
+            if target_name == TARGET_DATES[0]:  # "25 July"
                 days_until_25 = days_until
-            elif target_name == "28 July":
+            elif target_name == TARGET_DATES[1]:  # "28 July"
                 days_until_28 = days_until
     
     # 8. TREND-ANALYSE
@@ -539,7 +588,7 @@ def compute_integrated_model_metrics(history):
     """
     from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
     from datetime import time as _time
-    import numpy as _np
+    _np = _get_numpy()  # Lazy load numpy
 
     # ---- Daten aufbereiten: Changes & Heartbeats ----
     # rows_all: alle Punkte (Änderungen + Heartbeats)
@@ -718,11 +767,11 @@ def create_progression_graph(history, current_date, forecast=None):
 
     Gibt BytesIO (PNG) zurück oder None.
     """
-    from io import BytesIO
-    import matplotlib.pyplot as plt
-    import matplotlib.dates as mdates
+    # Lazy load matplotlib and numpy
+    plt, mdates = _get_matplotlib()
+    np = _get_numpy()
+    
     from matplotlib.ticker import FuncFormatter, MaxNLocator
-    import numpy as np
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
@@ -748,12 +797,12 @@ def create_progression_graph(history, current_date, forecast=None):
 
     # fraktionale Business-Days (werktags + Tagesanteil)
     def _bizdays_float(start: datetime, t: datetime) -> float:
-        import numpy as _np
+        np = _get_numpy()  # Lazy load
         s0 = datetime(start.year, start.month, start.day)
         t0 = datetime(t.year, t.month, t.day)
-        full = float(_np.busday_count(_np.datetime64(s0.date()), _np.datetime64(t0.date())))
+        full = float(np.busday_count(np.datetime64(s0.date()), np.datetime64(t0.date())))
         def _frac(d: datetime) -> float:
-            if not bool(_np.is_busday(_np.datetime64(d.date()))):
+            if not bool(np.is_busday(np.datetime64(d.date()))):
                 return 0.0
             return (d - datetime(d.year, d.month, d.day)).total_seconds() / 86400.0
         return full + _frac(t) - _frac(s0)
@@ -856,7 +905,7 @@ def create_progression_graph(history, current_date, forecast=None):
     ax.scatter([change_ts[-1]], [change_y[-1]], s=100, zorder=6, label="Aktuell", color=COL_NEU)
 
     # Zielhöhen (horizontale Linien)
-    target_map = {"25 July": date_to_days("25 July"), "28 July": date_to_days("28 July")}
+    target_map = {TARGET_DATES[0]: date_to_days(TARGET_DATES[0]), TARGET_DATES[1]: date_to_days(TARGET_DATES[1])}
     for tname, ty in target_map.items():
         if ty is not None:
             ax.axhline(ty, linestyle=":", linewidth=1.0, alpha=0.5)
@@ -997,119 +1046,83 @@ def create_progression_graph(history, current_date, forecast=None):
         except Exception: pass
         return None
 
-def send_telegram_photo(photo_buffer, caption, parse_mode='HTML'):
-    """Sendet ein Foto über Telegram Bot"""
-    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
-    chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=None, parse_mode='HTML'):
+    """
+    Unified Telegram sending function for all chat types.
+    
+    Args:
+        message: Text message to send (ignored if photo_buffer provided)
+        chat_type: 'main', 'mama', or 'papa'
+        photo_buffer: Optional BytesIO buffer for photo
+        caption: Caption for photo (used instead of message if photo provided)
+        parse_mode: 'HTML' for main, None for mama/papa
+    """
+    # Determine bot credentials based on chat type
+    if chat_type == 'mama':
+        bot_token = os.environ.get('TELEGRAM_BOT_TOKEN_MAMA')
+        chat_id = os.environ.get('TELEGRAM_CHAT_ID_MAMA')
+        parse_mode = None  # Simple text for mama
+    elif chat_type == 'papa':
+        bot_token = os.environ.get('TELEGRAM_BOT_TOKEN_PAPA')
+        chat_id = os.environ.get('TELEGRAM_CHAT_ID_PAPA')
+        parse_mode = None  # Simple text for papa
+    else:  # main
+        bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
+        chat_id = os.environ.get('TELEGRAM_CHAT_ID')
     
     if not bot_token or not chat_id:
-        print("Telegram nicht konfiguriert")
+        print(f"Telegram für {chat_type} nicht konfiguriert")
         return False
     
     try:
-        url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
-        files = {'photo': ('graph.png', photo_buffer, 'image/png')}
-        data = {
-            'chat_id': chat_id,
-            'caption': caption,
-            'parse_mode': parse_mode
-        }
+        if photo_buffer:
+            # Send photo with caption
+            url = f"{TELEGRAM_API_BASE}{bot_token}/sendPhoto"
+            files = {'photo': ('graph.png', photo_buffer, 'image/png')}
+            data = {
+                'chat_id': chat_id,
+                'caption': caption or '',
+                'parse_mode': parse_mode
+            }
+            response = requests.post(url, files=files, data=data)
+        else:
+            # Send text message
+            url = f"{TELEGRAM_API_BASE}{bot_token}/sendMessage"
+            data = {
+                "chat_id": chat_id,
+                "text": message,
+                "parse_mode": parse_mode
+            }
+            response = requests.post(url, json=data)
         
-        response = requests.post(url, files=files, data=data)
         if response.status_code == 200:
-            print("✅ Telegram-Foto gesendet!")
+            print(f"✅ Telegram-Nachricht an {chat_type} gesendet!")
             return True
         else:
-            print(f"❌ Telegram-Fehler beim Foto senden: {response.text}")
+            print(f"❌ Telegram-Fehler ({chat_type}): {response.text}")
             return False
     except Exception as e:
-        print(f"❌ Telegram-Fehler beim Foto senden: {e}")
+        print(f"❌ Telegram-Fehler ({chat_type}): {e}")
         return False
 
+# Wrapper functions for backwards compatibility
 def send_telegram(message):
     """Sendet eine Nachricht über Telegram Bot"""
-    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
-    chat_id = os.environ.get('TELEGRAM_CHAT_ID')
-    
-    if not bot_token or not chat_id:
-        print("Telegram nicht konfiguriert")
-        return False
-    
-    try:
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        data = {
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "HTML"
-        }
-        response = requests.post(url, json=data)
-        if response.status_code == 200:
-            print("✅ Telegram-Nachricht gesendet!")
-            return True
-        else:
-            print(f"❌ Telegram-Fehler: {response.text}")
-            return False
-    except Exception as e:
-        print(f"❌ Telegram-Fehler: {e}")
-        return False
+    return send_telegram_message(message, 'main')
+
+def send_telegram_photo(photo_buffer, caption, parse_mode='HTML'):
+    """Sendet ein Foto über Telegram Bot"""
+    return send_telegram_message('', 'main', photo_buffer, caption, parse_mode)
 
 def send_telegram_mama(old_date, new_date):
     """Sendet eine einfache Nachricht an Mama über separaten Bot"""
-    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN_MAMA')
-    chat_id = os.environ.get('TELEGRAM_CHAT_ID_MAMA')
-    
-    if not bot_token or not chat_id:
-        print("Telegram für Mama nicht konfiguriert")
-        return False
-    
-    try:
-        # Einfache Nachricht ohne HTML-Formatierung
-        message = f"LSE-Datums-Update!\n\nVom: {old_date}\nAuf: {new_date}"
-        
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        data = {
-            "chat_id": chat_id,
-            "text": message
-        }
-        response = requests.post(url, json=data)
-        if response.status_code == 200:
-            print("✅ Telegram-Nachricht an Mama gesendet!")
-            return True
-        else:
-            print(f"❌ Telegram-Fehler (Mama): {response.text}")
-            return False
-    except Exception as e:
-        print(f"❌ Telegram-Fehler (Mama): {e}")
-        return False
+    message = f"LSE-Datums-Update!\n\nVom: {old_date}\nAuf: {new_date}"
+    return send_telegram_message(message, 'mama')
 
 def send_telegram_papa(old_date, new_date):
     """Sendet eine einfache Nachricht an Papa über separaten Bot"""
-    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN_PAPA')
-    chat_id = os.environ.get('TELEGRAM_CHAT_ID_PAPA')
-    
-    if not bot_token or not chat_id:
-        print("Telegram für Papa nicht konfiguriert")
-        return False
-    
-    try:
-        # Einfache Nachricht ohne HTML-Formatierung
-        message = f"LSE-Datums-Update!\n\nVom: {old_date}\nAuf: {new_date}"
-        
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        data = {
-            "chat_id": chat_id,
-            "text": message
-        }
-        response = requests.post(url, json=data)
-        if response.status_code == 200:
-            print("✅ Telegram-Nachricht an Papa gesendet!")
-            return True
-        else:
-            print(f"❌ Telegram-Fehler (Papa): {response.text}")
-            return False
-    except Exception as e:
-        print(f"❌ Telegram-Fehler (Papa): {e}")
-        return False
+    message = f"LSE-Datums-Update!\n\nVom: {old_date}\nAuf: {new_date}"
+    return send_telegram_message(message, 'papa')
 
 
 def migrate_json_files():
@@ -1379,14 +1392,7 @@ def fetch_processing_dates():
     """Holt alle Verarbeitungsdaten von der LSE-Webseite"""
     try:
         print("Rufe LSE-Webseite ab...")
-        response = requests.get(URL, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        }, timeout=30)
+        response = requests.get(URL, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -1488,7 +1494,7 @@ def send_gmail(subject, body, recipients):
         msg['To'] = recipient
         
         try:
-            server = smtplib.SMTP('smtp.gmail.com', 587)
+            server = smtplib.SMTP(GMAIL_SMTP_SERVER, GMAIL_SMTP_PORT)
             server.starttls()
             server.login(gmail_user, gmail_password)
             server.send_message(msg)
@@ -1728,7 +1734,7 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
                     emails_sent = True
             
             # Bedingt benachrichtigen (nur bei 25 oder 28 July)
-            if conditional_notify and current_date in ["25 July", "28 July"]:
+            if conditional_notify and current_date in TARGET_DATES:
                 print(f"\n🎯 Zieldatum {current_date} erreicht! Benachrichtige zusätzliche Empfänger.")
                 if send_gmail(subject, body_simple, conditional_notify):
                     emails_sent = True
