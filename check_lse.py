@@ -327,6 +327,128 @@ def calculate_regression_forecast(history):
     """Wrapper-Funktion für Rückwärtskompatibilität - ruft die erweiterte Version auf"""
     return calculate_advanced_regression_forecast(history)
 
+def _fmt_eta(days, date_obj):
+    """Gibt 'In X Tagen — Am DD. Monat YYYY' oder '—' zurück."""
+    if days is None or (isinstance(days, (int, float)) and days <= 0):
+        return "—"
+    when = date_obj if date_obj else add_business_days(get_german_time(), days)
+    return f"In {int(round(days))} Tagen — Am {when.strftime('%d. %B %Y')}"
+
+def _old_regression_summary(forecast):
+    """Zieht kompakte Kennzahlen aus der bestehenden (alten) Regression."""
+    r2 = forecast.get('r_squared', 0.0)
+    pts = forecast.get('data_points', 0)
+    slope = forecast.get('slope', 0.0)
+    trend = forecast.get('trend_analysis', None)
+    # 25 July
+    if 'predictions' in forecast and '25 July' in forecast['predictions']:
+        p25 = forecast['predictions']['25 July']
+        eta25 = _fmt_eta(p25.get('days'), p25.get('date'))
+    else:
+        d25 = forecast.get('days_until_25_july')
+        eta25 = _fmt_eta(d25, None)
+    # 28 July
+    if 'predictions' in forecast and '28 July' in forecast['predictions']:
+        p28 = forecast['predictions']['28 July']
+        eta28 = _fmt_eta(p28.get('days'), p28.get('date'))
+    else:
+        d28 = forecast.get('days_until_28_july')
+        eta28 = _fmt_eta(d28, None)
+    return {
+        "name": "ALT (linear)",
+        "r2": r2, "points": pts,
+        "speed": f"{slope:.1f} Tage/Tag" if slope > 0 else "—",
+        "trend": (trend.upper() if trend and trend != "unbekannt" else "—"),
+        "eta25": eta25, "eta28": eta28
+    }
+
+def compute_integrated_model_metrics(history):
+    """
+    Berechnet Kennzahlen der neuen integrierten Regression (Theil–Sen ⊕ LOESS)
+    inkl. Heartbeats. Gibt None zurück, wenn das Modul fehlt.
+    """
+    try:
+        from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
+        from datetime import time as _time
+        import numpy as _np
+    except ImportError:
+        return None
+
+    # Alle Punkte (Änderungen + Beobachtungen/Heartbeats)
+    rows = [{"timestamp": e["timestamp"], "date": e["date"]}
+            for e in _iter_observations_or_changes(history)]
+    if len(rows) < REGRESSION_MIN_POINTS:
+        return None
+
+    # Kalender/Modell
+    cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
+    imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
+
+    # R² auf beobachteten Punkten
+    x_obs = imodel.x_
+    y_obs = imodel.y_
+    y_hat = _np.array([imodel._blend_predict_scalar(float(v)) for v in x_obs])
+    ss_res = float(_np.sum((y_obs - y_hat) ** 2))
+    ss_tot = float(_np.sum((y_obs - _np.mean(y_obs)) ** 2))
+    r2_new = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+    # Durchschnittlicher Fortschritt (Tage pro Business-Tag)
+    hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute) / 60.0
+    avg_prog_new = imodel.ts_.b * hours_per_day
+
+    # Vorhersagen
+    pred25 = imodel.predict_datetime("25 July", tz_out=BER)
+    pred28 = imodel.predict_datetime("28 July", tz_out=BER)
+    now_de = get_german_time()
+    d25 = business_days_elapsed(now_de, pred25["when_point"])
+    d28 = business_days_elapsed(now_de, pred28["when_point"])
+
+    # Heartbeats zählen
+    heartbeats = sum(1 for o in history.get("observations", []) if o.get("kind") == "heartbeat")
+
+    return {
+        "name": "NEU (integriert)",
+        "r2": r2_new,
+        "points": len(rows),
+        "speed": f"{avg_prog_new:.1f} Tage/Tag",
+        "eta25": _fmt_eta(d25, pred25["when_point"]),
+        "eta28": _fmt_eta(d28, pred28["when_point"]),
+        "heartbeats": heartbeats
+    }
+
+def format_regression_comparison_table_mono(old_s, new_s):
+    """
+    Baut eine Monospace-Tabelle mit drei Spalten: Metrik | ALT | NEU.
+    Wird als <pre>...</pre> in Telegram (HTML parse_mode) gesendet.
+    """
+    if not old_s or not new_s:
+        return ""
+
+    rows = [
+        ("R² (Datenpunkte)", f"{old_s['r2']:.2f} ({old_s['points']})",       f"{new_s['r2']:.2f} ({new_s['points']})"),
+        ("Fortschritt",       old_s['speed'],                                new_s['speed']),
+        ("Trend",             old_s.get('trend', '—'),                       "—"),
+        ("25 July ETA",       old_s['eta25'],                                new_s['eta25']),
+        ("28 July ETA",       old_s['eta28'],                                new_s['eta28']),
+    ]
+
+    h1, h2, h3 = "Metrik", old_s["name"], new_s["name"]
+    w1 = max(len(h1), *(len(r[0]) for r in rows))
+    w2 = max(len(h2), *(len(r[1]) for r in rows))
+    w3 = max(len(h3), *(len(r[2]) for r in rows))
+
+    def fmt(a, b, c): return f"{a:<{w1}}  |  {b:<{w2}}  |  {c:<{w3}}"
+    line = "-" * (w1 + w2 + w3 + 6)
+
+    out = []
+    out.append(fmt(h1, h2, h3))
+    out.append(line)
+    for r in rows:
+        out.append(fmt(*r))
+    out.append(line)
+    out.append(f"* Neue Regression nutzt Heartbeats: {new_s['heartbeats']}")
+    return "\n".join(out)
+
 def create_enhanced_forecast_text(forecast):
     """Erstellt erweiterten Prognosetext mit mehr Details wenn verfügbar"""
     if not forecast:
@@ -339,6 +461,19 @@ def create_enhanced_forecast_text(forecast):
         text += f"📈 Bestes Modell: {forecast['model_name']} "
     
     text += f"(R²={forecast['r_squared']:.2f}, {forecast['data_points']} Datenpunkte)\n\n"
+
+    # === ALT vs. NEU: Monospace-Vergleichstabelle ===
+    try:
+        hist = get_history()
+        old_s = _old_regression_summary(forecast)
+        new_s = compute_integrated_model_metrics(hist)
+        if new_s:
+            table = format_regression_comparison_table_mono(old_s, new_s)
+            if table:
+                text += "<b>ALT vs. NEU (kompakt)</b>\n<pre>" + table + "</pre>\n"
+    except Exception as _e:
+        print(f"❌ Tabelle (ALT vs. NEU) konnte nicht erzeugt werden: {_e}")
+
     
     if forecast['slope'] <= 0:
         text += "⚠️ Die Daten zeigen keinen Fortschritt oder sogar Rückschritte.\n"
@@ -395,82 +530,6 @@ def create_enhanced_forecast_text(forecast):
             for name, data in sorted(forecast['models'].items(), key=lambda x: x[1].get('r2', 0), reverse=True):
                 if 'r2' in data:
                     text += f"   • {name.capitalize()}: R²={data['r2']:.3f}\n"
-    
-    
-    # --- Ergänzung: Integrierte Regression (Theil–Sen ⊕ LOESS, GeschäftsSTUNDEN) ---
-    try:
-        from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
-        from datetime import time as _time
-        import numpy as _np
-
-        # Lade Historie und verwende die existierende Funktion zum Kombinieren
-        hist = get_history()
-        
-        # KORREKTUR: Verwende _iter_observations_or_changes um ALLE Datenpunkte zu bekommen
-        all_entries = _iter_observations_or_changes(hist)
-        rows = [
-            {"timestamp": entry["timestamp"], "date": entry["date"]}
-            for entry in all_entries
-        ]
-        
-        print(f"🔍 Erweiterte Regression: {len(rows)} Datenpunkte gefunden")  # Debug
-        
-        if len(rows) >= REGRESSION_MIN_POINTS:
-            cal = BusinessCalendar(tz=LON, start=_time(10,0), end=_time(16,0), holidays=tuple([]))
-            imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
-
-            # Güte (R²) auf beobachteten Punkten für das geblendete Modell
-            x_obs = imodel.x_
-            y_obs = imodel.y_
-            y_hat = _np.array([imodel._blend_predict_scalar(float(v)) for v in x_obs])
-            ss_res = float(_np.sum((y_obs - y_hat)**2))
-            ss_tot = float(_np.sum((y_obs - _np.mean(y_obs))**2))
-            r2_new = 1 - ss_res/ss_tot if ss_tot > 0 else 0.0
-
-            # Durchschnittlicher Fortschritt in "Tage pro Geschäftstag"
-            hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute)/60.0
-            avg_prog_new = imodel.ts_.b * hours_per_day  # y pro Business-Day
-
-            # Vorhersagen (Zeit nur für interne Berechnung; in der Nachricht nur Datum/„in X Tagen“)
-            pred25 = imodel.predict_datetime("25 July", tz_out=BER)
-            pred28 = imodel.predict_datetime("28 July", tz_out=BER)
-
-            now_de = get_german_time()
-            def _biz_days_until(dt):
-                return business_days_elapsed(now_de, dt)
-
-            def _fmt_date_only(dt):
-                return dt.strftime('%d. %B %Y')
-
-            days25 = _biz_days_until(pred25["when_point"])
-            days28 = _biz_days_until(pred28["when_point"])
-
-            # Visuell ergänzte Sektion
-            text += "\n<b>📊 PROGNOSEN basierend auf bisherigen Änderungen (Vergleich):</b>\n"
-            text += f"• Alte Regression: R²={forecast['r_squared']:.2f}, {forecast['data_points']} Datenpunkte\n"
-            text += f"• Neue Regression: R²={r2_new:.2f}, {len(rows)} Datenpunkte\n\n"
-
-            text += "<b>📈 Durchschnittlicher Fortschritt</b>\n"
-            if forecast['slope'] > 0:
-                emoji = {"beschleunigend": "🚀", "verlangsamend": "🐌", "konstant": "➡️"}
-                trend_txt = ''
-                if 'trend_analysis' in forecast and forecast['trend_analysis'] != 'unbekannt':
-                    trend_txt = f"\n{emoji.get(forecast['trend_analysis'], '❓')} Trend: {forecast['trend_analysis'].upper()}"
-                text += f"• Alte Regression: {forecast['slope']:.1f} Tage pro Tag{trend_txt}\n"
-            else:
-                text += "• Alte Regression: —\n"
-            text += f"• Neue Regression: {avg_prog_new:.1f} Tage pro Tag\n\n"
-
-            text += "<b>📅 25 July wird voraussichtlich erreicht</b>\n"
-            text += "• Alte Regression: siehe oben\n"
-            text += f"• Neue Regression: In {days25:.0f} Tagen — Am {_fmt_date_only(pred25['when_point'])}\n\n"
-
-            text += "<b>📅 28 July wird voraussichtlich erreicht</b>\n"
-            text += "• Alte Regression: siehe oben\n"
-            text += f"• Neue Regression: In {days28:.0f} Tagen — Am {_fmt_date_only(pred28['when_point'])}\n"
-        else:
-            # Zu wenig Daten für integrierte Regression
-            pass
 
     except ImportError as _e:
         print(f"❌ Import-Fehler bei erweiterter Prognose: {_e}")
