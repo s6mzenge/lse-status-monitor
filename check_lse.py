@@ -140,16 +140,17 @@ def _short_date(d):  # "14 Aug"
     return d.astimezone(ZoneInfo("Europe/Berlin")).strftime("%d %b").replace(".", "")
 
 def _cal_days_until(dt, now=None):
-    """Kalendertage (inkl. Wochenende), aufgerundet."""
+    """Kalendertage (inkl. Wochenende) als Datumsdifferenz, ohne Uhrzeit-Rundung."""
     if not dt:
         return None
     if now is None:
         now = _now_berlin()
-    # Falls dt naive ist (z.B. aus ALT-Regression), als Berlin interpretieren
+    tz = ZoneInfo("Europe/Berlin")
+    # Falls dt naive ist, als Berlin interpretieren
     if getattr(dt, "tzinfo", None) is None:
-        dt = dt.replace(tzinfo=ZoneInfo("Europe/Berlin"))
-    secs = (dt - now).total_seconds()
-    return max(0, int(math.ceil(secs / 86400.0)))
+        dt = dt.replace(tzinfo=tz)
+    # Nur die Kalendertage vergleichen (Datum vs. Datum)
+    return max(0, (dt.astimezone(tz).date() - now.date()).days)
 
 def _diff_days(neu_dt, alt_dt):
     """Differenz NEU vs. ALT in Kalendertagen als kurzer Text."""
