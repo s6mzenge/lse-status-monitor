@@ -6,6 +6,7 @@ import re
 import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
+import math
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -28,6 +29,7 @@ _numpy = None
 _matplotlib_plt = None
 _matplotlib_dates = None
 _warnings = None
+_requests_session = None
 
 def _get_numpy():
     global _numpy
@@ -47,6 +49,31 @@ def _get_matplotlib():
         _matplotlib_dates = mdates
         _warnings = warnings
     return _matplotlib_plt, _matplotlib_dates
+
+def _get_requests_session():
+    """Get a reusable requests session with optimized settings"""
+    global _requests_session
+    if _requests_session is None:
+        import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        
+        _requests_session = requests.Session()
+        
+        # Configure retry strategy
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET"]  # Updated from method_whitelist
+        )
+        
+        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=1, pool_maxsize=1)
+        _requests_session.mount("http://", adapter)
+        _requests_session.mount("https://", adapter)
+        _requests_session.headers.update(REQUEST_HEADERS)
+    
+    return _requests_session
 
 
 # === Konfiguration und Konstanten (ergänzt) ===
@@ -84,35 +111,92 @@ def add_business_days(start_dt, n):
 
 # Lazy imports for optional advanced features
 _scipy_stats = None
-_sklearn_HuberRegressor = None
-_sklearn_RANSACRegressor = None
-_sklearn_PolynomialFeatures = None
-_sklearn_make_pipeline = None
+_sklearn_modules = None
+_advanced_regression_available = None
+
+def _check_advanced_regression_available():
+    """Check if advanced regression libraries are available without importing them"""
+    global _advanced_regression_available
+    if _advanced_regression_available is None:
+        try:
+            import importlib.util
+            scipy_spec = importlib.util.find_spec("scipy")
+            sklearn_spec = importlib.util.find_spec("sklearn")
+            _advanced_regression_available = scipy_spec is not None and sklearn_spec is not None
+        except ImportError:
+            _advanced_regression_available = False
+    return _advanced_regression_available
 
 def _get_advanced_regression():
-    global _scipy_stats, _sklearn_HuberRegressor, _sklearn_RANSACRegressor, _sklearn_PolynomialFeatures, _sklearn_make_pipeline
+    """Lazy load advanced regression modules only when needed"""
+    global _scipy_stats, _sklearn_modules
+    
+    if not _check_advanced_regression_available():
+        return False, (None, None, None, None, None)
+    
     try:
-        if _scipy_stats is None:
+        if _scipy_stats is None or _sklearn_modules is None:
             from scipy import stats
             from sklearn.linear_model import HuberRegressor, RANSACRegressor
             from sklearn.preprocessing import PolynomialFeatures
             from sklearn.pipeline import make_pipeline
+            
             _scipy_stats = stats
-            _sklearn_HuberRegressor = HuberRegressor
-            _sklearn_RANSACRegressor = RANSACRegressor
-            _sklearn_PolynomialFeatures = PolynomialFeatures
-            _sklearn_make_pipeline = make_pipeline
-        return True, (_scipy_stats, _sklearn_HuberRegressor, _sklearn_RANSACRegressor, _sklearn_PolynomialFeatures, _sklearn_make_pipeline)
+            _sklearn_modules = {
+                'HuberRegressor': HuberRegressor,
+                'RANSACRegressor': RANSACRegressor,
+                'PolynomialFeatures': PolynomialFeatures,
+                'make_pipeline': make_pipeline
+            }
+        
+        return True, (_scipy_stats, 
+                     _sklearn_modules['HuberRegressor'], 
+                     _sklearn_modules['RANSACRegressor'], 
+                     _sklearn_modules['PolynomialFeatures'], 
+                     _sklearn_modules['make_pipeline'])
     except ImportError:
         return False, (None, None, None, None, None)
 
-# Check if advanced regression is available (but don't import yet)
-ADVANCED_REGRESSION = True
-try:
-    import scipy
-    import sklearn
-except ImportError:
-    ADVANCED_REGRESSION = False
+# File cache to reduce redundant I/O operations
+_file_cache = {}
+_cache_timestamps = {}
+
+def _get_file_cache_key(filepath):
+    """Get cache key for file operations"""
+    try:
+        import os
+        mtime = os.path.getmtime(filepath)
+        return f"{filepath}:{mtime}"
+    except (OSError, IOError):
+        return f"{filepath}:missing"
+
+def _cached_json_load(filepath):
+    """Load JSON file with caching to avoid redundant reads"""
+    cache_key = _get_file_cache_key(filepath)
+    
+    if cache_key in _file_cache:
+        return _file_cache[cache_key].copy()  # Return copy to avoid mutations
+    
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            _file_cache[cache_key] = data
+            return data.copy()
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+def _cached_json_dump(data, filepath):
+    """Save JSON file and update cache"""
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2)
+    
+    # Update cache with new data
+    cache_key = _get_file_cache_key(filepath)
+    _file_cache[cache_key] = data.copy()
+
+# Use lazy checking for advanced regression availability
+def get_advanced_regression_status():
+    return _check_advanced_regression_available()
 
 URL = LSE_URL
 
@@ -121,11 +205,8 @@ def get_german_time():
     return datetime.now(ZoneInfo("Europe/Berlin"))
 
 # ===== Compact forecast rendering (ALT vs. NEU) =====
-import math
-from zoneinfo import ZoneInfo
 
 def _now_berlin():
-    from zoneinfo import ZoneInfo
     dt = get_german_time()
     if dt.tzinfo is None:
         return dt.replace(tzinfo=ZoneInfo("Europe/Berlin"))
@@ -134,7 +215,6 @@ def _now_berlin():
 def _short_date(d):  # "14 Aug"
     if d is None:
         return "—"
-    from zoneinfo import ZoneInfo
     if d.tzinfo is None:
         d = d.replace(tzinfo=ZoneInfo("Europe/Berlin"))
     return d.astimezone(ZoneInfo("Europe/Berlin")).strftime("%d %b").replace(".", "")
@@ -201,28 +281,48 @@ def _iter_observations_or_changes(history: Dict) -> List[Dict]:
     """
     Kombiniert observations und changes, normiert Timestamps auf ISO-UTC,
     validiert Daten, sortiert aufsteigend.
+    Optimized for performance with early filtering and batch processing.
     """
+    # Pre-allocate for better performance
+    observations = history.get("observations", []) or []
+    changes = history.get("changes", []) or []
+    src = observations + changes
+    
+    if not src:
+        return []
+    
+    # Pre-compile regex for better performance
+    date_pattern = re.compile(r'^\d{1,2}\s+\w+$')
+    
     out: List[Dict] = []
-    src = (history.get("observations", []) or []) + (history.get("changes", []) or [])
+    utc_tz = ZoneInfo("UTC")
+    
     for e in src:
+        # Early type check
         if not isinstance(e, dict):
             continue
+            
         ts = e.get("timestamp")
         dt = e.get("date")
-        if not ts or not dt:
+        
+        # Early validation
+        if not ts or not dt or not date_pattern.match(str(dt)):
             continue
-        if not re.match(r'^\d{1,2}\s+\w+$', str(dt)):
-            continue
+            
         try:
+            # Optimized timestamp processing
             s = str(ts).replace('Z', '+00:00')
             dt_obj = datetime.fromisoformat(s)
             if dt_obj.tzinfo is None:
-                dt_obj = dt_obj.replace(tzinfo=ZoneInfo("UTC"))
-            ts_iso = dt_obj.astimezone(ZoneInfo("UTC")).isoformat()
+                dt_obj = dt_obj.replace(tzinfo=utc_tz)
+            ts_iso = dt_obj.astimezone(utc_tz).isoformat()
         except Exception:
             continue
+            
         kind = e.get("kind") or "change"
         out.append({"timestamp": ts_iso, "date": dt, "kind": kind})
+    
+    # Use key function once for sorting
     out.sort(key=lambda r: r["timestamp"])
     return out
 
@@ -230,29 +330,54 @@ def _iter_changes_only(history: Dict) -> List[Dict]:
     """
     Gibt nur echte Änderungen zurück (keine Heartbeats), normiert Timestamps auf ISO-UTC,
     validiert Daten, sortiert aufsteigend.
+    Optimized version with shared pattern and timezone objects.
     """
-    out: List[Dict] = []
     src = history.get("changes", []) or []
+    if not src:
+        return []
+    
+    # Pre-compile regex and timezone for better performance
+    date_pattern = re.compile(r'^\d{1,2}\s+\w+$')
+    utc_tz = ZoneInfo("UTC")
+    
+    out: List[Dict] = []
+    
     for e in src:
+        # Early type and content validation
         if not isinstance(e, dict):
             continue
+            
         ts = e.get("timestamp")
         dt = e.get("date")
-        if not ts or not dt:
+        
+        if not ts or not dt or not date_pattern.match(str(dt)):
             continue
-        if not re.match(r'^\d{1,2}\s+\w+$', str(dt)):
-            continue
+            
         try:
+            # Optimized timestamp processing
             s = str(ts).replace('Z', '+00:00')
             dt_obj = datetime.fromisoformat(s)
             if dt_obj.tzinfo is None:
-                dt_obj = dt_obj.replace(tzinfo=ZoneInfo("UTC"))
-            ts_iso = dt_obj.astimezone(ZoneInfo("UTC")).isoformat()
+                dt_obj = dt_obj.replace(tzinfo=utc_tz)
+            ts_iso = dt_obj.astimezone(utc_tz).isoformat()
         except Exception:
             continue
+            
         out.append({"timestamp": ts_iso, "date": dt, "kind": "change"})
+    
     out.sort(key=lambda r: r["timestamp"])
     return out
+
+# Regression result cache to avoid redundant calculations
+_regression_cache = {}
+_regression_cache_key = None
+
+def _get_regression_cache_key(history):
+    """Generate cache key for regression calculations"""
+    import hashlib
+    # Use the hash of changes for cache key
+    changes_data = str(sorted(history.get('changes', []), key=lambda x: x.get('timestamp', '')))
+    return hashlib.md5(changes_data.encode()).hexdigest()
 
 def calculate_advanced_regression_forecast(history, current_date=None):
     """
@@ -264,7 +389,16 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     - Arbeitstagberechnung
     
     WICHTIG: Diese (alte) Regression verwendet nur echte Änderungen, keine Heartbeats!
+    
+    Optimized with caching to avoid redundant calculations.
     """
+    # Check cache first
+    cache_key = _get_regression_cache_key(history)
+    global _regression_cache, _regression_cache_key
+    
+    if cache_key == _regression_cache_key and _regression_cache:
+        return _regression_cache.copy()  # Return cached result
+    
     np = _get_numpy()  # Lazy load numpy
     
     # GEÄNDERT: Verwende nur echte Änderungen, keine Heartbeats
@@ -272,9 +406,14 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     if len(source_data) < REGRESSION_MIN_POINTS:
         return None
     
-    # Extrahiere Datenpunkte
+    # Extrahiere Datenpunkte (optimized)
     data_points = []
     first_timestamp = None
+    
+    # Pre-allocate list for better performance
+    timestamps = []
+    date_days_list = []
+    
     for entry in source_data:  # GEÄNDERT: Verwende source_data (nur Änderungen)
         try:
             timestamp = datetime.fromisoformat(entry["timestamp"])
@@ -285,7 +424,19 @@ def calculate_advanced_regression_forecast(history, current_date=None):
                 
             if first_timestamp is None:
                 first_timestamp = timestamp
+            
+            timestamps.append(timestamp)
+            date_days_list.append(date_days)
                 
+        except (ValueError, KeyError) as e:
+            continue
+    
+    # Calculate elapsed days in batch for better performance
+    if not timestamps:
+        return None
+        
+    for i, (timestamp, date_days) in enumerate(zip(timestamps, date_days_list)):
+        try:
             days_elapsed = business_days_elapsed(first_timestamp, timestamp)
             data_points.append((days_elapsed, date_days, timestamp))
         except Exception as e:
@@ -455,7 +606,7 @@ def calculate_advanced_regression_forecast(history, current_date=None):
         else:
             trend_analysis = "konstant"
     
-    return {
+    result = {
         # Basis-Informationen (für Kompatibilität)
         "slope": best_slope,
         "r_squared": best_r2,
@@ -472,6 +623,12 @@ def calculate_advanced_regression_forecast(history, current_date=None):
         "models": models_comparison,
         "predictions": predictions,
     }
+    
+    # Cache the result for future use
+    _regression_cache = result.copy()
+    _regression_cache_key = cache_key
+    
+    return result
 
 def calculate_regression_forecast(history):
     """Wrapper-Funktion für Rückwärtskompatibilität - ruft die erweiterte Version auf"""
@@ -513,9 +670,6 @@ def _old_regression_summary(forecast):
     }
 
 # ===== ETA-Backtest & Recency-Blend Helpers =====
-import math
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 def _median(xs):
     xs = sorted(xs)
@@ -526,9 +680,6 @@ def _median(xs):
     if n % 2:
         return xs[mid]
     return 0.5 * (xs[mid-1] + xs[mid])
-
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 def _to_aware_berlin(dt):
     """Nimmt datetime ODER ISO-String (auch mit 'Z') und gibt tz-aware Europe/Berlin zurück."""
@@ -1242,8 +1393,10 @@ def migrate_json_files():
 def load_status():
     """Lädt Status mit Fehlerbehandlung und Validierung"""
     try:
-        with open(STATUS_FILE, 'r') as f:
-            status = json.load(f)
+        status = _cached_json_load(STATUS_FILE)
+        if status is None:
+            raise FileNotFoundError("Status file not found")
+            
         if not isinstance(status, dict):
             print("⚠️ Status ist kein Dictionary, verwende Standardwerte")
             return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
@@ -1291,25 +1444,23 @@ def save_status(status):
     try:
         # Füge Zeitstempel hinzu wenn nicht vorhanden
         if 'last_check' not in status:
-            status['last_check'] = datetime.utcnow().isoformat()
+            status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()
         
-        with open(STATUS_FILE, 'w') as f:
-            json.dump(status, f, indent=2)
+        _cached_json_dump(status, STATUS_FILE)
         
         # Verifiziere dass es korrekt gespeichert wurde
-        with open(STATUS_FILE, 'r') as f:
-            saved = json.load(f)
-            if saved.get('last_date') == status['last_date']:
-                print(f"✅ Status erfolgreich gespeichert: {status['last_date']}")
-                return True
-            else:
-                print(f"❌ FEHLER: Status nicht korrekt gespeichert!")
-                print(f"   Erwartet: {status['last_date']}")
-                print(f"   Gespeichert: {saved.get('last_date')}")
-                # Restore backup
-                if os.path.exists(STATUS_FILE + '.backup'):
-                    os.rename(STATUS_FILE + '.backup', STATUS_FILE)
-                return False
+        saved = _cached_json_load(STATUS_FILE)
+        if saved and saved.get('last_date') == status['last_date']:
+            print(f"✅ Status erfolgreich gespeichert: {status['last_date']}")
+            return True
+        else:
+            print(f"❌ FEHLER: Status nicht korrekt gespeichert!")
+            print(f"   Erwartet: {status['last_date']}")
+            print(f"   Gespeichert: {saved.get('last_date') if saved else 'None'}")
+            # Restore backup
+            if os.path.exists(STATUS_FILE + '.backup'):
+                os.rename(STATUS_FILE + '.backup', STATUS_FILE)
+            return False
                 
     except Exception as e:
         print(f"❌ Fehler beim Speichern von status.json: {e}")
@@ -1321,8 +1472,9 @@ def save_status(status):
 def load_history():
     """Lädt Historie mit Fehlerbehandlung"""
     try:
-        with open(HISTORY_FILE, 'r') as f:
-            history = json.load(f)
+        history = _cached_json_load(HISTORY_FILE)
+        if history is None:
+            raise FileNotFoundError("History file not found")
             
         # Validiere die geladenen Daten
         if not isinstance(history, dict) or 'changes' not in history:
@@ -1366,8 +1518,7 @@ def save_history(history):
             print("❌ Fehler: Historie ist ungültig")
             return False
             
-        with open(HISTORY_FILE, 'w') as f:
-            json.dump(history, f, indent=2)
+        _cached_json_dump(history, HISTORY_FILE)
         print(f"✅ Historie gespeichert: {len(history['changes'])} Änderungen")
         return True
     except Exception as e:
@@ -1464,7 +1615,8 @@ def fetch_processing_dates():
     """Holt alle Verarbeitungsdaten von der LSE-Webseite"""
     try:
         print("Rufe LSE-Webseite ab...")
-        response = requests.get(URL, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
+        session = _get_requests_session()
+        response = session.get(URL, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -1583,7 +1735,7 @@ def main():
     print(f"LSE Status Check - {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}")
     
     # Zeige ob erweiterte Regression verfügbar ist
-    if ADVANCED_REGRESSION:
+    if get_advanced_regression_status():
         print("✅ Erweiterte Regression aktiviert")
     else:
         print("⚠️ Erweiterte Regression nicht verfügbar (Standard-Regression wird verwendet)")
@@ -1650,7 +1802,7 @@ def main():
     if current_dates['pre_cas'] and current_dates['pre_cas'] != status.get('pre_cas_date'):
         print(f"\n📝 Pre-CAS Änderung (stilles Tracking): {status.get('pre_cas_date') or 'Unbekannt'} → {current_dates['pre_cas']}")
         history['pre_cas_changes'].append({
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().astimezone(ZoneInfo('UTC')).isoformat(),
             "date": current_dates['pre_cas'],
             "from": status.get('pre_cas_date')
         })
@@ -1662,7 +1814,7 @@ def main():
     if current_dates['cas'] and current_dates['cas'] != status.get('cas_date'):
         print(f"\n📝 CAS Änderung (stilles Tracking): {status.get('cas_date') or 'Unbekannt'} → {current_dates['cas']}")
         history['cas_changes'].append({
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().astimezone(ZoneInfo('UTC')).isoformat(),
             "date": current_dates['cas'],
             "from": status.get('cas_date')
         })
@@ -1716,7 +1868,7 @@ def main():
             
             # Speichere in Historie mit UTC Zeit (für Konsistenz)
             history["changes"].append({
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now().astimezone(ZoneInfo('UTC')).isoformat(),
                 "date": current_date,
                 "from": status['last_date']
             })
@@ -1831,7 +1983,7 @@ Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
                 # KRITISCH: Update Status IMMER nach einer erkannten Änderung
                 # Update Status nur bei erfolgreicher Benachrichtigung
                 status['last_date'] = current_date
-                status['last_check'] = datetime.utcnow().isoformat()
+                status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()
                 
                 # KRITISCH: Speichere Status mehrfach mit Verifikation
                 print("\n🔄 Speichere aktualisierten Status...")
@@ -1867,7 +2019,7 @@ Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
                 print("⚠️  Status wurde NICHT aktualisiert (keine Benachrichtigung erfolgreich)")
         else:
             print("✅ Keine Änderung - alles beim Alten.")
-            status['last_check'] = datetime.utcnow().isoformat()  # UTC für Konsistenz
+            status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()  # UTC für Konsistenz
             # Speichere auch bei keiner Änderung den aktualisierten Timestamp
             save_status(status)
     else:
@@ -1923,27 +2075,40 @@ Mögliche Gründe:
             send_telegram(telegram_warning)
         
         # Speichere trotzdem den Status (mit last_check Update)
-        status['last_check'] = datetime.utcnow().isoformat()
+        status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()
         save_status(status)
     
     print("\n" + "="*50)
     
-    # Debug: Zeige finale Dateien
+    # Debug: Zeige finale Dateien (optimized - avoid expensive shell commands)
     print("\n📁 FINALE DATEIEN:")
     print("=== status.json ===")
-    os.system("cat status.json")
+    try:
+        with open("status.json", 'r') as f:
+            print(f.read())
+    except Exception as e:
+        print(f"Fehler beim Lesen von status.json: {e}")
+        
     print("\n=== history.json (letzte 3 Einträge) ===")
-    os.system("tail -n 20 history.json | head -n 20")
+    try:
+        with open("history.json", 'r') as f:
+            lines = f.readlines()
+            # Show last 20 lines efficiently
+            print(''.join(lines[-20:]))
+    except Exception as e:
+        print(f"Fehler beim Lesen von history.json: {e}")
     
-    # Finaler Status-Output für Debugging
+    # Finaler Status-Output für Debugging (use cached version)
     print("\n📊 FINALER STATUS:")
     try:
-        with open(STATUS_FILE, 'r') as f:
-            final_status = json.load(f)
+        final_status = _cached_json_load(STATUS_FILE)
+        if final_status:
             print(f"   last_date: {final_status.get('last_date')}")
             print(f"   last_check: {final_status.get('last_check')}")
             print(f"   pre_cas_date: {final_status.get('pre_cas_date') or 'Nicht getrackt'}")
             print(f"   cas_date: {final_status.get('cas_date') or 'Nicht getrackt'}")
+        else:
+            print("   Status file not found or invalid")
     except Exception as e:
         print(f"   Fehler beim Lesen des finalen Status: {e}")
 

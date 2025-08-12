@@ -3,5 +3,7 @@
   "last_check": "2025-08-12T17:48:40.494561",
   "pre_cas_date": "27 July",
   "cas_date": "06 August",
-  "last_updated_seen_utc": "2025-08-12T14:30:00+00:00"
+  "last_updated_seen_utc": "2025-08-12T14:30:00+00:00",
+  "test_timestamp": 1755020696.0695033,
+  "benchmark_test": 1755020817.0569646
 }
