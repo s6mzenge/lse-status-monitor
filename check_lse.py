@@ -65,7 +65,7 @@ def _get_requests_session():
             total=3,
             backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
-            method_whitelist=["GET"]
+            allowed_methods=["GET"]  # Updated from method_whitelist
         )
         
         adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=1, pool_maxsize=1)
@@ -281,28 +281,48 @@ def _iter_observations_or_changes(history: Dict) -> List[Dict]:
     """
     Kombiniert observations und changes, normiert Timestamps auf ISO-UTC,
     validiert Daten, sortiert aufsteigend.
+    Optimized for performance with early filtering and batch processing.
     """
+    # Pre-allocate for better performance
+    observations = history.get("observations", []) or []
+    changes = history.get("changes", []) or []
+    src = observations + changes
+    
+    if not src:
+        return []
+    
+    # Pre-compile regex for better performance
+    date_pattern = re.compile(r'^\d{1,2}\s+\w+$')
+    
     out: List[Dict] = []
-    src = (history.get("observations", []) or []) + (history.get("changes", []) or [])
+    utc_tz = ZoneInfo("UTC")
+    
     for e in src:
+        # Early type check
         if not isinstance(e, dict):
             continue
+            
         ts = e.get("timestamp")
         dt = e.get("date")
-        if not ts or not dt:
+        
+        # Early validation
+        if not ts or not dt or not date_pattern.match(str(dt)):
             continue
-        if not re.match(r'^\d{1,2}\s+\w+$', str(dt)):
-            continue
+            
         try:
+            # Optimized timestamp processing
             s = str(ts).replace('Z', '+00:00')
             dt_obj = datetime.fromisoformat(s)
             if dt_obj.tzinfo is None:
-                dt_obj = dt_obj.replace(tzinfo=ZoneInfo("UTC"))
-            ts_iso = dt_obj.astimezone(ZoneInfo("UTC")).isoformat()
+                dt_obj = dt_obj.replace(tzinfo=utc_tz)
+            ts_iso = dt_obj.astimezone(utc_tz).isoformat()
         except Exception:
             continue
+            
         kind = e.get("kind") or "change"
         out.append({"timestamp": ts_iso, "date": dt, "kind": kind})
+    
+    # Use key function once for sorting
     out.sort(key=lambda r: r["timestamp"])
     return out
 
@@ -310,29 +330,54 @@ def _iter_changes_only(history: Dict) -> List[Dict]:
     """
     Gibt nur echte Änderungen zurück (keine Heartbeats), normiert Timestamps auf ISO-UTC,
     validiert Daten, sortiert aufsteigend.
+    Optimized version with shared pattern and timezone objects.
     """
-    out: List[Dict] = []
     src = history.get("changes", []) or []
+    if not src:
+        return []
+    
+    # Pre-compile regex and timezone for better performance
+    date_pattern = re.compile(r'^\d{1,2}\s+\w+$')
+    utc_tz = ZoneInfo("UTC")
+    
+    out: List[Dict] = []
+    
     for e in src:
+        # Early type and content validation
         if not isinstance(e, dict):
             continue
+            
         ts = e.get("timestamp")
         dt = e.get("date")
-        if not ts or not dt:
+        
+        if not ts or not dt or not date_pattern.match(str(dt)):
             continue
-        if not re.match(r'^\d{1,2}\s+\w+$', str(dt)):
-            continue
+            
         try:
+            # Optimized timestamp processing
             s = str(ts).replace('Z', '+00:00')
             dt_obj = datetime.fromisoformat(s)
             if dt_obj.tzinfo is None:
-                dt_obj = dt_obj.replace(tzinfo=ZoneInfo("UTC"))
-            ts_iso = dt_obj.astimezone(ZoneInfo("UTC")).isoformat()
+                dt_obj = dt_obj.replace(tzinfo=utc_tz)
+            ts_iso = dt_obj.astimezone(utc_tz).isoformat()
         except Exception:
             continue
+            
         out.append({"timestamp": ts_iso, "date": dt, "kind": "change"})
+    
     out.sort(key=lambda r: r["timestamp"])
     return out
+
+# Regression result cache to avoid redundant calculations
+_regression_cache = {}
+_regression_cache_key = None
+
+def _get_regression_cache_key(history):
+    """Generate cache key for regression calculations"""
+    import hashlib
+    # Use the hash of changes for cache key
+    changes_data = str(sorted(history.get('changes', []), key=lambda x: x.get('timestamp', '')))
+    return hashlib.md5(changes_data.encode()).hexdigest()
 
 def calculate_advanced_regression_forecast(history, current_date=None):
     """
@@ -344,7 +389,16 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     - Arbeitstagberechnung
     
     WICHTIG: Diese (alte) Regression verwendet nur echte Änderungen, keine Heartbeats!
+    
+    Optimized with caching to avoid redundant calculations.
     """
+    # Check cache first
+    cache_key = _get_regression_cache_key(history)
+    global _regression_cache, _regression_cache_key
+    
+    if cache_key == _regression_cache_key and _regression_cache:
+        return _regression_cache.copy()  # Return cached result
+    
     np = _get_numpy()  # Lazy load numpy
     
     # GEÄNDERT: Verwende nur echte Änderungen, keine Heartbeats
@@ -352,9 +406,14 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     if len(source_data) < REGRESSION_MIN_POINTS:
         return None
     
-    # Extrahiere Datenpunkte
+    # Extrahiere Datenpunkte (optimized)
     data_points = []
     first_timestamp = None
+    
+    # Pre-allocate list for better performance
+    timestamps = []
+    date_days_list = []
+    
     for entry in source_data:  # GEÄNDERT: Verwende source_data (nur Änderungen)
         try:
             timestamp = datetime.fromisoformat(entry["timestamp"])
@@ -365,7 +424,19 @@ def calculate_advanced_regression_forecast(history, current_date=None):
                 
             if first_timestamp is None:
                 first_timestamp = timestamp
+            
+            timestamps.append(timestamp)
+            date_days_list.append(date_days)
                 
+        except (ValueError, KeyError) as e:
+            continue
+    
+    # Calculate elapsed days in batch for better performance
+    if not timestamps:
+        return None
+        
+    for i, (timestamp, date_days) in enumerate(zip(timestamps, date_days_list)):
+        try:
             days_elapsed = business_days_elapsed(first_timestamp, timestamp)
             data_points.append((days_elapsed, date_days, timestamp))
         except Exception as e:
@@ -535,7 +606,7 @@ def calculate_advanced_regression_forecast(history, current_date=None):
         else:
             trend_analysis = "konstant"
     
-    return {
+    result = {
         # Basis-Informationen (für Kompatibilität)
         "slope": best_slope,
         "r_squared": best_r2,
@@ -552,6 +623,12 @@ def calculate_advanced_regression_forecast(history, current_date=None):
         "models": models_comparison,
         "predictions": predictions,
     }
+    
+    # Cache the result for future use
+    _regression_cache = result.copy()
+    _regression_cache_key = cache_key
+    
+    return result
 
 def calculate_regression_forecast(history):
     """Wrapper-Funktion für Rückwärtskompatibilität - ruft die erweiterte Version auf"""
@@ -2003,22 +2080,35 @@ Mögliche Gründe:
     
     print("\n" + "="*50)
     
-    # Debug: Zeige finale Dateien
+    # Debug: Zeige finale Dateien (optimized - avoid expensive shell commands)
     print("\n📁 FINALE DATEIEN:")
     print("=== status.json ===")
-    os.system("cat status.json")
+    try:
+        with open("status.json", 'r') as f:
+            print(f.read())
+    except Exception as e:
+        print(f"Fehler beim Lesen von status.json: {e}")
+        
     print("\n=== history.json (letzte 3 Einträge) ===")
-    os.system("tail -n 20 history.json | head -n 20")
+    try:
+        with open("history.json", 'r') as f:
+            lines = f.readlines()
+            # Show last 20 lines efficiently
+            print(''.join(lines[-20:]))
+    except Exception as e:
+        print(f"Fehler beim Lesen von history.json: {e}")
     
-    # Finaler Status-Output für Debugging
+    # Finaler Status-Output für Debugging (use cached version)
     print("\n📊 FINALER STATUS:")
     try:
-        with open(STATUS_FILE, 'r') as f:
-            final_status = json.load(f)
+        final_status = _cached_json_load(STATUS_FILE)
+        if final_status:
             print(f"   last_date: {final_status.get('last_date')}")
             print(f"   last_check: {final_status.get('last_check')}")
             print(f"   pre_cas_date: {final_status.get('pre_cas_date') or 'Nicht getrackt'}")
             print(f"   cas_date: {final_status.get('cas_date') or 'Nicht getrackt'}")
+        else:
+            print("   Status file not found or invalid")
     except Exception as e:
         print(f"   Fehler beim Lesen des finalen Status: {e}")
 
