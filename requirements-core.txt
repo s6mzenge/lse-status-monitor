@@ -1,0 +1,7 @@
+# Core lightweight dependencies for basic LSE Status Monitor functionality
+# These are required for web scraping, notifications, and basic regression
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+# Timezone support for older Python versions
+backports.zoneinfo>=0.2.1; python_version<"3.9"

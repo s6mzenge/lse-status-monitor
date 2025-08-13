@@ -1,8 +1,12 @@
 # Core dependencies for LSE Status Monitor
+# This file maintains backward compatibility while supporting optimization
+# For manual/fast runs, see requirements-core.txt
+# For advanced features, see requirements-advanced.txt
+
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 
-# Data analysis and visualization (optional, heavy dependencies)
+# Advanced dependencies (optional, heavy - ~100MB+)
 numpy>=1.24.0
 matplotlib>=3.7.0
 scipy>=1.10.0
