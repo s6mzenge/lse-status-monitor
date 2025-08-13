@@ -265,14 +265,9 @@ def _cached_json_dump(data, filepath):
 def get_advanced_regression_status():
     return _check_advanced_regression_available()
 
-URL = LSE_URL
-
-from zoneinfo import ZoneInfo
-
-# Timezone constants for consistency
+# Timezone constants imported from config - use those consistently
 UTC = ZoneInfo("UTC")
 BER = ZoneInfo("Europe/Berlin")
-LON = ZoneInfo("Europe/London")
 
 def get_german_time():
     return datetime.now(BER)
@@ -289,8 +284,8 @@ def _short_date(d):  # "14 Aug"
     if d is None:
         return "—"
     if d.tzinfo is None:
-        d = d.replace(tzinfo=ZoneInfo("Europe/Berlin"))
-    return d.astimezone(ZoneInfo("Europe/Berlin")).strftime("%d %b").replace(".", "")
+        d = d.replace(tzinfo=BER)
+    return d.astimezone(BER).strftime("%d %b").replace(".", "")
 
 def _cal_days_until(dt, now=None):
     """Kalendertage (inkl. Wochenende) als Datumsdifferenz, ohne Uhrzeit-Rundung."""
@@ -298,7 +293,7 @@ def _cal_days_until(dt, now=None):
         return None
     if now is None:
         now = _now_berlin()
-    tz = ZoneInfo("Europe/Berlin")
+    tz = BER
     # Falls dt naive ist, als Berlin interpretieren
     if getattr(dt, "tzinfo", None) is None:
         dt = dt.replace(tzinfo=tz)
@@ -376,7 +371,7 @@ def _iter_observations_or_changes(history: Dict, changes_key: str = "changes") -
     date_pattern = re.compile(r'^\d{1,2}\s+\w+$')
     
     out: List[Dict] = []
-    utc_tz = ZoneInfo("UTC")
+    utc_tz = UTC
     
     for e in src:
         # Early type check
@@ -419,7 +414,7 @@ def _iter_changes_only(history: Dict, changes_key: str = "changes") -> List[Dict
     
     # Pre-compile regex and timezone for better performance
     date_pattern = re.compile(r'^\d{1,2}\s+\w+$')
-    utc_tz = ZoneInfo("UTC")
+    utc_tz = UTC
     
     out: List[Dict] = []
     
@@ -774,7 +769,7 @@ def _to_aware_berlin(dt):
     """Nimmt datetime ODER ISO-String (auch mit 'Z') und gibt tz-aware Europe/Berlin zurück."""
     if dt is None:
         return None
-    tz_berlin = ZoneInfo("Europe/Berlin")
+    tz_berlin = BER
     # Strings sauber nach datetime wandeln
     if isinstance(dt, str):
         s = dt.replace('Z', '+00:00')
@@ -785,7 +780,7 @@ def _to_aware_berlin(dt):
             return datetime.now(tz_berlin)
     # Naive Zeitstempel als UTC interpretieren
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(tz_berlin)
 
 def _hours_since(ts, now=None):
@@ -1159,7 +1154,6 @@ def create_progression_graph(history, current_date, forecast=None):
     
     from matplotlib.ticker import FuncFormatter, MaxNLocator
     from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
 
     COL_ALT = "#1f77b4"   # Alt: blau
     COL_NEU = "#ff7f0e"   # Neu: orange
@@ -1171,13 +1165,11 @@ def create_progression_graph(history, current_date, forecast=None):
             return None
         if isinstance(dt_like, datetime):
             if dt_like.tzinfo is None:
-                return dt_like.replace(tzinfo=ZoneInfo("Europe/Berlin")).astimezone(
-                    ZoneInfo("Europe/Berlin")
-                ).replace(tzinfo=None)
-            return dt_like.astimezone(ZoneInfo("Europe/Berlin")).replace(tzinfo=None)
+                return dt_like.replace(tzinfo=BER).astimezone(BER).replace(tzinfo=None)
+            return dt_like.astimezone(BER).replace(tzinfo=None)
         try:
             dtx = datetime.fromisoformat(str(dt_like))
-            return dtx.astimezone(ZoneInfo("Europe/Berlin")).replace(tzinfo=None)
+            return dtx.astimezone(BER).replace(tzinfo=None)
         except Exception:
             return None
 
@@ -1949,7 +1941,7 @@ def fetch_processing_dates():
     try:
         print("Rufe LSE-Webseite ab...")
         session = _get_requests_session()
-        response = session.get(URL, timeout=REQUEST_TIMEOUT)
+        response = session.get(LSE_URL, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -1962,7 +1954,7 @@ def fetch_processing_dates():
             'all_other': None,
             'pre_cas': None,
             'cas': None,
-            'last_updated_utc': (last_up_dt.astimezone(ZoneInfo('UTC')).isoformat() if last_up_dt else None)
+            'last_updated_utc': (last_up_dt.astimezone(UTC).isoformat() if last_up_dt else None)
         }
         
         # Suche nach "all other graduate applicants" (existierende Logik)
@@ -2138,7 +2130,7 @@ def main():
     if current_dates['all_other'] and current_dates['all_other'] != status.get('last_date'):
         print(f"\n📝 AOA Änderung (stilles Tracking): {status.get('last_date') or 'Unbekannt'} → {current_dates['all_other']}")
         history['changes'].append({
-            "timestamp": datetime.now().astimezone(ZoneInfo('UTC')).isoformat(),
+            "timestamp": datetime.now().astimezone(UTC).isoformat(),
             "date": current_dates['all_other'],
             "from": status.get('last_date')
         })
@@ -2154,12 +2146,12 @@ def main():
     if current_dates['cas'] and current_dates['cas'] != status.get('cas_date'):
         print(f"\n📝 CAS Änderung (stilles Tracking): {status.get('cas_date') or 'Unbekannt'} → {current_dates['cas']}")
         history['cas_changes'].append({
-            "timestamp": datetime.now().astimezone(ZoneInfo('UTC')).isoformat(),
+            "timestamp": datetime.now().astimezone(UTC).isoformat(),
             "date": current_dates['cas'],
             "from": status.get('cas_date')
         })
         status['cas_date'] = current_dates['cas']
-        status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()
+        status['last_check'] = datetime.now().astimezone(UTC).isoformat()
         if current_dates.get('last_updated_utc'):
             status['last_updated_seen_utc'] = current_dates['last_updated_utc']
         # Speichere sofort
@@ -2186,7 +2178,7 @@ def main():
             
             # Speichere in Pre-CAS Historie mit UTC Zeit (für Konsistenz)
             history.setdefault('pre_cas_changes', []).append({
-                "timestamp": datetime.now().astimezone(ZoneInfo('UTC')).isoformat(),
+                "timestamp": datetime.now().astimezone(UTC).isoformat(),
                 "date": current_date,
                 "from": status.get('pre_cas_date')
             })
@@ -2302,7 +2294,7 @@ Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
                 # KRITISCH: Update Pre-CAS Status IMMER nach einer erkannten Änderung
                 # Update Status nur bei erfolgreicher Benachrichtigung
                 status['pre_cas_date'] = current_date
-                status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()
+                status['last_check'] = datetime.now().astimezone(UTC).isoformat()
                 
                 # KRITISCH: Speichere Status mehrfach mit Verifikation
                 print("\n🔄 Speichere aktualisierten Status...")
@@ -2457,7 +2449,7 @@ Mögliche Gründe:
             send_single_main_message(telegram_warning)
         
         # Speichere trotzdem den Status (mit last_check Update)
-        status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()
+        status['last_check'] = datetime.now().astimezone(UTC).isoformat()
         save_status(status)
     
     print("\n" + "="*50)
