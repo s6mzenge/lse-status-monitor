@@ -56,6 +56,18 @@ CAS_PATTERN = re.compile(r'Confirmation\s+of\s+Acceptance.*?(\d{1,2}\s+\w+)', re
 ALL_OTHER_FALLBACK_PATTERN = re.compile(r'all other graduate applicants[^0-9]*?((?:\d{1,2}\s+\w+\s*)+)', re.IGNORECASE | re.DOTALL)
 CAS_EXTRACTION_PATTERN = re.compile(r'issuing\s+CAS\s+to.*?Pre-CAS\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))', re.IGNORECASE | re.DOTALL)
 
+# ========== STREAM-AWARE HELPER FUNCTIONS ==========
+def get_active_target_label():
+    """Returns the active target label based on stream"""
+    if ACTIVE_STREAM == "pre_cas":
+        return TARGET_DATE_PRE_CAS.strftime('%d %B')  # "13 August"
+    return TARGET_DATES[0]  # "25 July" für AOA
+
+def get_active_target_days():
+    """Returns the active target as days since Jan 1"""
+    return date_to_days(get_active_target_label())
+# ====================================================
+
 # Lazy imports for heavy dependencies - only loaded when needed
 _numpy = None
 _matplotlib_plt = None
@@ -875,15 +887,16 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     current_days_elapsed = business_days_elapsed(first_timestamp, current_time)
     current_predicted_days = best_slope * current_days_elapsed + best_intercept
     
-    # Zieldaten
-    target_25_days = date_to_days(TARGET_DATES[0])  # "25 July" 
-    target_28_days = date_to_days(TARGET_DATES[1])  # "28 July"
-    
+    # Zieldaten - Stream-spezifisch
     predictions = {}
     days_until_25 = None
     days_until_28 = None
     
-    for target_name, target_days in [(TARGET_DATES[0], target_25_days), (TARGET_DATES[1], target_28_days)]:
+    if ACTIVE_STREAM == "pre_cas":
+        # Pre-CAS: Ein einzelnes Zieldatum
+        target_label = get_active_target_label()  # "13 August"
+        target_days = date_to_days(target_label)
+        
         if target_days and best_slope > 0:
             days_until = (target_days - current_predicted_days) / best_slope
             
@@ -892,24 +905,46 @@ def calculate_advanced_regression_forecast(history, current_date=None):
             days_until_lower = max(0, days_until - confidence_margin)
             days_until_upper = days_until + confidence_margin
             
-            
-            predictions[target_name] = {
+            predictions[target_label] = {
                 "days": days_until,
                 "days_lower": days_until_lower,
                 "days_upper": days_until_upper,
-                # Termine werden auf Basis von Geschäftstagen (Mo–Fr) berechnet
+                # WICHTIG: lower = früheres Datum, upper = späteres Datum
                 "date": add_business_days(current_time, days_until) if days_until > 0 else None,
-                "date_lower": add_business_days(current_time, days_until_upper) if days_until_upper > 0 else None,
-                "date_upper": add_business_days(current_time, days_until_lower) if days_until_lower > 0 else None,
+                "date_lower": add_business_days(current_time, days_until_lower) if days_until_lower > 0 else None,
+                "date_upper": add_business_days(current_time, days_until_upper) if days_until_upper > 0 else None,
             }
+            # Legacy-Kompatibilität
+            days_until_25 = days_until
+    else:
+        # AOA/Standard: Zwei Zieldaten wie bisher
+        target_25_days = date_to_days(TARGET_DATES[0])  # "25 July"
+        target_28_days = date_to_days(TARGET_DATES[1])  # "28 July"
+        
+        for target_name, target_days in [(TARGET_DATES[0], target_25_days), (TARGET_DATES[1], target_28_days)]:
+            if target_days and best_slope > 0:
+                days_until = (target_days - current_predicted_days) / best_slope
+                
+                # Konfidenzintervall (95%)
+                confidence_margin = (CONFIDENCE_LEVEL * std_error / abs(best_slope)) if best_slope != 0 else 0
+                days_until_lower = max(0, days_until - confidence_margin)
+                days_until_upper = days_until + confidence_margin
+                
+                predictions[target_name] = {
+                    "days": days_until,
+                    "days_lower": days_until_lower,
+                    "days_upper": days_until_upper,
+                    "date": add_business_days(current_time, days_until) if days_until > 0 else None,
+                    "date_lower": add_business_days(current_time, days_until_lower) if days_until_lower > 0 else None,
+                    "date_upper": add_business_days(current_time, days_until_upper) if days_until_upper > 0 else None,
+                }
+                
+                # Für Legacy-Kompatibilität
+                if target_name == TARGET_DATES[0]:  # "25 July"
+                    days_until_25 = days_until
+                elif target_name == TARGET_DATES[1]:  # "28 July"
+                    days_until_28 = days_until
 
-            
-            # Für Legacy-Kompatibilität
-            if target_name == TARGET_DATES[0]:  # "25 July"
-                days_until_25 = days_until
-            elif target_name == TARGET_DATES[1]:  # "28 July"
-                days_until_28 = days_until
-    
     # 8. TREND-ANALYSE
     trend_analysis = "unbekannt"
     if len(velocities) >= 2:
@@ -963,9 +998,10 @@ def _old_regression_summary(forecast):
     pts = forecast.get('data_points', 0)
     slope = forecast.get('slope', 0.0)
     trend = forecast.get('trend_analysis', None)
-    # 25 July
-    if 'predictions' in forecast and '25 July' in forecast['predictions']:
-        p25 = forecast['predictions']['25 July']
+    # Stream-aware target
+    target_key = get_active_target_label() if ACTIVE_STREAM == "pre_cas" else "25 July"
+    if 'predictions' in forecast and target_key in forecast['predictions']:
+        p25 = forecast['predictions'][target_key]
         eta25 = _fmt_eta(p25.get('days'), p25.get('date'))
     else:
         d25 = forecast.get('days_until_25_july')
@@ -2024,11 +2060,25 @@ def get_history():
 def get_active_history(history):
     """Returns history dict with correct key based on ACTIVE_STREAM"""
     if ACTIVE_STREAM == "pre_cas":
-        return {"pre_cas_changes": history.get('pre_cas_changes', [])}
+        lst = history.get("pre_cas_changes", [])
+        return {
+            "pre_cas_changes": lst, 
+            "changes": lst,  # WICHTIG: Alias für ALT-Regression!
+            "observations": history.get("observations", [])
+        }
     elif ACTIVE_STREAM == "cas":
-        return {"cas_changes": history.get('cas_changes', [])}
+        lst = history.get("cas_changes", [])
+        return {
+            "cas_changes": lst,
+            "changes": lst,  # WICHTIG: Alias für ALT-Regression!
+            "observations": history.get("observations", [])
+        }
     else:
-        return {"changes": history.get('changes', [])}
+        lst = history.get("changes", [])
+        return {
+            "changes": lst,
+            "observations": history.get("observations", [])
+        }
 
 def save_history(history):
     """Speichert Historie mit Validierung"""
