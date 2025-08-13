@@ -1,0 +1,81 @@
+name: LSE Status Monitor
+
+on:
+  repository_dispatch:
+    types: [run]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *" # adjust as needed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lse-status-monitor
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: Run LSE check
+    runs-on: ubuntu-latest
+
+    env:
+      GMAIL_USER: ${{ secrets.GMAIL_USER }}
+      GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+      EMAIL_TO: ${{ secrets.EMAIL_TO }}
+      EMAIL_TO_2: ${{ secrets.EMAIL_TO_2 }}
+      EMAIL_TO_3: ${{ secrets.EMAIL_TO_3 }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_BOT_TOKEN_MAMA: ${{ secrets.TELEGRAM_BOT_TOKEN_MAMA }}
+      TELEGRAM_CHAT_ID_MAMA: ${{ secrets.TELEGRAM_CHAT_ID_MAMA }}
+      TELEGRAM_BOT_TOKEN_PAPA: ${{ secrets.TELEGRAM_BOT_TOKEN_PAPA }}
+      TELEGRAM_CHAT_ID_PAPA: ${{ secrets.TELEGRAM_CHAT_ID_PAPA }}
+      MPLBACKEND: Agg
+      MANUAL_RUN: ${{ github.event_name == 'repository_dispatch' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run LSE status check
+        shell: bash
+        run: |
+          echo "🚀 Starting LSE check at $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+          START_TIME=$(date +%s)
+
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "⚡ Manual run mode - optimized for speed"
+          else
+            echo "📊 Scheduled run mode - full functionality"
+          fi
+
+          python check_lse.py
+
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          echo "⏱️ LSE check completed in ${DURATION} seconds"
+
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "📊 Manual run performance: ${DURATION}s script execution"
+            echo "🎯 Optimization target: <5s total script time"
+            if [ $DURATION -lt 8 ]; then
+              echo "🚀 EXCELLENT: Script execution under 8s (target achieved)"
+            elif [ $DURATION -lt 15 ]; then
+              echo "⚡ GOOD: Script execution under 15s (improvement achieved)"
+            else
+              echo "⚠️ SLOW: Script execution over 15s (needs optimization)"
+            fi
+          fi
