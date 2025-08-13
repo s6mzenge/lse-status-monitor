@@ -17,6 +17,15 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+    - name: Performance monitoring setup
+      run: |
+        echo "WORKFLOW_START_TIME=$(date +%s)" >> $GITHUB_ENV
+        if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+          echo "🎯 MANUAL RUN - Optimizing for speed (target: <12s total)"
+        else
+          echo "📊 SCHEDULED RUN - Full functionality enabled"
+        fi
+    
     - uses: actions/checkout@v4
       with:
         token: ${{ secrets.GITHUB_TOKEN || github.token }}
@@ -28,20 +37,63 @@ jobs:
       with:
         python-version: '3.11'  # Faster than 3.10
         cache: 'pip'  # Enable pip caching
+        cache-dependency-path: |
+          requirements-core.txt
+          requirements-advanced.txt
     
-    - name: Cache dependencies
+    - name: Cache core dependencies
       uses: actions/cache@v4
       with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+        path: |
+          ~/.cache/pip
+          ~/.local/lib/python3.11/site-packages
+        key: ${{ runner.os }}-python-3.11-core-${{ hashFiles('requirements-core.txt') }}
         restore-keys: |
-          ${{ runner.os }}-pip-lse-deps-v1
+          ${{ runner.os }}-python-3.11-core-
+          ${{ runner.os }}-python-3.11-
     
-    - name: Install dependencies
+    - name: Cache advanced dependencies
+      if: ${{ github.event_name != 'repository_dispatch' }}
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/pip
+          ~/.local/lib/python3.11/site-packages
+        key: ${{ runner.os }}-python-3.11-advanced-${{ hashFiles('requirements-advanced.txt', 'requirements-core.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-python-3.11-advanced-
+          ${{ runner.os }}-python-3.11-
+    
+    - name: Smart dependency installation
       run: |
-        # Install in optimized order - lightweight first, heavy last
-        pip install --upgrade pip wheel
-        pip install -r requirements.txt --prefer-binary
+        # Export environment variables for the installation script
+        export MANUAL_RUN="${{ github.event_name == 'repository_dispatch' && 'true' || 'false' }}"
+        export INSTALL_ADVANCED="${{ github.event_name != 'repository_dispatch' && 'true' || 'false' }}"
+        
+        echo "🚀 Smart installation mode:"
+        echo "  Manual run: $MANUAL_RUN"
+        echo "  Install advanced: $INSTALL_ADVANCED"
+        
+        # Track dependency installation time
+        DEPS_START_TIME=$(date +%s)
+        
+        # Use our optimized installation script
+        bash install_deps.sh
+        
+        DEPS_END_TIME=$(date +%s)
+        DEPS_DURATION=$((DEPS_END_TIME - DEPS_START_TIME))
+        echo "DEPS_INSTALL_TIME=$DEPS_DURATION" >> $GITHUB_ENV
+        
+        if [ "$MANUAL_RUN" = "true" ]; then
+          echo "⚡ Manual run dependency install: ${DEPS_DURATION}s"
+          if [ $DEPS_DURATION -lt 5 ]; then
+            echo "🚀 EXCELLENT: Dependency install under 5s"
+          elif [ $DEPS_DURATION -lt 10 ]; then
+            echo "✅ GOOD: Dependency install under 10s (target achieved)"
+          else
+            echo "⚠️ SLOW: Dependency install over 10s (baseline was 15s)"
+          fi
+        fi
     
     - name: Check LSE Status
       id: check_status
@@ -63,6 +115,13 @@ jobs:
         echo "🚀 Starting LSE check at $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
         START_TIME=$(date +%s)
         
+        # Performance monitoring for optimization analysis
+        if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+          echo "⚡ Manual run mode - optimized for speed"
+        else
+          echo "📊 Scheduled run mode - full functionality"
+        fi
+        
         python check_lse.py
         
         END_TIME=$(date +%s)
@@ -71,6 +130,16 @@ jobs:
         
         if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
           echo "📊 Manual run performance: ${DURATION}s script execution"
+          echo "🎯 Optimization target: <5s total script time"
+          
+          # Performance analysis
+          if [ $DURATION -lt 8 ]; then
+            echo "🚀 EXCELLENT: Script execution under 8s (target achieved)"
+          elif [ $DURATION -lt 15 ]; then
+            echo "⚡ GOOD: Script execution under 15s (improvement achieved)"
+          else
+            echo "⚠️ SLOW: Script execution over 15s (needs optimization)"
+          fi
         fi
     
     - name: Validate and commit changes
@@ -126,3 +195,28 @@ jobs:
             git pull --rebase origin main && git push origin main
           fi
         fi
+    
+    - name: Performance summary
+      if: always()
+      run: |
+        WORKFLOW_END_TIME=$(date +%s)
+        TOTAL_WORKFLOW_TIME=$((WORKFLOW_END_TIME - WORKFLOW_START_TIME))
+        
+        echo "========================================"
+        echo "🎯 WORKFLOW PERFORMANCE SUMMARY"
+        echo "========================================"
+        echo "Total workflow time: ${TOTAL_WORKFLOW_TIME}s"
+        
+        if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+          echo "Run type: MANUAL (optimized)"
+          if [ $TOTAL_WORKFLOW_TIME -lt 12 ]; then
+            echo "🚀 SUCCESS: Under 12s target (${TOTAL_WORKFLOW_TIME}s)"
+          elif [ $TOTAL_WORKFLOW_TIME -lt 20 ]; then
+            echo "⚡ GOOD: Under 20s (${TOTAL_WORKFLOW_TIME}s) - improvement from 32s baseline"
+          else
+            echo "⚠️ SLOW: Over 20s (${TOTAL_WORKFLOW_TIME}s) - needs more optimization"
+          fi
+        else
+          echo "Run type: SCHEDULED (full functionality)"
+        fi
+        echo "========================================"
