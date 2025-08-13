@@ -1516,6 +1516,9 @@ def create_progression_graph(history, current_date, forecast=None):
         changes_key = "changes"
     
     entries = list(_iter_observations_or_changes(history, changes_key))
+    print(f"📊 DEBUG Graph: Stream={ACTIVE_STREAM}, changes_key={changes_key}")
+    print(f"📊 DEBUG Graph: Gefundene Einträge: {len(entries)} (min: {REGRESSION_MIN_POINTS})")
+    print(f"📊 DEBUG Graph: Erste 3 entries: {entries[:3] if entries else 'keine'}")
     if len(entries) < REGRESSION_MIN_POINTS:
         return None
 
@@ -1875,9 +1878,18 @@ def send_single_main_message(text, active_history=None, current_date=None, forec
     graph_buffer = None
     if active_history is not None and current_date is not None:
         try:
+            print(f"📊 DEBUG: Versuche Graph zu erstellen...")
+            print(f"📊 DEBUG: active_history keys: {active_history.keys() if active_history else 'None'}")
+            print(f"📊 DEBUG: pre_cas_changes: {len(active_history.get('pre_cas_changes', []))} entries")
             graph_buffer = create_progression_graph(active_history, current_date, forecast)
+            if graph_buffer:
+                print(f"✅ DEBUG: Graph-Buffer erhalten ({graph_buffer.getbuffer().nbytes} bytes)")
+            else:
+                print(f"⚠️ DEBUG: Graph-Buffer ist None")
         except Exception as e:
             print(f"⚠️ Could not create graph: {e}")
+            import traceback
+            traceback.print_exc()
             graph_buffer = None
     
     # Send message with proper buffer management
