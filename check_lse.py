@@ -21,7 +21,8 @@ from io import BytesIO
 from config import (
     LSE_URL, STATUS_FILE, HISTORY_FILE, REGRESSION_MIN_POINTS, CONFIDENCE_LEVEL,
     TARGET_DATES, REQUEST_TIMEOUT, REQUEST_HEADERS, GMAIL_SMTP_SERVER, 
-    GMAIL_SMTP_PORT, TELEGRAM_API_BASE
+    GMAIL_SMTP_PORT, TELEGRAM_API_BASE, ACTIVE_STREAM, TARGET_DATE_PRE_CAS,
+    TARGET_DATES_MAP, LON
 )
 
 # Lazy imports for heavy dependencies - only loaded when needed
@@ -1127,12 +1128,21 @@ def create_progression_graph(history, current_date, forecast=None):
     ax.axvline(now_de, linewidth=1.0, linestyle=":", alpha=0.8)
     ax.scatter([change_ts[-1]], [change_y[-1]], s=100, zorder=6, label="Aktuell", color=COL_NEU)
 
-    # Zielhöhen (horizontale Linien)
-    target_map = {TARGET_DATES[0]: date_to_days(TARGET_DATES[0]), TARGET_DATES[1]: date_to_days(TARGET_DATES[1])}
-    for tname, ty in target_map.items():
-        if ty is not None:
-            ax.axhline(ty, linestyle=":", linewidth=1.0, alpha=0.5)
-            ax.text(change_ts[0], ty, f" {tname}", va="center", ha="left", fontsize=9)
+    # Zielhöhen (horizontale Linien) - Single Pre-CAS target
+    if ACTIVE_STREAM == "pre_cas":
+        target_date_str = TARGET_DATE_PRE_CAS.strftime('%d %B')
+        target_days = date_to_days(target_date_str)
+        if target_days is not None:
+            ax.axhline(target_days, linestyle="--", linewidth=1.5, alpha=0.7, color='red')
+            ax.text(change_ts[0], target_days, f" {target_date_str} (Pre-CAS)", va="center", ha="left", fontsize=9, 
+                   bbox=dict(boxstyle="round,pad=0.2", fc="yellow", alpha=0.3))
+    else:
+        # Backward compatibility for AOA dual targets
+        target_map = {TARGET_DATES[0]: date_to_days(TARGET_DATES[0]), TARGET_DATES[1]: date_to_days(TARGET_DATES[1])}
+        for tname, ty in target_map.items():
+            if ty is not None:
+                ax.axhline(ty, linestyle=":", linewidth=1.0, alpha=0.5)
+                ax.text(change_ts[0], ty, f" {tname}", va="center", ha="left", fontsize=9)
 
     # feines Zeitraster (6h) für glatte Linien
     first_ts = change_ts[0]
@@ -1156,12 +1166,24 @@ def create_progression_graph(history, current_date, forecast=None):
             color=COL_ALT, alpha=0.95
         )
 
-        for name, ty in target_map.items():
-            if ty is None: continue
-            t_star = _solve_time_for_level(m_old, b_old, ty, first_ts, now_de, sign_positive=(m_old > 0))
-            if t_star:
-                y_star = m_old * _bizdays_float(first_ts, t_star) + b_old
-                alt_eta[name] = (t_star, y_star)
+        # ETA for active stream target
+        if ACTIVE_STREAM == "pre_cas":
+            target_date_str = TARGET_DATE_PRE_CAS.strftime('%d %B')
+            target_days = date_to_days(target_date_str)
+            if target_days is not None:
+                t_star = _solve_time_for_level(m_old, b_old, target_days, first_ts, now_de, sign_positive=(m_old > 0))
+                if t_star:
+                    y_star = m_old * _bizdays_float(first_ts, t_star) + b_old
+                    alt_eta["pre_cas"] = (t_star, y_star)
+        else:
+            # Backward compatibility for dual AOA targets
+            target_map = {TARGET_DATES[0]: date_to_days(TARGET_DATES[0]), TARGET_DATES[1]: date_to_days(TARGET_DATES[1])}
+            for name, ty in target_map.items():
+                if ty is None: continue
+                t_star = _solve_time_for_level(m_old, b_old, ty, first_ts, now_de, sign_positive=(m_old > 0))
+                if t_star:
+                    y_star = m_old * _bizdays_float(first_ts, t_star) + b_old
+                    alt_eta[name] = (t_star, y_star)
 
     # ---------- NEU-Linie + ETAs ----------
     neu_eta = {}
@@ -1184,12 +1206,24 @@ def create_progression_graph(history, current_date, forecast=None):
                 ax.plot(grid_ts, y_new, linewidth=2.6, label="NEU: integrierte Regression",
                         color=COL_NEU, alpha=0.95)
 
-                for name, ty in target_map.items():
-                    if ty is None: continue
-                    t_star = _solve_time_for_level(m_new, b_new, ty, first_ts, now_de, sign_positive=(m_new > 0))
-                    if t_star:
-                        y_star = m_new * _bizdays_float(first_ts, t_star) + b_new
-                        neu_eta[name] = (t_star, y_star)
+                # ETA for active stream target
+                if ACTIVE_STREAM == "pre_cas":
+                    target_date_str = TARGET_DATE_PRE_CAS.strftime('%d %B')
+                    target_days = date_to_days(target_date_str)
+                    if target_days is not None:
+                        t_star = _solve_time_for_level(m_new, b_new, target_days, first_ts, now_de, sign_positive=(m_new > 0))
+                        if t_star:
+                            y_star = m_new * _bizdays_float(first_ts, t_star) + b_new
+                            neu_eta["pre_cas"] = (t_star, y_star)
+                else:
+                    # Backward compatibility for dual AOA targets
+                    target_map = {TARGET_DATES[0]: date_to_days(TARGET_DATES[0]), TARGET_DATES[1]: date_to_days(TARGET_DATES[1])}
+                    for name, ty in target_map.items():
+                        if ty is None: continue
+                        t_star = _solve_time_for_level(m_new, b_new, ty, first_ts, now_de, sign_positive=(m_new > 0))
+                        if t_star:
+                            y_star = m_new * _bizdays_float(first_ts, t_star) + b_new
+                            neu_eta[name] = (t_star, y_star)
     except ImportError:
         pass
     except Exception as e:
@@ -1212,8 +1246,13 @@ def create_progression_graph(history, current_date, forecast=None):
                         xytext=(6, -12), textcoords="offset points", ha="left", va="top", fontsize=9,
                         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
 
-    _plot_eta("25", alt_eta.get("25 July"), neu_eta.get("25 July"))
-    _plot_eta("28", alt_eta.get("28 July"), neu_eta.get("28 July"))
+    # Plot ETAs based on active stream
+    if ACTIVE_STREAM == "pre_cas":
+        _plot_eta("Pre-CAS", alt_eta.get("pre_cas"), neu_eta.get("pre_cas"))
+    else:
+        # Backward compatibility for dual AOA targets
+        _plot_eta("25", alt_eta.get("25 July"), neu_eta.get("25 July"))
+        _plot_eta("28", alt_eta.get("28 July"), neu_eta.get("28 July"))
 
     # ---------- Achsenbegrenzungen ----------
     eta_dates = [p[0] for p in list(alt_eta.values()) + list(neu_eta.values()) if p]
@@ -1222,7 +1261,13 @@ def create_progression_graph(history, current_date, forecast=None):
     ax.set_xlim(left_edge - timedelta(days=1), right_edge + timedelta(days=1))
 
     y_min = min(change_y)
-    y_max = max([*change_y, *(v for v in target_map.values() if v is not None)])
+    if ACTIVE_STREAM == "pre_cas":
+        target_days = date_to_days(TARGET_DATE_PRE_CAS.strftime('%d %B'))
+        y_max = max([*change_y, target_days] if target_days else change_y)
+    else:
+        # Backward compatibility
+        target_map = {TARGET_DATES[0]: date_to_days(TARGET_DATES[0]), TARGET_DATES[1]: date_to_days(TARGET_DATES[1])}
+        y_max = max([*change_y, *(v for v in target_map.values() if v is not None)])
     ax.set_ylim(y_min - 2, y_max + 2)
 
     # ---------- Heartbeats als Kreuze auf y ----------
@@ -1238,7 +1283,10 @@ def create_progression_graph(history, current_date, forecast=None):
         # ax.vlines(hb_ts, ylo + 0.01*(yhi-ylo), hb_y, colors=COL_HB, linewidth=0.8, alpha=0.35)
 
     # ---------- Achsenformat ----------
-    ax.set_title("Fortschritt & Prognose — ALT vs. NEU")
+    if ACTIVE_STREAM == "pre_cas":
+        ax.set_title(f"Forecast / ETA — {ACTIVE_STREAM.upper()} — Target: {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)")
+    else:
+        ax.set_title("Fortschritt & Prognose — ALT vs. NEU")
     ax.set_xlabel("Datum")
     ax.set_ylabel("Verarbeitungsdatum")
 
@@ -1733,6 +1781,8 @@ def send_gmail(subject, body, recipients):
 def main():
     print("="*50)
     print(f"LSE Status Check - {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}")
+    print(f"ACTIVE_STREAM={ACTIVE_STREAM}")
+    print(f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)")
     
     # Zeige ob erweiterte Regression verfügbar ist
     if get_advanced_regression_status():
@@ -1798,15 +1848,16 @@ def main():
                     save_history(history)
     except Exception as _e:
         print(f"⚠️ Heartbeat-Logik übersprungen: {_e}")
-# Stilles Tracking für Pre-CAS (keine Benachrichtigungen)
-    if current_dates['pre_cas'] and current_dates['pre_cas'] != status.get('pre_cas_date'):
-        print(f"\n📝 Pre-CAS Änderung (stilles Tracking): {status.get('pre_cas_date') or 'Unbekannt'} → {current_dates['pre_cas']}")
-        history['pre_cas_changes'].append({
+
+    # Stilles Tracking für AOA (keine primären Benachrichtigungen mehr)
+    if current_dates['all_other'] and current_dates['all_other'] != status.get('last_date'):
+        print(f"\n📝 AOA Änderung (stilles Tracking): {status.get('last_date') or 'Unbekannt'} → {current_dates['all_other']}")
+        history['changes'].append({
             "timestamp": datetime.now().astimezone(ZoneInfo('UTC')).isoformat(),
-            "date": current_dates['pre_cas'],
-            "from": status.get('pre_cas_date')
+            "date": current_dates['all_other'],
+            "from": status.get('last_date')
         })
-        status['pre_cas_date'] = current_dates['pre_cas']
+        status['last_date'] = current_dates['all_other']
         # Speichere sofort
         save_history(history)
     
@@ -1822,81 +1873,88 @@ def main():
         # Speichere sofort
         save_history(history)
     
-    # Hauptlogik für "all other applicants" (mit Benachrichtigungen wie bisher)
-    current_date = current_dates['all_other']
+    # Hauptlogik für Pre-CAS (mit primären Benachrichtigungen)
+    current_date = current_dates['pre_cas']
     
     if current_date:
-        print(f"Aktuelles Datum für 'all other graduate applicants': {current_date}")
+        print(f"Aktuelles Datum für '{ACTIVE_STREAM}': {current_date}")
         
-        # Bei manuellem Check immer Status senden (NUR für all other applicants)
+        # Bei manuellem Check immer Status senden (für aktiven Pre-CAS Stream)
         if IS_MANUAL:
-            # Berechne aktuellen Trend und erstelle vollständige Prognose
-            forecast = calculate_regression_forecast(history)
+            # Berechne aktuellen Trend und erstelle vollständige Prognose basierend auf Pre-CAS
+            active_history = {"changes": history.get('pre_cas_changes', [])}
+            forecast = calculate_regression_forecast(active_history)
             forecast_text = create_forecast_text(forecast) or ""
             
             telegram_msg = f"""<b>📊 LSE Status Check Ergebnis</b>
 
+<b>Active stream:</b> {ACTIVE_STREAM}
+<b>Target:</b> {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)
 <b>Aktuelles Datum:</b> {current_date}
-<b>Letzter Stand:</b> {status['last_date']}
-<b>Status:</b> {"🔔 ÄNDERUNG ERKANNT!" if current_date != status['last_date'] else "✅ Keine Änderung"}
+<b>Letzter Stand:</b> {status.get('pre_cas_date')}
+<b>Status:</b> {"🔔 ÄNDERUNG ERKANNT!" if current_date != status.get('pre_cas_date') else "✅ Keine Änderung"}
 
 <b>Zeitpunkt:</b> {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 {forecast_text}
 
-<a href="{URL}">📄 LSE Webseite öffnen</a>"""
+<a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
             
             # Sende Text-Nachricht
             send_telegram(telegram_msg)
             
             # Erstelle und sende Graph
-            graph_buffer = create_progression_graph(history, current_date, forecast)
+            graph_buffer = create_progression_graph(active_history, current_date, forecast)
             if graph_buffer:
-                graph_caption = f"📈 Progression der LSE Verarbeitungsdaten\nAktuell: {current_date}"
+                graph_caption = f"📈 Progression der LSE Verarbeitungsdaten (Pre-CAS)\nAktuell: {current_date}"
                 send_telegram_photo(graph_buffer, graph_caption)
         
-        # WICHTIG: Prüfe ob sich das Datum wirklich geändert hat
-        if current_date != status['last_date']:
-            print("\n🔔 ÄNDERUNG ERKANNT!")
-            print(f"   Von: {status['last_date']}")
+        # WICHTIG: Prüfe ob sich das Pre-CAS Datum wirklich geändert hat
+        if current_date != status.get('pre_cas_date'):
+            print("\n🔔 PRE-CAS ÄNDERUNG ERKANNT!")
+            print(f"   Von: {status.get('pre_cas_date')}")
             print(f"   Auf: {current_date}")
             
             # Sende einfache Nachricht an Mama
-            send_telegram_mama(status['last_date'], current_date)
+            send_telegram_mama(status.get('pre_cas_date'), current_date)
             
             # Sende einfache Nachricht an Papa
-            send_telegram_papa(status['last_date'], current_date)
+            send_telegram_papa(status.get('pre_cas_date'), current_date)
             
-            # Speichere in Historie mit UTC Zeit (für Konsistenz)
-            history["changes"].append({
+            # Speichere in Pre-CAS Historie mit UTC Zeit (für Konsistenz)
+            history.setdefault('pre_cas_changes', []).append({
                 "timestamp": datetime.now().astimezone(ZoneInfo('UTC')).isoformat(),
                 "date": current_date,
-                "from": status['last_date']
+                "from": status.get('pre_cas_date')
             })
             
             # Speichere Historie sofort
             if not save_history(history):
                 print("❌ Fehler beim Speichern der Historie!")
             
-            # Berechne Prognose
-            forecast = calculate_regression_forecast(history)
+            # Berechne Prognose basierend auf Pre-CAS Historie
+            active_history = {"changes": history.get('pre_cas_changes', [])}
+            forecast = calculate_regression_forecast(active_history)
             forecast_text = create_forecast_text(forecast) or ""
             
             # Erstelle E-Mail-Inhalt
-            subject = f"LSE Status Update: Neues Datum {current_date}"
+            subject = f"LSE Pre-CAS Status Update: Neues Datum {current_date}"
             
             # Bei manuellem Check: Hinweis in E-Mail
             manual_hint = "\n\n(Änderung durch manuellen Check via Telegram entdeckt)" if IS_MANUAL else ""
             
             # Basis-E-Mail für alle
-            base_body = f"""Das Verarbeitungsdatum für "all other graduate applicants" hat sich geändert!
+            base_body = f"""Das Verarbeitungsdatum für Pre-CAS hat sich geändert!
+
+ACTIVE STREAM: {ACTIVE_STREAM}
+TARGET: {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)
 
 ÄNDERUNG:
-Von: {status['last_date']}
+Von: {status.get('pre_cas_date')}
 Auf: {current_date}
 
 Zeitpunkt der Erkennung: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 
-Link zur Seite: {URL}{manual_hint}"""
+Link zur Seite: {LSE_URL}{manual_hint}"""
             
             # E-Mail mit Prognose für Hauptempfänger
             body_with_forecast = base_body + f"\n{forecast_text}\n\nDiese E-Mail wurde automatisch von deinem GitHub Actions Monitor generiert."
@@ -1907,31 +1965,33 @@ Link zur Seite: {URL}{manual_hint}"""
             # Telegram-Nachricht formatieren
             if not IS_MANUAL:
                 # Automatischer Check: Standard-Änderungsnachricht mit Graph
-                telegram_msg = f"""<b>🔔 LSE Status Update</b>
+                telegram_msg = f"""<b>🔔 LSE Pre-CAS Update</b>
 
-<b>ÄNDERUNG ERKANNT!</b>
-Von: {status['last_date']}
+<b>PRE-CAS ÄNDERUNG ERKANNT!</b>
+Target: {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)
+Von: {status.get('pre_cas_date')}
 Auf: <b>{current_date}</b>
 
 Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 {forecast_text}
 
-<a href="{URL}">📄 LSE Webseite öffnen</a>"""
+<a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
                 
                 send_telegram(telegram_msg)
                 
                 # Sende Graph als separates Bild
-                graph_buffer = create_progression_graph(history, current_date, forecast)
+                graph_buffer = create_progression_graph(active_history, current_date, forecast)
                 if graph_buffer:
-                    graph_caption = f"📈 Progression Update\nNeues Datum: {current_date}"
+                    graph_caption = f"📈 Pre-CAS Progression Update\nNeues Datum: {current_date}"
                     send_telegram_photo(graph_buffer, graph_caption)
             else:
                 # Manueller Check: Spezielle Nachricht bei Änderung mit Graph
-                telegram_msg = f"""<b>🚨 ÄNDERUNG GEFUNDEN!</b>
+                telegram_msg = f"""<b>🚨 PRE-CAS ÄNDERUNG GEFUNDEN!</b>
 
-Dein manueller Check hat eine Änderung entdeckt!
+Dein manueller Check hat eine Pre-CAS Änderung entdeckt!
 
-Von: {status['last_date']}
+Target: {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)
+Von: {status.get('pre_cas_date')}
 Auf: <b>{current_date}</b>
 
 Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
@@ -1939,14 +1999,14 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 
 📧 E-Mails werden an die Hauptempfänger gesendet!
 
-<a href="{URL}">📄 LSE Webseite öffnen</a>"""
+<a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
                 
                 send_telegram(telegram_msg)
                 
                 # Sende Graph
-                graph_buffer = create_progression_graph(history, current_date, forecast)
+                graph_buffer = create_progression_graph(active_history, current_date, forecast)
                 if graph_buffer:
-                    graph_caption = f"📈 Änderung erkannt!\nVon {status['last_date']} auf {current_date}"
+                    graph_caption = f"📈 Pre-CAS Änderung erkannt!\nVon {status.get('pre_cas_date')} auf {current_date}"
                     send_telegram_photo(graph_buffer, graph_caption)
             
             # Sende E-Mails
@@ -1957,32 +2017,34 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
                 if send_gmail(subject, body_with_forecast, always_notify):
                     emails_sent = True
             
-            # Bedingt benachrichtigen (nur bei 25 oder 28 July)
-            if conditional_notify and current_date in TARGET_DATES:
-                print(f"\n🎯 Zieldatum {current_date} erreicht! Benachrichtige zusätzliche Empfänger.")
+            # Check if target date reached for Pre-CAS
+            if conditional_notify and current_date == TARGET_DATE_PRE_CAS.strftime('%d %B'):
+                print(f"\n🎯 Pre-CAS Zieldatum {current_date} erreicht! Benachrichtige zusätzliche Empfänger.")
                 if send_gmail(subject, body_simple, conditional_notify):
                     emails_sent = True
                 
                 # Spezielle Telegram-Nachricht für Zieldatum mit Graph
-                telegram_special = f"""<b>🎯 ZIELDATUM ERREICHT!</b>
+                telegram_special = f"""<b>🎯 PRE-CAS ZIELDATUM ERREICHT!</b>
 
-Das Datum <b>{current_date}</b> wurde erreicht!
+Das Pre-CAS Datum <b>{current_date}</b> wurde erreicht!
 
-Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
+Target: {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)
 
-<a href="{URL}">📄 Jetzt zur LSE Webseite</a>"""
+Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
+
+<a href="{LSE_URL}">📄 Jetzt zur LSE Webseite</a>"""
                 send_telegram(telegram_special)
                 
                 # Sende speziellen Graph für Zieldatum
-                graph_buffer = create_progression_graph(history, current_date, forecast)
+                graph_buffer = create_progression_graph(active_history, current_date, forecast)
                 if graph_buffer:
-                    graph_caption = f"🎯 ZIELDATUM ERREICHT: {current_date}!"
+                    graph_caption = f"🎯 PRE-CAS ZIELDATUM ERREICHT: {current_date}!"
                     send_telegram_photo(graph_buffer, graph_caption)
             
             if emails_sent or os.environ.get('TELEGRAM_BOT_TOKEN'):
-                # KRITISCH: Update Status IMMER nach einer erkannten Änderung
+                # KRITISCH: Update Pre-CAS Status IMMER nach einer erkannten Änderung
                 # Update Status nur bei erfolgreicher Benachrichtigung
-                status['last_date'] = current_date
+                status['pre_cas_date'] = current_date
                 status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()
                 
                 # KRITISCH: Speichere Status mehrfach mit Verifikation
@@ -1997,11 +2059,11 @@ Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
                     if save_status(status):
                         # Verifiziere durch erneutes Laden
                         verify_status = load_status()
-                        if verify_status.get('last_date') == current_date:
-                            print(f"✅ Status erfolgreich gespeichert und verifiziert: {current_date}")
+                        if verify_status.get('pre_cas_date') == current_date:
+                            print(f"✅ Pre-CAS Status erfolgreich gespeichert und verifiziert: {current_date}")
                             save_success = True
                         else:
-                            print(f"❌ Verifikation fehlgeschlagen! Erwartet: {current_date}, Geladen: {verify_status.get('last_date')}")
+                            print(f"❌ Verifikation fehlgeschlagen! Erwartet: {current_date}, Geladen: {verify_status.get('pre_cas_date')}")
                     else:
                         print(f"❌ Speichern fehlgeschlagen in Versuch {save_attempts}")
                     
@@ -2018,37 +2080,41 @@ Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
             else:
                 print("⚠️  Status wurde NICHT aktualisiert (keine Benachrichtigung erfolgreich)")
         else:
-            print("✅ Keine Änderung - alles beim Alten.")
+            print("✅ Keine Pre-CAS Änderung - alles beim Alten.")
             status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()  # UTC für Konsistenz
             # Speichere auch bei keiner Änderung den aktualisierten Timestamp
             save_status(status)
     else:
-        print("\n⚠️  WARNUNG: Konnte das Datum nicht von der Webseite extrahieren!")
+        print(f"\n⚠️  WARNUNG: Konnte das Pre-CAS Datum nicht von der Webseite extrahieren!")
         
         # Bei manueller Ausführung auch Fehler melden
         if IS_MANUAL:
-            telegram_error = f"""<b>❌ Manueller Check fehlgeschlagen</b>
+            telegram_error = f"""<b>❌ Manueller Pre-CAS Check fehlgeschlagen</b>
 
-Konnte das Datum nicht von der Webseite extrahieren!
+Konnte das Pre-CAS Datum nicht von der Webseite extrahieren!
 
+<b>Active stream:</b> {ACTIVE_STREAM}
 <b>Zeitpunkt:</b> {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
-<b>Letztes bekanntes Datum:</b> {status['last_date']}
+<b>Letztes bekanntes Pre-CAS Datum:</b> {status.get('pre_cas_date')}
 
 Bitte prüfe die Webseite manuell.
 
-<a href="{URL}">📄 LSE Webseite öffnen</a>"""
+<a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
             
             send_telegram(telegram_error)
         
         # Sende Warnung per E-Mail
-        subject = "LSE Monitor WARNUNG: Datum nicht gefunden"
-        body = f"""WARNUNG: Der LSE Monitor konnte das Datum nicht von der Webseite extrahieren!
+        subject = "LSE Pre-CAS Monitor WARNUNG: Datum nicht gefunden"
+        body = f"""WARNUNG: Der LSE Pre-CAS Monitor konnte das Datum nicht von der Webseite extrahieren!
+
+Active stream: {ACTIVE_STREAM}
+Target: {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)
 
 Zeitpunkt: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
-Letztes bekanntes Datum: {status['last_date']}
+Letztes bekanntes Pre-CAS Datum: {status.get('pre_cas_date')}
 
 Bitte überprüfe:
-1. Ist die Webseite erreichbar? {URL}
+1. Ist die Webseite erreichbar? {LSE_URL}
 2. Hat sich die Struktur der Seite geändert?
 
 Der Monitor wird weiterhin prüfen."""
@@ -2058,11 +2124,12 @@ Der Monitor wird weiterhin prüfen."""
         
         # Telegram-Warnung (nur bei automatischer Ausführung)
         if not IS_MANUAL:
-            telegram_warning = f"""<b>⚠️ LSE Monitor WARNUNG</b>
+            telegram_warning = f"""<b>⚠️ LSE Pre-CAS Monitor WARNUNG</b>
 
-Konnte das Datum nicht von der Webseite extrahieren!
+Konnte das Pre-CAS Datum nicht von der Webseite extrahieren!
 
-Letztes bekanntes Datum: <b>{status['last_date']}</b>
+Active stream: <b>{ACTIVE_STREAM}</b>
+Letztes bekanntes Pre-CAS Datum: <b>{status.get('pre_cas_date')}</b>
 Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 
 Mögliche Gründe:
@@ -2070,7 +2137,7 @@ Mögliche Gründe:
 • Struktur hat sich geändert
 • Netzwerkfehler
 
-<a href="{URL}">📄 Webseite manuell prüfen</a>"""
+<a href="{LSE_URL}">📄 Webseite manuell prüfen</a>"""
             
             send_telegram(telegram_warning)
         

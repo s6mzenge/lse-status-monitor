@@ -11,7 +11,30 @@ HISTORY_FILE = "history.json"
 REGRESSION_MIN_POINTS = 2
 CONFIDENCE_LEVEL = 1.96  # 95%-Konfidenzniveau
 
-# Target dates to monitor
+# Active stream configuration
+import os
+from datetime import datetime as dt
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
+
+# London timezone
+LON = ZoneInfo("Europe/London")
+
+# Active tracking stream
+ACTIVE_STREAM = os.getenv("LSE_ACTIVE_STREAM", "pre_cas")  # default to pre_cas
+
+# Single target date for Pre-CAS (tz-aware)
+TARGET_DATE_PRE_CAS = dt(2025, 8, 13, 0, 0, tzinfo=LON)
+
+# Target dates map (backward compatibility)
+TARGET_DATES_MAP = {
+    "pre_cas": TARGET_DATE_PRE_CAS,
+    "all_other_applicants": ["25 July", "28 July"]  # Keep existing dual targets
+}
+
+# Legacy target dates for backward compatibility
 TARGET_DATES = ["25 July", "28 July"]
 
 # Request settings
