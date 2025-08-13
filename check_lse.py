@@ -185,9 +185,176 @@ def _get_io_bytesio():
 def _get_numpy():
     global _numpy
     if _numpy is None:
-        import numpy as np
-        _numpy = np
-    return _numpy
+        try:
+            import numpy as np
+            _numpy = np
+        except ImportError:
+            _numpy = False  # Mark as unavailable
+    return _numpy if _numpy else None
+
+def _check_numpy_available():
+    """Check if numpy is available without importing it"""
+    try:
+        import importlib.util
+        numpy_spec = importlib.util.find_spec("numpy")
+        return numpy_spec is not None
+    except ImportError:
+        return False
+
+def _simple_linear_regression(x_values, y_values):
+    """
+    Simple linear regression without numpy dependency.
+    Returns (slope, intercept, r_squared) or None if insufficient data.
+    """
+    n = len(x_values)
+    if n < 2:
+        return None
+    
+    # Calculate means
+    mean_x = sum(x_values) / n
+    mean_y = sum(y_values) / n
+    
+    # Calculate slope and intercept
+    numerator = sum((x - mean_x) * (y - mean_y) for x, y in zip(x_values, y_values))
+    denominator = sum((x - mean_x) ** 2 for x in x_values)
+    
+    if denominator == 0:
+        return None
+    
+    slope = numerator / denominator
+    intercept = mean_y - slope * mean_x
+    
+    # Calculate R-squared
+    y_pred = [slope * x + intercept for x in x_values]
+    ss_res = sum((y - y_pred) ** 2 for y, y_pred in zip(y_values, y_pred))
+    ss_tot = sum((y - mean_y) ** 2 for y in y_values)
+    
+    r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+    
+    return slope, intercept, r_squared
+
+def calculate_simple_regression_forecast(history, current_date=None):
+    """
+    Simple regression forecast that doesn't require numpy.
+    Used as fallback when advanced dependencies are not available.
+    """
+    # The history parameter is expected to have the format:
+    # {"changes": [...]} where the changes array contains the stream-specific data
+    source_data = _iter_changes_only(history, "changes")
+    if len(source_data) < REGRESSION_MIN_POINTS:
+        return None
+    
+    # Extract data points without numpy
+    data_points = []
+    first_timestamp = None
+    
+    for entry in source_data:
+        try:
+            timestamp = datetime.fromisoformat(entry["timestamp"])
+            date_days = date_to_days(entry["date"])
+            
+            if date_days is None:
+                continue
+                
+            if first_timestamp is None:
+                first_timestamp = timestamp
+            
+            data_points.append((timestamp, date_days))
+                
+        except (ValueError, KeyError):
+            continue
+    
+    if len(data_points) < REGRESSION_MIN_POINTS:
+        return None
+    
+    # Calculate elapsed days without numpy
+    x_values = []
+    y_values = []
+    
+    for timestamp, date_days in data_points:
+        elapsed_days = (timestamp - first_timestamp).total_seconds() / 86400.0
+        x_values.append(elapsed_days)
+        y_values.append(date_days)
+    
+    # Perform simple linear regression
+    regression_result = _simple_linear_regression(x_values, y_values)
+    if regression_result is None:
+        return None
+    
+    slope, intercept, r_squared = regression_result
+    
+    # Get current date
+    if current_date is None:
+        current_date = get_german_time()
+    
+    # Calculate current trend (days until target date based on current slope)
+    current_elapsed_days = (current_date - first_timestamp).total_seconds() / 86400.0
+    current_predicted_days = slope * current_elapsed_days + intercept
+    
+    # Calculate predictions for target dates
+    target_25_july = date_to_days("25 July")
+    target_28_july = date_to_days("28 July")
+    
+    predictions = {}
+    
+    if target_25_july is not None:
+        # Calculate when we'll reach 25 July
+        days_until_25 = (target_25_july - current_predicted_days) / slope if slope != 0 else None
+        if days_until_25 is not None:
+            if days_until_25 > 0:
+                eta_date_25 = add_business_days(current_date, days_until_25)
+                predictions["25 July"] = {
+                    "days": days_until_25,
+                    "date": eta_date_25
+                }
+            else:
+                # Already passed this target
+                predictions["25 July"] = {
+                    "days": days_until_25,
+                    "date": None,
+                    "status": "passed"
+                }
+    
+    if target_28_july is not None:
+        # Calculate when we'll reach 28 July  
+        days_until_28 = (target_28_july - current_predicted_days) / slope if slope != 0 else None
+        if days_until_28 is not None:
+            if days_until_28 > 0:
+                eta_date_28 = add_business_days(current_date, days_until_28)
+                predictions["28 July"] = {
+                    "days": days_until_28,
+                    "date": eta_date_28
+                }
+            else:
+                # Already passed this target
+                predictions["28 July"] = {
+                    "days": days_until_28,
+                    "date": None,
+                    "status": "passed"
+                }
+    
+    # Calculate basic trend analysis
+    if slope > 0.1:
+        trend_analysis = "beschleunigend"
+    elif slope < -0.1:
+        trend_analysis = "verlangsamend"
+    else:
+        trend_analysis = "konstant"
+    
+    return {
+        "slope": slope,
+        "r_squared": r_squared,
+        "current_trend_days": current_predicted_days,
+        "data_points": len(data_points),
+        "days_until_25_july": predictions.get("25 July", {}).get("days"),
+        "days_until_28_july": predictions.get("28 July", {}).get("days"),
+        "model_name": "simple_linear",
+        "std_error": 0.0,  # Not calculated in simple version
+        "trend_analysis": trend_analysis,
+        "recent_velocity": slope,  # Use slope as velocity
+        "models": {"simple": {"slope": slope, "r2": r_squared}},
+        "predictions": predictions,
+    }
 
 def _get_matplotlib():
     global _matplotlib_plt, _matplotlib_dates, _warnings
@@ -699,6 +866,7 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     WICHTIG: Diese (alte) Regression verwendet nur echte Änderungen, keine Heartbeats!
     
     Optimized with caching to avoid redundant calculations.
+    Falls numpy nicht verfügbar ist, wird eine einfache Regression verwendet.
     """
     # Stream-spezifische Datenauswahl
     if ACTIVE_STREAM == "pre_cas":
@@ -709,16 +877,24 @@ def calculate_advanced_regression_forecast(history, current_date=None):
         changes_key = "changes"
     
     # Check cache first
-    cache_key = _get_regression_cache_key({changes_key: history.get(changes_key, [])})
+    cache_key = _get_regression_cache_key(history)
     global _regression_cache, _regression_cache_key
     
     if cache_key == _regression_cache_key and _regression_cache:
         return _regression_cache.copy()  # Return cached result
     
-    np = _get_numpy()  # Lazy load numpy
+    # Check if numpy is available
+    np = _get_numpy()
+    if np is None:
+        # Fallback to simple regression when numpy is not available
+        print("⚡ Using simple regression (numpy not available)")
+        return calculate_simple_regression_forecast(history, current_date)
     
-    # GEÄNDERT: Verwende stream-spezifische Daten
-    source_data = _iter_changes_only(history, changes_key)
+    # Original advanced regression logic continues here...
+    
+    # For advanced regression, we expect the data to be in the "changes" key
+    # (the calling code puts the stream-specific data there)
+    source_data = _iter_changes_only(history, "changes")
     if len(source_data) < REGRESSION_MIN_POINTS:
         return None
     
