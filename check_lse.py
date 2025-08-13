@@ -1977,7 +1977,15 @@ def main():
             # Berechne Prognose basierend auf Pre-CAS Historie
             active_history = {"changes": history.get('pre_cas_changes', [])}
             forecast = calculate_regression_forecast(active_history)
-            forecast_text = create_forecast_text(forecast) or ""
+            
+            # Use ALT/NEU enhanced forecast with fallback for compatibility
+            try:
+                forecast_text = create_enhanced_forecast_text(forecast) or ""
+            except Exception:
+                try:
+                    forecast_text = create_forecast_text(forecast) or ""
+                except Exception:
+                    forecast_text = ""
             
             # Erstelle E-Mail-Inhalt
             subject = f"LSE Pre-CAS Status Update: Neues Datum {current_date}"
@@ -2125,6 +2133,36 @@ Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
         else:
             print("✅ Keine Pre-CAS Änderung - alles beim Alten.")
             status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()  # UTC für Konsistenz
+            
+            # Send structured manual no-change status message
+            if IS_MANUAL:
+                # Calculate forecast for status message (same as change branch)
+                active_history = {"changes": history.get('pre_cas_changes', [])}
+                forecast = calculate_regression_forecast(active_history)
+                
+                # Use ALT/NEU enhanced forecast with fallback for compatibility
+                try:
+                    forecast_text = create_enhanced_forecast_text(forecast) or ""
+                except Exception:
+                    try:
+                        forecast_text = create_forecast_text(forecast) or ""
+                    except Exception:
+                        forecast_text = ""
+                
+                # Build structured status message
+                telegram_msg = f"""<b>📊 LSE Status Check Ergebnis</b>
+
+<b>Aktuelles Datum:</b> {status.get('pre_cas_date')}
+<b>Letzter Stand:</b> {status.get('pre_cas_date')}
+<b>Status:</b> ✅ Keine Änderung
+
+<b>Zeitpunkt:</b> {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
+{forecast_text}
+
+<a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
+                
+                send_telegram(telegram_msg)
+            
             # Speichere auch bei keiner Änderung den aktualisierten Timestamp
             save_status(status)
     else:
