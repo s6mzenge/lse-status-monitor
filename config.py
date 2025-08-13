@@ -55,8 +55,6 @@ GMAIL_SMTP_PORT = 587
 # Telegram settings
 TELEGRAM_API_BASE = "https://api.telegram.org/bot"
 
-# config.py
-
 # Feste, zentral gepflegte UK-Feiertage (ISO, YYYY-MM-DD)
 UK_HOLIDAYS = (
     "2025-08-25",  # Summer Bank Holiday 2025 (dein konkreter Wunsch)
