@@ -287,7 +287,7 @@ def render_compact_bullets(eta1_old_dt, eta1_new_dt,
 # ====================================================
 
 
-def _iter_observations_or_changes(history: Dict) -> List[Dict]:
+def _iter_observations_or_changes(history: Dict, changes_key: str = "changes") -> List[Dict]:
     """
     Kombiniert observations und changes, normiert Timestamps auf ISO-UTC,
     validiert Daten, sortiert aufsteigend.
@@ -295,7 +295,7 @@ def _iter_observations_or_changes(history: Dict) -> List[Dict]:
     """
     # Pre-allocate for better performance
     observations = history.get("observations", []) or []
-    changes = history.get("changes", []) or []
+    changes = history.get(changes_key, []) or []
     src = observations + changes
     
     if not src:
@@ -1168,7 +1168,15 @@ def create_progression_graph(history, current_date, forecast=None):
         return mid
 
     # ---------- Daten sammeln ----------
-    entries = list(_iter_observations_or_changes(history))
+    # Stream-spezifische Datenauswahl
+    if ACTIVE_STREAM == "pre_cas":
+        changes_key = "pre_cas_changes"
+    elif ACTIVE_STREAM == "cas":
+        changes_key = "cas_changes"
+    else:
+        changes_key = "changes"
+    
+    entries = list(_iter_observations_or_changes(history, changes_key))
     if len(entries) < REGRESSION_MIN_POINTS:
         return None
 
