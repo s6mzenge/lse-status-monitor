@@ -2021,6 +2021,14 @@ def get_history():
     """Backward-compat wrapper to load history."""
     return load_history()
 
+def get_active_history(history):
+    """Returns history dict with correct key based on ACTIVE_STREAM"""
+    if ACTIVE_STREAM == "pre_cas":
+        return {"pre_cas_changes": history.get('pre_cas_changes', [])}
+    elif ACTIVE_STREAM == "cas":
+        return {"cas_changes": history.get('cas_changes', [])}
+    else:
+        return {"changes": history.get('changes', [])}
 
 def save_history(history):
     """Speichert Historie mit Validierung"""
@@ -2414,7 +2422,7 @@ def main():
                 print("❌ Fehler beim Speichern der Historie!")
             
             # Berechne Prognose basierend auf Pre-CAS Historie
-            active_history = {"changes": history.get('pre_cas_changes', [])}
+            active_history = get_active_history(history)
             forecast = calculate_regression_forecast(active_history)
             
             # Use ALT/NEU enhanced forecast with fallback for compatibility
@@ -2583,7 +2591,7 @@ Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
                 print(f"⚠️ Pre-CAS Heartbeat-Logik übersprungen: {_e}")
             
             # Calculate forecast for status message (for both manual and automatic)
-            active_history = {"changes": history.get('pre_cas_changes', [])}
+            active_history = get_active_history(history)
             forecast = calculate_regression_forecast(active_history)
             
             # Use ALT/NEU enhanced forecast with fallback for compatibility
