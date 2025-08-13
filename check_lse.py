@@ -1810,16 +1810,26 @@ def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=
             # Ensure buffer is at the beginning before sending
             if hasattr(photo_buffer, 'seekable') and photo_buffer.seekable():
                 photo_buffer.seek(0)
-            
+                        
             # Send photo with caption
             url = f"{TELEGRAM_API_BASE}{bot_token}/sendPhoto"
+            
+            # Safety: Cursor an den Anfang
+            try:
+                if hasattr(photo_buffer, "seek"):
+                    photo_buffer.seek(0)
+            except Exception:
+                pass
+            
             files = {'photo': ('graph.png', photo_buffer, 'image/png')}
             data = {
                 'chat_id': chat_id,
                 'caption': caption or '',
-                'parse_mode': parse_mode
+                'parse_mode': parse_mode  # bei Fotos optional; lassen wir stehen
             }
+            print("🖼️ Telegram: Sende Foto (sendPhoto)...")
             response = _get_requests().post(url, files=files, data=data)
+            print(f"🖼️ Telegram: sendPhoto Status={response.status_code}")
         else:
             # Send text message
             url = f"{TELEGRAM_API_BASE}{bot_token}/sendMessage"
@@ -1829,12 +1839,16 @@ def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=
                 "parse_mode": parse_mode
             }
             response = _get_requests().post(url, json=data)
-        
+                
         if response.status_code == 200:
-            print(f"✅ Telegram-Nachricht an {chat_type} gesendet!")
+            if photo_buffer:
+                print(f"✅ Telegram-FOTO an {chat_type} gesendet!")
+            else:
+                print(f"✅ Telegram-TEXT an {chat_type} gesendet!")
             return True
         else:
-            print(f"❌ Telegram-Fehler ({chat_type}): {response.text}")
+            kind = "FOTO" if photo_buffer else "TEXT"
+            print(f"❌ Telegram-Fehler ({chat_type}, {kind}): {response.text}")
             return False
     except Exception as e:
         print(f"❌ Telegram-Fehler ({chat_type}): {e}")
@@ -2498,16 +2512,29 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
                 try:
                     graph_buffer = create_progression_graph(active_history, current_date, forecast)
                     if graph_buffer:
-                        graph_caption = f"📈 Pre-CAS Progression Update\nAktuell: {current_date}\nTarget: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
-                        send_telegram_photo(graph_buffer, graph_caption)
+                        try:
+                            if hasattr(graph_buffer, "seek"):
+                                graph_buffer.seek(0)
+                        except Exception:
+                            pass
+                        graph_caption = (
+                            f"📈 Pre-CAS Progression Update\n"
+                            f"Aktuell: {current_date}\n"
+                            f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
+                        )
+                        print("🖼️ Sende separaten Graph (ÄNDERUNG erkannt)...")
+                        send_telegram_photo(graph_buffer, graph_caption, parse_mode=None)
+                    else:
+                        print("⚠️ Kein Graph-Buffer zurückgegeben (ÄNDERUNG erkannt).")
                 except Exception as e:
-                    print(f"⚠️ Graph konnte nicht erstellt oder gesendet werden: {e}")
+                    print(f"⚠️ Graph konnte nicht erstellt oder gesendet werden (ÄNDERUNG erkannt): {e}")
                 finally:
                     if graph_buffer:
                         try:
                             graph_buffer.close()
                         except Exception:
                             pass
+
             else:
                 # Manueller Check: Spezielle Nachricht bei Änderung mit Graph
                 telegram_msg = f"""<b>🚨 PRE-CAS ÄNDERUNG GEFUNDEN!</b>
@@ -2527,16 +2554,28 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
                 
                 # Sende Text-Nachricht
                 send_telegram(telegram_msg)
-                
+                                
                 # Erstelle und sende Graph als separate Nachricht
                 graph_buffer = None
                 try:
                     graph_buffer = create_progression_graph(active_history, current_date, forecast)
                     if graph_buffer:
-                        graph_caption = f"📈 Pre-CAS Änderung erkannt!\nVon {status.get('pre_cas_date')} auf {current_date}\nTarget: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
-                        send_telegram_photo(graph_buffer, graph_caption)
+                        try:
+                            if hasattr(graph_buffer, "seek"):
+                                graph_buffer.seek(0)
+                        except Exception:
+                            pass
+                        graph_caption = (
+                            f"📈 Pre-CAS Progression Update\n"
+                            f"Aktuell: {current_date}\n"
+                            f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
+                        )
+                        print("🖼️ Sende separaten Graph (ÄNDERUNG erkannt)...")
+                        send_telegram_photo(graph_buffer, graph_caption, parse_mode=None)
+                    else:
+                        print("⚠️ Kein Graph-Buffer zurückgegeben (ÄNDERUNG erkannt).")
                 except Exception as e:
-                    print(f"⚠️ Graph konnte nicht erstellt oder gesendet werden: {e}")
+                    print(f"⚠️ Graph konnte nicht erstellt oder gesendet werden (ÄNDERUNG erkannt): {e}")
                 finally:
                     if graph_buffer:
                         try:
@@ -2571,22 +2610,31 @@ Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
                 
                 # Sende Text-Nachricht
                 send_telegram(telegram_special)
-                
+                                
                 # Sende speziellen Graph für Zieldatum
                 graph_buffer = None
                 try:
                     graph_buffer = create_progression_graph(active_history, current_date, forecast)
                     if graph_buffer:
+                        try:
+                            if hasattr(graph_buffer, "seek"):
+                                graph_buffer.seek(0)
+                        except Exception:
+                            pass
                         graph_caption = f"🎯 PRE-CAS ZIELDATUM ERREICHT: {current_date}!"
-                        send_telegram_photo(graph_buffer, graph_caption)
+                        print("🖼️ Sende separaten Graph (ZIELDATUM erreicht)...")
+                        send_telegram_photo(graph_buffer, graph_caption, parse_mode=None)
+                    else:
+                        print("⚠️ Kein Graph-Buffer zurückgegeben (ZIELDATUM erreicht).")
                 except Exception as e:
-                    print(f"⚠️ Graph konnte nicht erstellt oder gesendet werden: {e}")
+                    print(f"⚠️ Graph konnte nicht erstellt oder gesendet werden (ZIELDATUM erreicht): {e}")
                 finally:
                     if graph_buffer:
                         try:
                             graph_buffer.close()
                         except Exception:
                             pass
+
             
             if emails_sent or os.environ.get('TELEGRAM_BOT_TOKEN'):
                 # KRITISCH: Update Pre-CAS Status IMMER nach einer erkannten Änderung
@@ -2680,25 +2728,38 @@ Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
 {forecast_text}
 
 <a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
-                
-                # Sende Text-Nachricht
+                                
+                # 1) Text separat senden
                 send_telegram(telegram_msg)
                 
-                # Sende Graph als separate Nachricht
+                # 2) Graph separat als Foto senden
                 graph_buffer = None
                 try:
                     graph_buffer = create_progression_graph(active_history, current_date, forecast)
                     if graph_buffer:
-                        graph_caption = f"📊 Pre-CAS Status\nAktuell: {current_date}\nTarget: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
-                        send_telegram_photo(graph_buffer, graph_caption)
+                        try:
+                            if hasattr(graph_buffer, "seek"):
+                                graph_buffer.seek(0)
+                        except Exception:
+                            pass
+                        graph_caption = (
+                            f"📊 Pre-CAS Status\n"
+                            f"Aktuell: {current_date}\n"
+                            f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
+                        )
+                        print("🖼️ Sende separaten Graph (no-change, MANUAL)...")
+                        send_telegram_photo(graph_buffer, graph_caption, parse_mode=None)
+                    else:
+                        print("⚠️ Kein Graph-Buffer zurückgegeben (no-change, MANUAL).")
                 except Exception as e:
-                    print(f"⚠️ Graph konnte nicht erstellt oder gesendet werden: {e}")
+                    print(f"⚠️ Graph konnte nicht erstellt oder gesendet werden (no-change, MANUAL): {e}")
                 finally:
                     if graph_buffer:
                         try:
                             graph_buffer.close()
                         except Exception:
                             pass
+
             # Note: Scheduled runs with no change don't send notifications to main chat
             
             # Speichere auch bei keiner Änderung den aktualisierten Timestamp
