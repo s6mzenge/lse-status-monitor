@@ -1,0 +1,108 @@
+name: LSE Status Monitor
+
+on:
+  workflow_dispatch: # Ermöglicht manuelles Testen und Cron-Job.org Trigger
+  repository_dispatch: # Für API-Trigger
+    types: 
+      - check-lse-status
+      - check-lse-status-manual # Spezielle manuelle Trigger vom Telegram Bot
+
+# Verhindert parallele Ausführungen
+concurrency:
+  group: lse-monitor
+  cancel-in-progress: false
+
+jobs:
+  check-status:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        token: ${{ secrets.GITHUB_TOKEN || github.token }}
+        fetch-depth: 0  # Vollständige Historie für besseres Merging
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        pip install requests beautifulsoup4 numpy matplotlib scipy scikit-learn
+    
+    - name: Check LSE Status
+      id: check_status
+      env:
+        GMAIL_USER: ${{ secrets.GMAIL_USER }}
+        GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        EMAIL_TO_2: ${{ secrets.EMAIL_TO_2 }}
+        EMAIL_TO_3: ${{ secrets.EMAIL_TO_3 }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        TELEGRAM_BOT_TOKEN_MAMA: ${{ secrets.TELEGRAM_BOT_TOKEN_MAMA }}
+        TELEGRAM_CHAT_ID_MAMA: ${{ secrets.TELEGRAM_CHAT_ID_MAMA }}
+        TELEGRAM_BOT_TOKEN_PAPA: ${{ secrets.TELEGRAM_BOT_TOKEN_PAPA }}
+        TELEGRAM_CHAT_ID_PAPA: ${{ secrets.TELEGRAM_CHAT_ID_PAPA }}
+        # Setze MANUAL_RUN flag für manuelle Ausführungen
+        MANUAL_RUN: ${{ github.event_name == 'workflow_dispatch' || github.event.action == 'check-lse-status-manual' }}
+      run: |
+        python check_lse.py
+    
+    - name: Validate and commit changes
+      run: |
+        # Git Konfiguration
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        
+        # Validiere JSON-Dateien
+        python -c "
+        import json
+        import sys
+        
+        try:
+            with open('status.json', 'r') as f:
+                status = json.load(f)
+                print('✅ status.json ist gültig')
+        except Exception as e:
+            print(f'❌ status.json ist ungültig: {e}')
+            sys.exit(1)
+        
+        try:
+            with open('history.json', 'r') as f:
+                history = json.load(f)
+                print('✅ history.json ist gültig')
+        except Exception as e:
+            print(f'❌ history.json ist ungültig: {e}')
+            sys.exit(1)
+        "
+        
+        # Stelle sicher, dass wir auf dem neuesten Stand sind
+        git fetch origin main
+        git add status.json history.json
+        
+        # Prüfe ob es Änderungen gibt
+        if git diff --cached --quiet; then
+          echo "=== Keine Änderungen zu committen ==="
+        else
+          echo "=== Committe Änderungen ==="
+          git diff --cached --stat
+          
+          # Committe mit timestamp
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          git commit -m "Update status and history [skip ci] - $TIMESTAMP"
+          
+          # Push mit einfacher Retry-Logik
+          for i in 1 2 3; do
+            echo "Push Versuch $i..."
+            if git push origin main; then
+              echo "✅ Push erfolgreich!"
+              break
+            else
+              echo "❌ Push fehlgeschlagen, warte 3 Sekunden..."
+              sleep 3
+              git pull --rebase origin main
+            fi
+          done
+        fi
