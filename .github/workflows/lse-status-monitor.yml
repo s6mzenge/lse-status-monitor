@@ -1,6 +1,6 @@
 name: LSE Status Monitor
 
-on:
+"on":
   repository_dispatch:
     types: [run]
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
     - cron: "0 * * * *" # adjust as needed
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: lse-status-monitor
@@ -77,5 +77,37 @@ jobs:
               echo "⚡ GOOD: Script execution under 15s (improvement achieved)"
             else
               echo "⚠️ SLOW: Script execution over 15s (needs optimization)"
+            fi
+          fi
+
+      - name: Commit and push changes
+        run: |
+          # Git configuration
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # Check if there are changes to commit
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "=== No changes to commit ==="
+          else
+            echo "=== Committing changes ==="
+            git add status.json history.json
+            git diff --cached --stat
+            
+            # Commit with timestamp
+            TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+            if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+              git commit -m "Manual update via repository_dispatch [skip ci] - $TIMESTAMP"
+            else
+              git commit -m "Update status and history [skip ci] - $TIMESTAMP"
+            fi
+            
+            # Push changes
+            echo "📤 Pushing changes..."
+            if git push origin main; then
+              echo "✅ Push successful!"
+            else
+              echo "⚠️ Push conflict, attempting rebase..."
+              git pull --rebase origin main && git push origin main
             fi
           fi
