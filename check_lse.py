@@ -1070,13 +1070,17 @@ def create_pre_cas_forecast_text(forecast):
 
 def create_progression_graph(history, current_date, forecast=None):
     """
-    ALT vs. NEU mit:
-      • exakten ETA-Schnittpunkten (25/28 July) auf den Regressionslinien,
-      • Heartbeats als Kreuze auf dem jeweiligen y-Wert,
-      • glatten Linien (fraktionale Business-Days) ohne Unsicherheitsflächen,
-      • kompakten Achsen & Datumsformaten.
+    Creates progression graph with ALT vs. NEU forecasting:
+      • exact ETA intersection points (25/28 July) on regression lines,
+      • heartbeats as crosses on respective y-values,
+      • smooth lines (fractional business days) without uncertainty areas,
+      • compact axes & date formats.
 
-    Gibt BytesIO (PNG) zurück oder None.
+    Note: This function receives already filtered history data, but uses ACTIVE_STREAM 
+    internally only for display purposes (titles, target markers, etc.). The actual 
+    data filtering happens before calling this function.
+
+    Returns BytesIO (PNG) or None.
     """
     # Lazy load matplotlib and numpy
     plt, mdates = _get_matplotlib()
@@ -2008,8 +2012,12 @@ def main():
             "from": status.get('last_date')
         })
         status['last_date'] = current_dates['all_other']
+        status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()
+        if current_dates.get('last_updated_utc'):
+            status['last_updated_seen_utc'] = current_dates['last_updated_utc']
         # Speichere sofort
         save_history(history)
+        save_status(status)
     
     # Stilles Tracking für CAS (keine Benachrichtigungen)
     if current_dates['cas'] and current_dates['cas'] != status.get('cas_date'):
@@ -2020,8 +2028,12 @@ def main():
             "from": status.get('cas_date')
         })
         status['cas_date'] = current_dates['cas']
+        status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()
+        if current_dates.get('last_updated_utc'):
+            status['last_updated_seen_utc'] = current_dates['last_updated_utc']
         # Speichere sofort
         save_history(history)
+        save_status(status)
     
     # Hauptlogik für Pre-CAS (mit primären Benachrichtigungen)
     current_date = current_dates['pre_cas']
@@ -2137,7 +2149,7 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
                     emails_sent = True
             
             # Check if target date reached for Pre-CAS
-            if conditional_notify and current_date == TARGET_DATE_PRE_CAS.strftime('%d %B'):
+            if conditional_notify and (current_date or '').lower() == TARGET_DATE_PRE_CAS.strftime('%d %B').lower():
                 print(f"\n🎯 Pre-CAS Zieldatum {current_date} erreicht! Benachrichtige zusätzliche Empfänger.")
                 if send_gmail(subject, body_simple, conditional_notify):
                     emails_sent = True
@@ -2196,6 +2208,30 @@ Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
         else:
             print("✅ Keine Pre-CAS Änderung - alles beim Alten.")
             status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()  # UTC für Konsistenz
+            
+            # Pre-CAS Heartbeat-Logik (analog zur AOA-Heartbeat-Logik)
+            try:
+                last_up_iso = current_dates.get('last_updated_utc')
+                if last_up_iso:
+                    prev_seen = status.get('last_updated_seen_utc')
+                    is_new_update = (prev_seen != last_up_iso)
+                else:
+                    is_new_update = False
+
+                if is_new_update:
+                    status['last_updated_seen_utc'] = last_up_iso
+                    current_pre_cas = current_dates.get('pre_cas')
+                    if current_pre_cas == status.get('pre_cas_date'):
+                        history.setdefault('observations', [])
+                        if not any(o.get('timestamp') == last_up_iso for o in history['observations']):
+                            history['observations'].append({
+                                'timestamp': last_up_iso,
+                                'date': current_pre_cas,
+                                'kind': 'heartbeat'
+                            })
+                            save_history(history)
+            except Exception as _e:
+                print(f"⚠️ Pre-CAS Heartbeat-Logik übersprungen: {_e}")
             
             # Calculate forecast for status message (for both manual and automatic)
             active_history = {"changes": history.get('pre_cas_changes', [])}
