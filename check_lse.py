@@ -183,10 +183,15 @@ def _get_io_bytesio():
     return _io_bytesio
 
 def _get_numpy():
+    """Safely load numpy with proper error handling"""
     global _numpy
     if _numpy is None:
-        import numpy as np
-        _numpy = np
+        try:
+            import numpy as np
+            _numpy = np
+        except ImportError:
+            # Return None if numpy is not available
+            return None
     return _numpy
 
 def _get_matplotlib():
@@ -235,10 +240,33 @@ def business_days_elapsed(start_dt, end_dt):
     Nutzt nur das Datum (keine Uhrzeiten). Für denselben Kalendertag -> 0.
     '''
     np = _get_numpy()
-    s = np.datetime64(start_dt.date(), 'D')
-    e = np.datetime64(end_dt.date(), 'D')
-    # np.busday_count zählt Werktage im Intervall [s, e) - now with UK holidays
-    return int(np.busday_count(s, e, holidays=UK_HOLIDAYS))
+    if np is not None:
+        # Use numpy for precise calculation with holidays
+        s = np.datetime64(start_dt.date(), 'D')
+        e = np.datetime64(end_dt.date(), 'D')
+        return int(np.busday_count(s, e, holidays=UK_HOLIDAYS))
+    else:
+        # Fallback to basic calculation without numpy
+        current = start_dt.date()
+        end = end_dt.date()
+        count = 0
+        
+        # Convert UK_HOLIDAYS to date objects for comparison
+        uk_holidays_dates = set()
+        for holiday_str in UK_HOLIDAYS:
+            try:
+                holiday_date = datetime.strptime(holiday_str, '%Y-%m-%d').date()
+                uk_holidays_dates.add(holiday_date)
+            except:
+                pass
+        
+        while current < end:
+            # Monday = 0, Sunday = 6, so weekdays are 0-4
+            if current.weekday() < 5 and current not in uk_holidays_dates:
+                count += 1
+            current += timedelta(days=1)
+        
+        return count
 
 def add_business_days(start_dt, n):
     '''
@@ -687,6 +715,114 @@ def _get_regression_cache_key(history):
     changes_data = str(sorted(history.get('changes', []), key=lambda x: x.get('timestamp', '')))
     return hashlib.md5(changes_data.encode()).hexdigest()
 
+def calculate_standard_regression_forecast(history, current_date=None):
+    """
+    Standard regression forecast using basic Python math (no numpy required)
+    Provides basic linear regression functionality as fallback
+    """
+    # Determine the changes key based on active stream
+    changes_key = f"{ACTIVE_STREAM}_changes"
+    
+    # Use stream-specific data
+    source_data = _iter_changes_only(history, changes_key)
+    if len(source_data) < REGRESSION_MIN_POINTS:
+        return None
+    
+    # Extract data points using basic Python
+    data_points = []
+    first_timestamp = None
+    
+    for entry in source_data:
+        try:
+            timestamp = datetime.fromisoformat(entry["timestamp"])
+            date_days = date_to_days(entry["date"])
+            
+            if date_days is None:
+                continue
+                
+            if first_timestamp is None:
+                first_timestamp = timestamp
+            
+            # Convert timestamp to hours since first timestamp
+            time_diff = (timestamp - first_timestamp).total_seconds() / 3600.0
+            data_points.append((time_diff, date_days, timestamp))
+                
+        except (ValueError, KeyError):
+            continue
+    
+    if len(data_points) < REGRESSION_MIN_POINTS:
+        return None
+    
+    # Basic linear regression using standard Python math
+    n = len(data_points)
+    x_values = [p[0] for p in data_points]
+    y_values = [p[1] for p in data_points]
+    
+    # Calculate sums
+    sum_x = sum(x_values)
+    sum_y = sum(y_values)
+    sum_xy = sum(x * y for x, y in zip(x_values, y_values))
+    sum_x2 = sum(x * x for x in x_values)
+    
+    # Linear regression slope and intercept
+    denominator = n * sum_x2 - sum_x * sum_x
+    if denominator == 0:
+        return None
+        
+    slope = (n * sum_xy - sum_x * sum_y) / denominator
+    intercept = (sum_y - slope * sum_x) / n
+    
+    # Calculate R²
+    y_mean = sum_y / n
+    ss_res = sum((y - (slope * x + intercept))**2 for x, y in zip(x_values, y_values))
+    ss_tot = sum((y - y_mean)**2 for y in y_values)
+    r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+    
+    # Calculate predictions
+    current_time = get_german_time()
+    
+    # Predict for target dates
+    predictions = {}
+    target_dates = ["25 July", "28 July"]
+    
+    for target_date in target_dates:
+        target_days = date_to_days(target_date)
+        if target_days is not None:
+            predicted_hours = (target_days - intercept) / slope if slope != 0 else 0
+            predicted_time = first_timestamp + timedelta(hours=predicted_hours)
+            days_from_now = (predicted_time - current_time).total_seconds() / (24 * 3600)
+            
+            predictions[target_date] = {
+                "date": predicted_time,
+                "days": max(0, days_from_now)
+            }
+    
+    # Current trend calculation
+    if data_points:
+        latest_x = x_values[-1]
+        current_predicted_days = slope * latest_x + intercept
+    else:
+        current_predicted_days = None
+    
+    # Calculate days until target dates
+    days_until_25 = predictions.get("25 July", {}).get("days")
+    days_until_28 = predictions.get("28 July", {}).get("days")
+    
+    return {
+        "slope": slope,
+        "r_squared": r2,
+        "current_trend_days": current_predicted_days,
+        "data_points": len(data_points),
+        "days_until_25_july": days_until_25,
+        "days_until_28_july": days_until_28,
+        "model_name": "Standard Linear",
+        "std_error": 0.0,  # Not calculated in standard version
+        "trend_analysis": "basic",
+        "recent_velocity": slope if slope else 0.0,
+        "models": {"linear": {"slope": slope, "r2": r2}},
+        "predictions": predictions,
+    }
+
 def calculate_advanced_regression_forecast(history, current_date=None):
     """
     Erweiterte Regression mit mehreren Verbesserungen:
@@ -716,6 +852,11 @@ def calculate_advanced_regression_forecast(history, current_date=None):
         return _regression_cache.copy()  # Return cached result
     
     np = _get_numpy()  # Lazy load numpy
+    
+    # Check if numpy is available - if not, fall back to standard regression
+    if np is None:
+        print("⚠️ Advanced regression unavailable (numpy missing), falling back to standard regression")
+        return calculate_standard_regression_forecast(history, current_date)
     
     # GEÄNDERT: Verwende stream-spezifische Daten
     source_data = _iter_changes_only(history, changes_key)
@@ -1085,9 +1226,13 @@ def compute_integrated_model_metrics(history):
       (1) Hyperparameter-Tuning per ETA-Backtest
       (3) Recency-Blending (mehr LOESS nach längerer Ruhe, mehr TS direkt nach Change)
     """
+    _np = _get_numpy()  # Lazy load numpy
+    if _np is None:
+        print("⚠️ Integrated model unavailable (numpy missing), using standard regression")
+        return None
+        
     from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
     from datetime import time as _time
-    _np = _get_numpy()  # Lazy load numpy
 
     # ---- Stream-spezifische Datenauswahl ----
     if ACTIVE_STREAM == "pre_cas":
@@ -1384,6 +1529,11 @@ def create_progression_graph(history, current_date, forecast=None):
     plt, mdates = _get_matplotlib()
     np = _get_numpy()
     
+    # Check if numpy is available - if not, skip graph generation
+    if np is None:
+        print("⚠️ Graph generation unavailable (numpy missing)")
+        return None
+    
     from matplotlib.ticker import FuncFormatter, MaxNLocator
     from datetime import datetime, timedelta
 
@@ -1408,6 +1558,10 @@ def create_progression_graph(history, current_date, forecast=None):
     # fraktionale Business-Days (werktags + Tagesanteil)
     def _bizdays_float(start: datetime, t: datetime) -> float:
         np = _get_numpy()  # Lazy load
+        if np is None:
+            # Fallback to basic calculation
+            return business_days_elapsed(start, t) + (t - datetime(t.year, t.month, t.day)).total_seconds() / 86400.0
+            
         s0 = datetime(start.year, start.month, start.day)
         t0 = datetime(t.year, t.month, t.day)
         full = float(np.busday_count(np.datetime64(s0.date()), np.datetime64(t0.date()), holidays=UK_HOLIDAYS))
@@ -2166,7 +2320,8 @@ def fetch_processing_dates():
     """Holt alle Verarbeitungsdaten von der LSE-Webseite"""
     try:
         # Optimierte Ausgabe für manuelle Runs
-        IS_MANUAL = os.environ.get('GITHUB_EVENT_NAME') == 'repository_dispatch'
+        event_name = os.environ.get('GITHUB_EVENT_NAME', '')
+        IS_MANUAL = event_name in ('repository_dispatch', 'workflow_dispatch')
         if IS_MANUAL:
             print("⚡ Fetching LSE data (optimized)...")
         else:
@@ -2302,11 +2457,14 @@ def main():
     # Migriere JSON-Dateien falls nötig
     migrate_json_files()
     
-    # Prüfe ob manueller Run via Telegram
-    IS_MANUAL = os.environ.get('GITHUB_EVENT_NAME') == 'repository_dispatch'
+    # Prüfe ob manueller Run via GitHub event
+    event_name = os.environ.get('GITHUB_EVENT_NAME', '')
+    IS_MANUAL = event_name in ('repository_dispatch', 'workflow_dispatch')
     if IS_MANUAL:
-        print("🔄 MANUELLER CHECK VIA TELEGRAM - FAST EXECUTION MODE")
+        print(f"🔄 MANUAL RUN VIA {event_name.upper()} - FAST EXECUTION MODE")
         print("⚡ Optimized execution for manual runs")
+    else:
+        print(f"📅 SCHEDULED RUN VIA {event_name.upper() if event_name else 'UNKNOWN'}")
     
     print("="*50)
     

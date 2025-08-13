@@ -109,14 +109,16 @@ jobs:
         TELEGRAM_CHAT_ID_MAMA: ${{ secrets.TELEGRAM_CHAT_ID_MAMA }}
         TELEGRAM_BOT_TOKEN_PAPA: ${{ secrets.TELEGRAM_BOT_TOKEN_PAPA }}
         TELEGRAM_CHAT_ID_PAPA: ${{ secrets.TELEGRAM_CHAT_ID_PAPA }}
-        # Setze MANUAL_RUN flag für manuelle Ausführungen
-        MANUAL_RUN: ${{ github.event_name == 'workflow_dispatch' || github.event.action == 'check-lse-status-manual' }}
+        # Set event name for Python code to use proper detection
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+        # Set MANUAL_RUN flag for manual executions (repository_dispatch and workflow_dispatch)
+        MANUAL_RUN: ${{ github.event_name != 'schedule' }}
       run: |
         echo "🚀 Starting LSE check at $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
         START_TIME=$(date +%s)
         
         # Performance monitoring for optimization analysis
-        if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+        if [ "${{ github.event_name }}" = "repository_dispatch" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
           echo "⚡ Manual run mode - optimized for speed"
         else
           echo "📊 Scheduled run mode - full functionality"
