@@ -77,6 +77,69 @@ _math = None
 # Lazy imports for file operations - only loaded when needed
 _io_bytesio = None
 
+# Fast JSON library when available
+_json_lib = None
+
+def _get_fast_json():
+    """Get the fastest available JSON library"""
+    global _json_lib
+    if _json_lib is None:
+        try:
+            # Try to use orjson for better performance
+            import orjson
+            _json_lib = 'orjson'
+            return orjson
+        except ImportError:
+            try:
+                # Try ujson as second choice
+                import ujson
+                _json_lib = 'ujson'
+                return ujson
+            except ImportError:
+                # Fall back to standard json
+                import json
+                _json_lib = 'json'
+                return json
+    
+    # Return cached library
+    if _json_lib == 'orjson':
+        import orjson
+        return orjson
+    elif _json_lib == 'ujson':
+        import ujson
+        return ujson
+    else:
+        import json
+        return json
+
+def _fast_json_loads(text):
+    """Fast JSON loading with library-specific handling"""
+    json_lib = _get_fast_json()
+    if _json_lib == 'orjson':
+        return json_lib.loads(text)
+    elif _json_lib == 'ujson':
+        return json_lib.loads(text)
+    else:
+        return json_lib.loads(text)
+
+def _fast_json_dumps(data, **kwargs):
+    """Fast JSON dumping with library-specific handling"""
+    json_lib = _get_fast_json()
+    if _json_lib == 'orjson':
+        # orjson doesn't support indent in dumps, fall back to standard json for pretty printing
+        if kwargs.get('indent'):
+            import json
+            return json.dumps(data, **kwargs)
+        return json_lib.dumps(data).decode('utf-8')
+    elif _json_lib == 'ujson':
+        # ujson doesn't support all options, fall back for complex cases
+        if kwargs.get('indent'):
+            import json
+            return json.dumps(data, **kwargs)
+        return json_lib.dumps(data)
+    else:
+        return json_lib.dumps(data, **kwargs)
+
 def _get_requests():
     """Lazy load requests module"""
     global _requests
@@ -281,9 +344,63 @@ def _file_lock(filepath):
             except (OSError, FileNotFoundError):
                 pass
 
-# File cache to reduce redundant I/O operations
+# Enhanced caching system for maximum performance
 _file_cache = {}
 _cache_timestamps = {}
+_cache_stats = {'hits': 0, 'misses': 0}
+
+# Add memory-based cache for computation results
+_computation_cache = {}
+_max_cache_size = 100  # Limit cache size to prevent memory issues
+
+def _get_cache_stats():
+    """Get cache performance statistics"""
+    total = _cache_stats['hits'] + _cache_stats['misses']
+    hit_rate = (_cache_stats['hits'] / total * 100) if total > 0 else 0
+    return f"Cache: {_cache_stats['hits']} hits, {_cache_stats['misses']} misses ({hit_rate:.1f}% hit rate)"
+
+def _clear_old_cache_entries():
+    """Clear old cache entries to prevent memory bloat"""
+    if len(_computation_cache) > _max_cache_size:
+        # Remove oldest 20% of entries
+        items = list(_computation_cache.items())
+        items.sort(key=lambda x: x[1].get('timestamp', 0))
+        to_remove = len(items) // 5
+        for key, _ in items[:to_remove]:
+            del _computation_cache[key]
+
+def _memoize(func):
+    """Decorator for memoizing expensive function calls"""
+    import functools
+    import hashlib
+    
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # Create cache key from function name and arguments
+        key_data = f"{func.__name__}:{str(args)}:{str(sorted(kwargs.items()))}"
+        cache_key = hashlib.md5(key_data.encode()).hexdigest()
+        
+        # Check cache
+        if cache_key in _computation_cache:
+            _cache_stats['hits'] += 1
+            return _computation_cache[cache_key]['result']
+        
+        # Compute result
+        _cache_stats['misses'] += 1
+        result = func(*args, **kwargs)
+        
+        # Clear old entries if needed
+        _clear_old_cache_entries()
+        
+        # Store in cache
+        _computation_cache[cache_key] = {
+            'result': result,
+            'timestamp': time.time()
+        }
+        
+        return result
+    
+    return wrapper
 
 def _get_file_cache_key(filepath):
     """Get cache key for file operations"""
@@ -299,11 +416,13 @@ def _cached_json_load(filepath):
     cache_key = _get_file_cache_key(filepath)
     
     if cache_key in _file_cache:
+        _cache_stats['hits'] += 1
         return _file_cache[cache_key].copy()  # Return copy to avoid mutations
     
+    _cache_stats['misses'] += 1
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+            data = _fast_json_loads(f.read())
             _file_cache[cache_key] = data
             return data.copy()
     except (FileNotFoundError, json.JSONDecodeError):
@@ -321,7 +440,7 @@ def _cached_json_dump(data, filepath):
     try:
         temp_fd, temp_path = tempfile.mkstemp(dir=dir_path, suffix='.tmp')
         with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
+            f.write(_fast_json_dumps(data, indent=2))
         temp_fd = None  # File is now closed
         
         # Atomic replace
@@ -350,9 +469,42 @@ def _cached_json_dump(data, filepath):
 def get_advanced_regression_status():
     return _check_advanced_regression_available()
 
+def get_performance_stats():
+    """Get comprehensive performance statistics"""
+    stats = {
+        'cache_stats': _get_cache_stats() if 'hits' in _cache_stats else "Cache not used yet",
+        'lazy_modules_loaded': {
+            'numpy': _numpy is not None,
+            'matplotlib': _matplotlib_plt is not None,
+            'scipy': _scipy_stats is not None,
+            'sklearn': _sklearn_modules is not None,
+            'requests': _requests is not None,
+            'beautifulsoup': _beautifulsoup is not None,
+            'email': _smtplib is not None,
+            'math': _math is not None,
+        },
+        'json_library': _json_lib or 'not initialized',
+        'computation_cache_size': len(_computation_cache),
+        'file_cache_size': len(_file_cache),
+    }
+    return stats
+
+# Apply memoization to frequently called functions for better performance
+# This must be done after the functions are defined
+business_days_elapsed = _memoize(business_days_elapsed)
+
+# Performance micro-optimizations
+# Pre-allocate common objects to avoid repeated allocations
+_EMPTY_DICT = {}
+_EMPTY_LIST = []
+
+# Common timezone objects to avoid repeated lookups
+_UTC_TZ = ZoneInfo("UTC")
+_BER_TZ = ZoneInfo("Europe/Berlin")
+
 # Timezone constants imported from config - use those consistently
-UTC = ZoneInfo("UTC")
-BER = ZoneInfo("Europe/Berlin")
+UTC = _UTC_TZ
+BER = _BER_TZ
 
 def get_german_time():
     return datetime.now(BER)
