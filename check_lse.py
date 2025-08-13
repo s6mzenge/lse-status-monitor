@@ -22,7 +22,7 @@ from config import (
     LSE_URL, STATUS_FILE, HISTORY_FILE, REGRESSION_MIN_POINTS, CONFIDENCE_LEVEL,
     TARGET_DATES, REQUEST_TIMEOUT, REQUEST_HEADERS, GMAIL_SMTP_SERVER, 
     GMAIL_SMTP_PORT, TELEGRAM_API_BASE, ACTIVE_STREAM, TARGET_DATE_PRE_CAS,
-    TARGET_DATES_MAP, LON
+    TARGET_DATES_MAP, LON, UK_HOLIDAYS
 )
 
 # Lazy imports for heavy dependencies - only loaded when needed
@@ -89,8 +89,8 @@ def business_days_elapsed(start_dt, end_dt):
     np = _get_numpy()
     s = np.datetime64(start_dt.date(), 'D')
     e = np.datetime64(end_dt.date(), 'D')
-    # np.busday_count zählt Werktage im Intervall [s, e)
-    return int(np.busday_count(s, e))
+    # np.busday_count zählt Werktage im Intervall [s, e) - now with UK holidays
+    return int(np.busday_count(s, e, holidays=UK_HOLIDAYS))
 
 def add_business_days(start_dt, n):
     '''
@@ -105,7 +105,8 @@ def add_business_days(start_dt, n):
     remaining = abs(steps)
     while remaining > 0:
         current = current + timedelta(days=step)
-        if current.weekday() < 5:  # Mo–Fr
+        # Check if it's a weekday (Mo–Fr) and not a UK holiday
+        if current.weekday() < 5 and current.strftime('%Y-%m-%d') not in UK_HOLIDAYS:
             remaining -= 1
     return current
 
@@ -816,7 +817,7 @@ def compute_integrated_model_metrics(history):
     rows_all.sort(key=lambda r: _to_aware_berlin(r["timestamp"]))
 
     # ---- Kalender / Konstanten ----
-    cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
+    cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=UK_HOLIDAYS)
     tz_out = BER
 
     # ---- (1) ETA-Backtest: kleines Grid ----
@@ -1043,9 +1044,9 @@ def create_progression_graph(history, current_date, forecast=None):
         np = _get_numpy()  # Lazy load
         s0 = datetime(start.year, start.month, start.day)
         t0 = datetime(t.year, t.month, t.day)
-        full = float(np.busday_count(np.datetime64(s0.date()), np.datetime64(t0.date())))
+        full = float(np.busday_count(np.datetime64(s0.date()), np.datetime64(t0.date()), holidays=UK_HOLIDAYS))
         def _frac(d: datetime) -> float:
-            if not bool(np.is_busday(np.datetime64(d.date()))):
+            if not bool(np.is_busday(np.datetime64(d.date()), holidays=UK_HOLIDAYS)):
                 return 0.0
             return (d - datetime(d.year, d.month, d.day)).total_seconds() / 86400.0
         return full + _frac(t) - _frac(s0)
@@ -1235,7 +1236,7 @@ def create_progression_graph(history, current_date, forecast=None):
 
         rows = [{"timestamp": e["timestamp"], "date": e["date"]} for e in entries]
         if len(rows) >= REGRESSION_MIN_POINTS:
-            cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
+            cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=UK_HOLIDAYS)
             imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
 
             hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute) / 60.0
