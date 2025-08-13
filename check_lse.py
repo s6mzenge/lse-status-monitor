@@ -1,12 +1,8 @@
-import requests
-from bs4 import BeautifulSoup
+# Essential lightweight imports only
 import json
 import os
 import re
-import smtplib
-from email.mime.text import MIMEText
 from datetime import datetime, timedelta
-import math
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -15,7 +11,14 @@ from typing import Dict, List, Optional
 from collections import defaultdict
 import time
 import sys
-from io import BytesIO
+
+# Lazy imports - loaded only when needed
+_requests = None
+_beautifulsoup = None
+_smtplib = None
+_email_mime = None
+_math = None
+_io_bytesio = None
 
 # Import configuration
 from config import (
@@ -25,12 +28,96 @@ from config import (
     TARGET_DATES_MAP, LON, UK_HOLIDAYS
 )
 
+# Precompiled regex patterns for better performance
+DATE_PATTERN = re.compile(r'^\d{1,2}\s+\w+$')
+LAST_UPDATED_PATTERN = re.compile(r'Last\s+updated:\s*(\d{1,2}\s+\w+\s+\d{4}),\s*(\d{1,2}:\d{2})', re.IGNORECASE)
+ALL_OTHER_PATTERN = re.compile(r'all other graduate applicants', re.IGNORECASE)
+
+# Date extraction patterns for web scraping
+FULL_DATE_PATTERN = re.compile(r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))\b', re.IGNORECASE)
+MONTH_DATE_PATTERN = re.compile(r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))', re.IGNORECASE)
+
+# AOA patterns
+AOA_PATTERN1 = re.compile(r'All\s+other\s+graduate\s+applicants.*?applications\s+received\s+by.*?will\s+receive\s+their\s+decision.*?on\s+(\d{1,2}\s+\w+)', re.IGNORECASE | re.DOTALL)
+AOA_PATTERN2 = re.compile(r'decisions\s+for\s+applications\s+will\s+be\s+released\s+from\s+(\d{1,2}\s+\w+)', re.IGNORECASE)
+AOA_DATE_PATTERN = re.compile(r'(\d{1,2}\s+\w+)', re.IGNORECASE)
+AOA_PATTERN3 = re.compile(r'decisions\s+will\s+be\s+released\s+on\s+(\d{1,2}\s+\w+)', re.IGNORECASE)
+
+# Pre-CAS patterns
+PRE_CAS_PATTERN1 = re.compile(r'issuing\s+Pre-CAS.*?criteria\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))', re.IGNORECASE | re.DOTALL)
+PRE_CAS_PATTERN2 = re.compile(r'issuing\s+Pre-CAS\s+for\s+offer\s+holders.*?criteria\s+on:?\s*([^.]*?)(?:Please|We\s+are|$)', re.IGNORECASE)
+PRE_CAS_PATTERN3 = re.compile(r'issuing\s+Pre-CAS.*?(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))', re.IGNORECASE)
+PRE_CAS_PATTERN = re.compile(r'Pre-CAS\s+applications.*?decisions\s+will\s+be\s+released\s+on\s+(\d{1,2}\s+\w+)', re.IGNORECASE | re.DOTALL)
+
+# CAS pattern
+CAS_PATTERN = re.compile(r'Confirmation\s+of\s+Acceptance.*?(\d{1,2}\s+\w+)', re.IGNORECASE | re.DOTALL)
+
+# Fallback patterns
+ALL_OTHER_FALLBACK_PATTERN = re.compile(r'all other graduate applicants[^0-9]*?((?:\d{1,2}\s+\w+\s*)+)', re.IGNORECASE | re.DOTALL)
+CAS_EXTRACTION_PATTERN = re.compile(r'issuing\s+CAS\s+to.*?Pre-CAS\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))', re.IGNORECASE | re.DOTALL)
+
 # Lazy imports for heavy dependencies - only loaded when needed
 _numpy = None
 _matplotlib_plt = None
 _matplotlib_dates = None
 _warnings = None
 _requests_session = None
+
+# Lazy imports for web scraping - only loaded when actually scraping
+_requests = None
+_beautifulsoup = None
+
+# Lazy imports for notifications - only loaded when sending notifications  
+_smtplib = None
+_email_mime = None
+
+# Lazy imports for math operations - only loaded when doing calculations
+_math = None
+
+# Lazy imports for file operations - only loaded when needed
+_io_bytesio = None
+
+def _get_requests():
+    """Lazy load requests module"""
+    global _requests
+    if _requests is None:
+        import requests
+        _requests = requests
+    return _requests
+
+def _get_beautifulsoup():
+    """Lazy load BeautifulSoup"""
+    global _beautifulsoup
+    if _beautifulsoup is None:
+        from bs4 import BeautifulSoup
+        _beautifulsoup = BeautifulSoup
+    return _beautifulsoup
+
+def _get_email_modules():
+    """Lazy load email modules"""
+    global _smtplib, _email_mime
+    if _smtplib is None or _email_mime is None:
+        import smtplib
+        from email.mime.text import MIMEText
+        _smtplib = smtplib
+        _email_mime = MIMEText
+    return _smtplib, _email_mime
+
+def _get_math():
+    """Lazy load math module"""
+    global _math
+    if _math is None:
+        import math
+        _math = math
+    return _math
+
+def _get_io_bytesio():
+    """Lazy load BytesIO"""
+    global _io_bytesio
+    if _io_bytesio is None:
+        from io import BytesIO
+        _io_bytesio = BytesIO
+    return _io_bytesio
 
 def _get_numpy():
     global _numpy
@@ -55,7 +142,7 @@ def _get_requests_session():
     """Get a reusable requests session with optimized settings"""
     global _requests_session
     if _requests_session is None:
-        import requests
+        requests = _get_requests()
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
         
@@ -363,10 +450,7 @@ def _iter_observations_or_changes(history: Dict, changes_key: str = "changes") -
     
     if not src:
         return []
-    
-    # Pre-compile regex for better performance
-    date_pattern = re.compile(r'^\d{1,2}\s+\w+$')
-    
+    # Use precompiled regex for better performance
     out: List[Dict] = []
     utc_tz = UTC
     
@@ -378,8 +462,8 @@ def _iter_observations_or_changes(history: Dict, changes_key: str = "changes") -
         ts = e.get("timestamp")
         dt = e.get("date")
         
-        # Early validation
-        if not ts or not dt or not date_pattern.match(str(dt)):
+        # Early validation using precompiled pattern
+        if not ts or not dt or not DATE_PATTERN.match(str(dt)):
             continue
             
         try:
@@ -409,8 +493,7 @@ def _iter_changes_only(history: Dict, changes_key: str = "changes") -> List[Dict
     if not src:
         return []
     
-    # Pre-compile regex and timezone for better performance
-    date_pattern = re.compile(r'^\d{1,2}\s+\w+$')
+    # Use precompiled regex and timezone for better performance
     utc_tz = UTC
     
     out: List[Dict] = []
@@ -423,7 +506,7 @@ def _iter_changes_only(history: Dict, changes_key: str = "changes") -> List[Dict
         ts = e.get("timestamp")
         dt = e.get("date")
         
-        if not ts or not dt or not date_pattern.match(str(dt)):
+        if not ts or not dt or not DATE_PATTERN.match(str(dt)):
             continue
             
         try:
@@ -792,7 +875,7 @@ def _recency_weight(hours_since_change, tau_hours):
     # Center leicht unter tau_hours, damit Umschalten nicht zu spät kommt
     denom = max(1e-6, 0.25 * tau_hours)
     z = (hours_since_change - 0.75 * tau_hours) / denom
-    return 1.0 / (1.0 + math.exp(-z))  # Sigmoid
+    return 1.0 / (1.0 + _get_math().exp(-z))  # Sigmoid
 
 def _subset_rows_until(rows_all, t_cut):
     """Alle Punkte (inkl. Heartbeats) bis < t_cut."""
@@ -1488,7 +1571,7 @@ def create_progression_graph(history, current_date, forecast=None):
 
     # ---------- Export ----------
     try:
-        buf = BytesIO()
+        buf = _get_io_bytesio()()
         plt.savefig(buf, format="png", dpi=110, bbox_inches="tight")
         buf.seek(0)
         plt.close()
@@ -1541,7 +1624,7 @@ def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=
                 'caption': caption or '',
                 'parse_mode': parse_mode
             }
-            response = requests.post(url, files=files, data=data)
+            response = _get_requests().post(url, files=files, data=data)
         else:
             # Send text message
             url = f"{TELEGRAM_API_BASE}{bot_token}/sendMessage"
@@ -1550,7 +1633,7 @@ def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=
                 "text": message,
                 "parse_mode": parse_mode
             }
-            response = requests.post(url, json=data)
+            response = _get_requests().post(url, json=data)
         
         if response.status_code == 200:
             print(f"✅ Telegram-Nachricht an {chat_type} gesendet!")
@@ -1869,8 +1952,7 @@ def extract_all_other_date(text):
     """Extrahiert nur das Datum für 'all other graduate applicants'"""
     text = ' '.join(text.split())
     
-    date_pattern = r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))\b'
-    all_dates = re.findall(date_pattern, text, re.IGNORECASE)
+    all_dates = FULL_DATE_PATTERN.findall(text)
     
     if len(all_dates) >= 3:
         return all_dates[-1].strip()
@@ -1882,8 +1964,7 @@ def extract_all_other_date(text):
 def extract_pre_cas_date(text):
     """Extrahiert das Datum für Pre-CAS"""
     # Pattern 1: Suche nach Pre-CAS mit Datum in der gleichen Zeile
-    pattern1 = r'issuing\s+Pre-CAS.*?criteria\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-    match = re.search(pattern1, text, re.IGNORECASE | re.DOTALL)
+    match = PRE_CAS_PATTERN1.search(text)
     if match:
         return match.group(1).strip()
     
@@ -1892,19 +1973,16 @@ def extract_pre_cas_date(text):
     clean_text = ' '.join(text.split())
     
     # Suche nach Pre-CAS und dem nächsten Datum danach
-    pattern2 = r'issuing\s+Pre-CAS\s+for\s+offer\s+holders.*?criteria\s+on:?\s*([^.]*?)(?:Please|We\s+are|$)'
-    match = re.search(pattern2, clean_text, re.IGNORECASE)
+    match = PRE_CAS_PATTERN2.search(clean_text)
     if match:
         potential_text = match.group(1)
         # Extrahiere das erste Datum aus diesem Bereich
-        date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-        date_match = re.search(date_pattern, potential_text, re.IGNORECASE)
+        date_match = MONTH_DATE_PATTERN.search(potential_text)
         if date_match:
             return date_match.group(1).strip()
     
     # Pattern 3: Allgemeinere Suche - Pre-CAS gefolgt von einem Datum innerhalb von ~100 Zeichen
-    pattern3 = r'Pre-CAS[^0-9]{0,100}?(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-    match = re.search(pattern3, clean_text, re.IGNORECASE)
+    match = PRE_CAS_PATTERN3.search(clean_text)
     if match:
         return match.group(1).strip()
     
@@ -1913,15 +1991,14 @@ def extract_pre_cas_date(text):
 def extract_cas_date(text):
     """Extrahiert das Datum für CAS"""
     # Suche nach CAS Pattern (aber nicht Pre-CAS)
-    pattern = r'issuing\s+CAS\s+to.*?Pre-CAS\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-    match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+    match = CAS_EXTRACTION_PATTERN.search(text)
     if match:
         return match.group(1).strip()
     return None
 def extract_last_updated(text):
     """Extrahiert 'Last updated' als UTC-datetime; None wenn nicht gefunden."""
     try:
-        m = re.search(r'Last\s+updated:\s*(\d{1,2}\s+\w+\s+\d{4}),\s*(\d{1,2}:\d{2})', text, re.IGNORECASE)
+        m = LAST_UPDATED_PATTERN.search(text)
         if not m:
             return None
         date_part, time_part = m.group(1), m.group(2)
@@ -1941,7 +2018,7 @@ def fetch_processing_dates():
         response = session.get(LSE_URL, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         
-        soup = BeautifulSoup(response.text, 'html.parser')
+        soup = _get_beautifulsoup()(response.text, 'html.parser')
         full_text = soup.get_text()
         # Parse Last updated
         last_up_dt = extract_last_updated(full_text)
@@ -1955,7 +2032,7 @@ def fetch_processing_dates():
         }
         
         # Suche nach "all other graduate applicants" (existierende Logik)
-        for element in soup.find_all(string=re.compile(r'all other graduate applicants', re.IGNORECASE)):
+        for element in soup.find_all(string=ALL_OTHER_PATTERN):
             parent = element.parent
             while parent and parent.name not in ['td', 'th', 'tr']:
                 parent = parent.parent
@@ -1986,8 +2063,7 @@ def fetch_processing_dates():
         
         # Fallback für all other
         if not dates['all_other']:
-            pattern = r'all other graduate applicants[^0-9]*?((?:\d{1,2}\s+\w+\s*)+)'
-            match = re.search(pattern, full_text, re.IGNORECASE | re.DOTALL)
+            match = ALL_OTHER_FALLBACK_PATTERN.search(full_text)
             
             if match:
                 dates_text = match.group(1)
@@ -2007,10 +2083,10 @@ def fetch_processing_dates():
         
         return dates
         
-    except requests.exceptions.Timeout:
+    except _get_requests().exceptions.Timeout:
         print("❌ Timeout beim Abrufen der Webseite")
         return {'all_other': None, 'pre_cas': None, 'cas': None}
-    except requests.exceptions.RequestException as e:
+    except _get_requests().exceptions.RequestException as e:
         print(f"❌ Netzwerkfehler beim Abrufen der Webseite: {e}")
         return {'all_other': None, 'pre_cas': None, 'cas': None}
     except Exception as e:
@@ -2034,6 +2110,7 @@ def send_gmail(subject, body, recipients):
     
     success_count = 0
     for recipient in recipients:
+        smtplib, MIMEText = _get_email_modules()
         msg = MIMEText(body)
         msg['Subject'] = subject
         msg['From'] = gmail_user
