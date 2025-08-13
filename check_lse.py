@@ -159,6 +159,43 @@ def _get_advanced_regression():
     except ImportError:
         return False, (None, None, None, None, None)
 
+# File locking utilities for atomic writes and race condition prevention
+import contextlib
+
+@contextlib.contextmanager
+def _file_lock(filepath):
+    """Cross-platform file locking context manager"""
+    lock_filepath = filepath + '.lock'
+    lock_file = None
+    
+    try:
+        lock_file = open(lock_filepath, 'w')
+        
+        # Try platform-specific locking
+        try:
+            import fcntl
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        except ImportError:
+            try:
+                import msvcrt
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            except (ImportError, OSError):
+                # No locking available, continue without lock
+                pass
+        
+        yield
+        
+    except OSError:
+        # Lock file could not be created, continue without lock
+        yield
+    finally:
+        if lock_file:
+            try:
+                lock_file.close()
+                os.remove(lock_filepath)
+            except (OSError, FileNotFoundError):
+                pass
+
 # File cache to reduce redundant I/O operations
 _file_cache = {}
 _cache_timestamps = {}
@@ -188,13 +225,41 @@ def _cached_json_load(filepath):
         return None
 
 def _cached_json_dump(data, filepath):
-    """Save JSON file and update cache"""
-    with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2)
+    """Save JSON file with atomic write and update cache"""
+    import tempfile
     
-    # Update cache with new data
-    cache_key = _get_file_cache_key(filepath)
-    _file_cache[cache_key] = data.copy()
+    # Write to temp file in same directory for atomic replace
+    dir_path = os.path.dirname(filepath) or '.'
+    temp_fd = None
+    temp_path = None
+    
+    try:
+        temp_fd, temp_path = tempfile.mkstemp(dir=dir_path, suffix='.tmp')
+        with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        temp_fd = None  # File is now closed
+        
+        # Atomic replace
+        os.replace(temp_path, filepath)
+        temp_path = None  # Successfully replaced, don't clean up
+        
+        # Update cache with new data
+        cache_key = _get_file_cache_key(filepath)
+        _file_cache[cache_key] = data.copy()
+        
+    except Exception:
+        # Clean up temp file if something went wrong
+        if temp_fd is not None:
+            try:
+                os.close(temp_fd)
+            except OSError:
+                pass
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        raise
 
 # Use lazy checking for advanced regression availability
 def get_advanced_regression_status():
@@ -203,16 +268,22 @@ def get_advanced_regression_status():
 URL = LSE_URL
 
 from zoneinfo import ZoneInfo
+
+# Timezone constants for consistency
+UTC = ZoneInfo("UTC")
+BER = ZoneInfo("Europe/Berlin")
+LON = ZoneInfo("Europe/London")
+
 def get_german_time():
-    return datetime.now(ZoneInfo("Europe/Berlin"))
+    return datetime.now(BER)
 
 # ===== Compact forecast rendering (ALT vs. NEU) =====
 
 def _now_berlin():
     dt = get_german_time()
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=ZoneInfo("Europe/Berlin"))
-    return dt.astimezone(ZoneInfo("Europe/Berlin"))
+        return dt.replace(tzinfo=BER)
+    return dt.astimezone(BER)
 
 def _short_date(d):  # "14 Aug"
     if d is None:
@@ -1469,6 +1540,10 @@ def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=
     
     try:
         if photo_buffer:
+            # Ensure buffer is at the beginning before sending
+            if hasattr(photo_buffer, 'seekable') and photo_buffer.seekable():
+                photo_buffer.seek(0)
+            
             # Send photo with caption
             url = f"{TELEGRAM_API_BASE}{bot_token}/sendPhoto"
             files = {'photo': ('graph.png', photo_buffer, 'image/png')}
@@ -1541,13 +1616,23 @@ def send_single_main_message(text, active_history=None, current_date=None, forec
             print(f"⚠️ Could not create graph: {e}")
             graph_buffer = None
     
-    # Send message
-    if graph_buffer:
-        # Send photo with text as caption
-        return send_telegram_photo(graph_buffer, text)
-    else:
-        # Send text message
-        return send_telegram(text)
+    # Send message with proper buffer management
+    try:
+        if graph_buffer:
+            # Ensure buffer is at the beginning before sending
+            graph_buffer.seek(0)
+            # Send photo with text as caption
+            return send_telegram_photo(graph_buffer, text)
+        else:
+            # Send text message
+            return send_telegram(text)
+    finally:
+        # Always close the buffer if it was created
+        if graph_buffer:
+            try:
+                graph_buffer.close()
+            except Exception:
+                pass
 
 
 def migrate_json_files():
@@ -1632,44 +1717,45 @@ def save_status(status):
         print("❌ Fehler: last_date ist leer, Status wird nicht gespeichert")
         return False
     
-    # Erstelle Backup bevor wir speichern
-    try:
-        if os.path.exists(STATUS_FILE):
-            with open(STATUS_FILE, 'r') as f:
-                backup = f.read()
-            with open(STATUS_FILE + '.backup', 'w') as f:
-                f.write(backup)
-    except Exception as e:
-        print(f"⚠️ Konnte kein Backup erstellen: {e}")
-    
-    # Speichere mit Fehlerbehandlung
-    try:
-        # Füge Zeitstempel hinzu wenn nicht vorhanden
-        if 'last_check' not in status:
-            status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()
+    with _file_lock(STATUS_FILE):
+        # Erstelle Backup bevor wir speichern
+        try:
+            if os.path.exists(STATUS_FILE):
+                with open(STATUS_FILE, 'r') as f:
+                    backup = f.read()
+                with open(STATUS_FILE + '.backup', 'w') as f:
+                    f.write(backup)
+        except Exception as e:
+            print(f"⚠️ Konnte kein Backup erstellen: {e}")
         
-        _cached_json_dump(status, STATUS_FILE)
-        
-        # Verifiziere dass es korrekt gespeichert wurde
-        saved = _cached_json_load(STATUS_FILE)
-        if saved and saved.get('last_date') == status['last_date']:
-            print(f"✅ Status erfolgreich gespeichert: {status['last_date']}")
-            return True
-        else:
-            print(f"❌ FEHLER: Status nicht korrekt gespeichert!")
-            print(f"   Erwartet: {status['last_date']}")
-            print(f"   Gespeichert: {saved.get('last_date') if saved else 'None'}")
+        # Speichere mit Fehlerbehandlung
+        try:
+            # Füge Zeitstempel hinzu wenn nicht vorhanden
+            if 'last_check' not in status:
+                status['last_check'] = datetime.now().astimezone(UTC).isoformat()
+            
+            _cached_json_dump(status, STATUS_FILE)
+            
+            # Verifiziere dass es korrekt gespeichert wurde
+            saved = _cached_json_load(STATUS_FILE)
+            if saved and saved.get('last_date') == status['last_date']:
+                print(f"✅ Status erfolgreich gespeichert: {status['last_date']}")
+                return True
+            else:
+                print(f"❌ FEHLER: Status nicht korrekt gespeichert!")
+                print(f"   Erwartet: {status['last_date']}")
+                print(f"   Gespeichert: {saved.get('last_date') if saved else 'None'}")
+                # Restore backup
+                if os.path.exists(STATUS_FILE + '.backup'):
+                    os.rename(STATUS_FILE + '.backup', STATUS_FILE)
+                return False
+                    
+        except Exception as e:
+            print(f"❌ Fehler beim Speichern von status.json: {e}")
             # Restore backup
             if os.path.exists(STATUS_FILE + '.backup'):
                 os.rename(STATUS_FILE + '.backup', STATUS_FILE)
             return False
-                
-    except Exception as e:
-        print(f"❌ Fehler beim Speichern von status.json: {e}")
-        # Restore backup
-        if os.path.exists(STATUS_FILE + '.backup'):
-            os.rename(STATUS_FILE + '.backup', STATUS_FILE)
-        return False
 
 def load_history():
     """Lädt Historie mit Fehlerbehandlung"""
@@ -1714,28 +1800,73 @@ def get_history():
 
 def save_history(history):
     """Speichert Historie mit Validierung"""
-    try:
-        # Validiere die Historie
-        if not isinstance(history, dict) or 'changes' not in history:
-            print("❌ Fehler: Historie ist ungültig")
+    with _file_lock(HISTORY_FILE):
+        try:
+            # Validiere die Historie
+            if not isinstance(history, dict) or 'changes' not in history:
+                print("❌ Fehler: Historie ist ungültig")
+                return False
+                
+            _cached_json_dump(history, HISTORY_FILE)
+            print(f"✅ Historie gespeichert: {len(history['changes'])} Änderungen")
+            return True
+        except Exception as e:
+            print(f"❌ Fehler beim Speichern von history.json: {e}")
             return False
-            
-        _cached_json_dump(history, HISTORY_FILE)
-        print(f"✅ Historie gespeichert: {len(history['changes'])} Änderungen")
-        return True
-    except Exception as e:
-        print(f"❌ Fehler beim Speichern von history.json: {e}")
-        return False
 
 def date_to_days(date_str):
     """Konvertiert ein Datum wie '10 July' in Tage seit dem 1. Januar"""
+    # English month mapping for locale-independent parsing
+    MONTH_MAP = {
+        # Full names
+        'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
+        'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12,
+        # Short names
+        'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6, 'jul': 7,
+        'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+    }
+    
     try:
-        # Füge das aktuelle Jahr hinzu
+        # Parse date string (e.g., "15 January" or "10 July")
+        parts = date_str.strip().split()
+        if len(parts) != 2:
+            return None
+            
+        day_str, month_str = parts
+        day = int(day_str)
+        month_name = month_str.lower()
+        
+        if month_name not in MONTH_MAP:
+            return None
+            
+        month = MONTH_MAP[month_name]
+        
+        # Get current year in Berlin timezone
         current_year = get_german_time().year
-        date_obj = datetime.strptime(f"{date_str} {current_year}", "%d %B %Y")
-        jan_first = datetime(current_year, 1, 1)
-        return (date_obj - jan_first).days
-    except:
+        today = get_german_time().date()
+        
+        # Try with current year first
+        candidate_date = datetime(current_year, month, day).date()
+        
+        # Heuristic: adjust year based on how far the date is from today
+        days_diff = (candidate_date - today).days
+        
+        # Key scenario: near year end, dates in early months should be next year
+        # Near year start, dates in late months should be previous year
+        if days_diff < -90:  # More than 90 days in the past, assume next year
+            candidate_date = datetime(current_year + 1, month, day).date()
+            selected_year = current_year + 1
+        elif days_diff > 275:  # More than 275 days in the future, assume previous year
+            candidate_date = datetime(current_year - 1, month, day).date()
+            selected_year = current_year - 1
+        else:
+            selected_year = current_year
+        
+        # Return days since Jan 1 of the selected year (0-based)
+        jan_first = datetime(selected_year, 1, 1).date()
+        return (candidate_date - jan_first).days
+        
+    except (ValueError, IndexError):
         return None
 
 def days_to_date(days):
@@ -1806,8 +1937,8 @@ def extract_last_updated(text):
             return None
         date_part, time_part = m.group(1), m.group(2)
         naive = datetime.strptime(f"{date_part} {time_part}", "%d %B %Y %H:%M")
-        dt_lon = naive.replace(tzinfo=ZoneInfo("Europe/London"))
-        dt_utc = dt_lon.astimezone(ZoneInfo("UTC"))
+        dt_lon = naive.replace(tzinfo=LON)
+        dt_utc = dt_lon.astimezone(UTC)
         return dt_utc
     except Exception:
         return None
@@ -2012,7 +2143,7 @@ def main():
             "from": status.get('last_date')
         })
         status['last_date'] = current_dates['all_other']
-        status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()
+        status['last_check'] = datetime.now().astimezone(UTC).isoformat()
         if current_dates.get('last_updated_utc'):
             status['last_updated_seen_utc'] = current_dates['last_updated_utc']
         # Speichere sofort
@@ -2207,7 +2338,7 @@ Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
                 print("⚠️  Status wurde NICHT aktualisiert (keine Benachrichtigung erfolgreich)")
         else:
             print("✅ Keine Pre-CAS Änderung - alles beim Alten.")
-            status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()  # UTC für Konsistenz
+            status['last_check'] = datetime.now().astimezone(UTC).isoformat()  # UTC für Konsistenz
             
             # Pre-CAS Heartbeat-Logik (analog zur AOA-Heartbeat-Logik)
             try:
