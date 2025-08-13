@@ -1,3 +1,4 @@
+
 # Essential lightweight imports only
 import json
 import os
@@ -75,7 +76,19 @@ _matplotlib_dates = None
 _warnings = None
 _requests_session = None
 
-# (Duplicate lazy imports removed for cleanup)
+# Lazy imports for web scraping - only loaded when actually scraping
+_requests = None
+_beautifulsoup = None
+
+# Lazy imports for notifications - only loaded when sending notifications  
+_smtplib = None
+_email_mime = None
+
+# Lazy imports for math operations - only loaded when doing calculations
+_math = None
+
+# Lazy imports for file operations - only loaded when needed
+_io_bytesio = None
 
 # Fast JSON library when available
 _json_lib = None
@@ -1131,10 +1144,9 @@ def compute_integrated_model_metrics(history):
 
     # 1) Build rows_changes from stream-specific data and sort them
     for ch in history.get(changes_key, []):
-    rows_changes.append({"timestamp": ch["timestamp"], "date": ch["date"]})
+        print(f"🔍 NEU-Regression nutzt: {changes_key} mit {len(rows_changes)} Änderungen")
+        rows_changes.append({"timestamp": ch["timestamp"], "date": ch["date"]})
         rows_all.append({"timestamp": ch["timestamp"], "date": ch["date"]})
-
-    print(f\"🔍 NEU-Regression nutzt: {changes_key} mit {len(rows_changes)} Änderungen\")
     
     rows_changes.sort(key=lambda r: _to_aware_berlin(r["timestamp"]))
 
@@ -1822,9 +1834,11 @@ def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=
         else:
             # Send text message
             url = f"{TELEGRAM_API_BASE}{bot_token}/sendMessage"
-            data = {"chat_id": chat_id, "text": message}
-    if parse_mode:
-        data["parse_mode"] = parse_mode
+            data = {
+                "chat_id": chat_id,
+                "text": message,
+                "parse_mode": parse_mode
+            }
             response = _get_requests().post(url, json=data)
                 
         if response.status_code == 200:
