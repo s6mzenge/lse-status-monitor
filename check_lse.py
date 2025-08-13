@@ -244,8 +244,8 @@ def _diff_days(neu_dt, alt_dt):
     sign = "+" if d > 0 else "−"
     return f" ({sign}{abs(d)} Tag{'e' if abs(d)!=1 else ''} ggü. 🔵)"
 
-def render_compact_bullets(eta25_old_dt, eta25_new_dt,
-                           eta28_old_dt, eta28_new_dt,
+def render_compact_bullets(eta1_old_dt, eta1_new_dt,
+                           eta2_old_dt, eta2_new_dt,
                            r2_old, pts_old, slope_old,
                            r2_new, pts_new, slope_new,
                            hb_count=None):
@@ -263,13 +263,21 @@ def render_compact_bullets(eta25_old_dt, eta25_new_dt,
     parts.append("🎨 <b>Legende:</b> 🔵 ALT (linear) · 🟠 NEU (integriert)")
     parts.append("\n📌 <b>Kurzprognose</b>")
 
-    parts.append("🎯 <b>25 July</b>")
-    parts.append(f"🔵 {line_for(eta25_old_dt)}")
-    parts.append(f"🟠 {line_for(eta25_new_dt)}{_diff_days(eta25_new_dt, eta25_old_dt)}")
+    # Dynamische Targets basierend auf aktuellem Stream
+    if ACTIVE_STREAM == "pre_cas":
+        target_name = TARGET_DATE_PRE_CAS.strftime('%d %B')
+    else:
+        target_name = "25 July"
+    
+    parts.append(f"🎯 <b>{target_name}</b>")
+    parts.append(f"🔵 {line_for(eta1_old_dt)}")
+    parts.append(f"🟠 {line_for(eta1_new_dt)}{_diff_days(eta1_new_dt, eta1_old_dt)}")
 
-    parts.append("\n🎯 <b>28 July</b>")
-    parts.append(f"🔵 {line_for(eta28_old_dt)}")
-    parts.append(f"🟠 {line_for(eta28_new_dt)}{_diff_days(eta28_new_dt, eta28_old_dt)}")
+    # Nur zweites Target anzeigen, wenn nicht Pre-CAS
+    if eta2_old_dt is not None and eta2_new_dt is not None:
+        parts.append("\n🎯 <b>28 July</b>")
+        parts.append(f"🔵 {line_for(eta2_old_dt)}")
+        parts.append(f"🟠 {line_for(eta2_new_dt)}{_diff_days(eta2_new_dt, eta2_old_dt)}")
 
     parts.append("\n📐 <b>Modelle</b>")
     parts.append(f"R²: 🔵 {r2_old:.2f} ({pts_old}) · 🟠 {r2_new:.2f} ({pts_new}){hb_badge}")
@@ -279,7 +287,7 @@ def render_compact_bullets(eta25_old_dt, eta25_new_dt,
 # ====================================================
 
 
-def _iter_observations_or_changes(history: Dict) -> List[Dict]:
+def _iter_observations_or_changes(history: Dict, changes_key: str = "changes") -> List[Dict]:
     """
     Kombiniert observations und changes, normiert Timestamps auf ISO-UTC,
     validiert Daten, sortiert aufsteigend.
@@ -287,7 +295,7 @@ def _iter_observations_or_changes(history: Dict) -> List[Dict]:
     """
     # Pre-allocate for better performance
     observations = history.get("observations", []) or []
-    changes = history.get("changes", []) or []
+    changes = history.get(changes_key, []) or []
     src = observations + changes
     
     if not src:
@@ -328,13 +336,13 @@ def _iter_observations_or_changes(history: Dict) -> List[Dict]:
     out.sort(key=lambda r: r["timestamp"])
     return out
 
-def _iter_changes_only(history: Dict) -> List[Dict]:
+def _iter_changes_only(history: Dict, changes_key: str = "changes") -> List[Dict]:
     """
     Gibt nur echte Änderungen zurück (keine Heartbeats), normiert Timestamps auf ISO-UTC,
     validiert Daten, sortiert aufsteigend.
     Optimized version with shared pattern and timezone objects.
     """
-    src = history.get("changes", []) or []
+    src = history.get(changes_key, []) or []
     if not src:
         return []
     
@@ -394,8 +402,16 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     
     Optimized with caching to avoid redundant calculations.
     """
+    # Stream-spezifische Datenauswahl
+    if ACTIVE_STREAM == "pre_cas":
+        changes_key = "pre_cas_changes"
+    elif ACTIVE_STREAM == "cas":
+        changes_key = "cas_changes"
+    else:
+        changes_key = "changes"
+    
     # Check cache first
-    cache_key = _get_regression_cache_key(history)
+    cache_key = _get_regression_cache_key({changes_key: history.get(changes_key, [])})
     global _regression_cache, _regression_cache_key
     
     if cache_key == _regression_cache_key and _regression_cache:
@@ -403,8 +419,8 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     
     np = _get_numpy()  # Lazy load numpy
     
-    # GEÄNDERT: Verwende nur echte Änderungen, keine Heartbeats
-    source_data = _iter_changes_only(history)
+    # GEÄNDERT: Verwende stream-spezifische Daten
+    source_data = _iter_changes_only(history, changes_key)
     if len(source_data) < REGRESSION_MIN_POINTS:
         return None
     
@@ -775,14 +791,22 @@ def compute_integrated_model_metrics(history):
     from datetime import time as _time
     _np = _get_numpy()  # Lazy load numpy
 
+    # ---- Stream-spezifische Datenauswahl ----
+    if ACTIVE_STREAM == "pre_cas":
+        changes_key = "pre_cas_changes"
+    elif ACTIVE_STREAM == "cas":
+        changes_key = "cas_changes"
+    else:
+        changes_key = "changes"
+
     # ---- Daten aufbereiten: Changes & Heartbeats ----
     # rows_all: changes + filtered heartbeats (at most 1 heartbeat after last change)
     # rows_changes: nur echte Änderungen (für Backtest)
     rows_all = []
     rows_changes = []
 
-    # 1) Build rows_changes from history.changes and sort them
-    for ch in history.get("changes", []):
+    # 1) Build rows_changes from stream-specific data and sort them
+    for ch in history.get(changes_key, []):
         rows_changes.append({"timestamp": ch["timestamp"], "date": ch["date"]})
         rows_all.append({"timestamp": ch["timestamp"], "date": ch["date"]})
     
@@ -861,10 +885,6 @@ def compute_integrated_model_metrics(history):
     hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute) / 60.0
     avg_prog_new = imodel.ts_.b * hours_per_day  # y pro Business-Day
 
-    # Vorhersagen (echte Datumsobjekte)
-    pred25 = imodel.predict_datetime("25 July", tz_out=tz_out)
-    pred28 = imodel.predict_datetime("28 July", tz_out=tz_out)
-
     def _fmt_eta(diff_days, when_dt):
         if when_dt is None:
             return "—"
@@ -872,23 +892,54 @@ def compute_integrated_model_metrics(history):
 
     # Für "in X Tagen" verwenden wir Kalendertage (inkl. WE)
     now_de = _now_berlin()
-    d25 = (pred25["when_point"] - now_de).total_seconds() / 86400.0 if pred25 and pred25.get("when_point") else None
-    d28 = (pred28["when_point"] - now_de).total_seconds() / 86400.0 if pred28 and pred28.get("when_point") else None
 
-    return {
-        "name": "NEU (integriert)",
-        "r2": r2_new,
-        "points": len(rows_all),
-        "speed": f"{avg_prog_new:.1f} Tage/Tag",
-        "speed_val": float(avg_prog_new),                 # numerisch
-        "eta25": _fmt_eta(d25, pred25["when_point"]) if d25 is not None else "—",
-        "eta28": _fmt_eta(d28, pred28["when_point"]) if d28 is not None else "—",
-        "eta25_dt": pred25["when_point"] if pred25 else None,
-        "eta28_dt": pred28["when_point"] if pred28 else None,
-        "heartbeats": heartbeats,
-        # Debug/Transparenz (optional):
-        "params": {"base_frac": base_frac, "base_tau": base_tau, "eff_frac": eff_frac, "eff_tau": eff_tau, "recency_w": w, "h_since_change": h_since, "backtest_score_med_days": best["score"]},
-    }
+    # Vorhersagen (echte Datumsobjekte) - Stream-spezifisch
+    if ACTIVE_STREAM == "pre_cas":
+        target_str = TARGET_DATE_PRE_CAS.strftime('%d %B')
+        pred = imodel.predict_datetime(target_str, tz_out=tz_out)
+        # Eine einzelne Vorhersage für Pre-CAS
+        d_days = (pred["when_point"] - now_de).total_seconds() / 86400.0 if pred and pred.get("when_point") else None
+        
+        return {
+            "name": "NEU (integriert)",
+            "r2": r2_new,
+            "points": len(rows_all),
+            "speed": f"{avg_prog_new:.1f} Tage/Tag",
+            "speed_val": float(avg_prog_new),
+            "eta_pre_cas": _fmt_eta(d_days, pred["when_point"]) if d_days is not None else "—",
+            "eta_pre_cas_dt": pred["when_point"] if pred else None,
+            # Legacy compatibility
+            "eta25": "—",
+            "eta28": "—",
+            "eta25_dt": None,
+            "eta28_dt": None,
+            "heartbeats": heartbeats,
+            # Debug/Transparenz (optional):
+            "params": {"base_frac": base_frac, "base_tau": base_tau, "eff_frac": eff_frac, "eff_tau": eff_tau, "recency_w": w, "h_since_change": h_since, "backtest_score_med_days": best["score"]},
+        }
+    else:
+        # Existing code für AOA mit 25/28 July
+        pred25 = imodel.predict_datetime("25 July", tz_out=tz_out)
+        pred28 = imodel.predict_datetime("28 July", tz_out=tz_out)
+        
+        # Für "in X Tagen" verwenden wir Kalendertage (inkl. WE)
+        d25 = (pred25["when_point"] - now_de).total_seconds() / 86400.0 if pred25 and pred25.get("when_point") else None
+        d28 = (pred28["when_point"] - now_de).total_seconds() / 86400.0 if pred28 and pred28.get("when_point") else None
+
+        return {
+            "name": "NEU (integriert)",
+            "r2": r2_new,
+            "points": len(rows_all),
+            "speed": f"{avg_prog_new:.1f} Tage/Tag",
+            "speed_val": float(avg_prog_new),                 # numerisch
+            "eta25": _fmt_eta(d25, pred25["when_point"]) if d25 is not None else "—",
+            "eta28": _fmt_eta(d28, pred28["when_point"]) if d28 is not None else "—",
+            "eta25_dt": pred25["when_point"] if pred25 else None,
+            "eta28_dt": pred28["when_point"] if pred28 else None,
+            "heartbeats": heartbeats,
+            # Debug/Transparenz (optional):
+            "params": {"base_frac": base_frac, "base_tau": base_tau, "eff_frac": eff_frac, "eff_tau": eff_tau, "recency_w": w, "h_since_change": h_since, "backtest_score_med_days": best["score"]},
+        }
 
 
 def create_enhanced_forecast_text(forecast):
@@ -901,15 +952,29 @@ def create_enhanced_forecast_text(forecast):
     pts_old  = int(forecast.get("data_points", 0))
     slope_old = float(forecast.get("slope", 0.0))
 
-    # Alte ETAs (echte Datumsobjekte, falls vorhanden)
-    def _old_eta_dt(frc, key):
-        try:
-            return frc.get("predictions", {}).get(key, {}).get("date")
-        except Exception:
-            return None
-
-    eta25_old_dt = _old_eta_dt(forecast, "25 July")
-    eta28_old_dt = _old_eta_dt(forecast, "28 July")
+    # Stream-spezifische Target-Logik
+    if ACTIVE_STREAM == "pre_cas":
+        target_date_str = TARGET_DATE_PRE_CAS.strftime('%d %B')
+        # Für Pre-CAS nur ein Target verwenden
+        target1_name = "Pre-CAS Target"
+        def _old_eta_dt(frc, key):
+            try:
+                return frc.get("predictions", {}).get(target_date_str, {}).get("date")
+            except Exception:
+                return None
+        eta1_old_dt = _old_eta_dt(forecast, target_date_str)
+        eta2_old_dt = None
+    else:
+        # AOA: zwei Targets wie bisher
+        target1_name = "25 July"
+        target2_name = "28 July"
+        def _old_eta_dt(frc, key):
+            try:
+                return frc.get("predictions", {}).get(key, {}).get("date")
+            except Exception:
+                return None
+        eta1_old_dt = _old_eta_dt(forecast, "25 July")
+        eta2_old_dt = _old_eta_dt(forecast, "28 July")
 
     # Neue (integrierte) Metriken + echte ETA-Datetimes
     hist = get_history()
@@ -919,18 +984,18 @@ def create_enhanced_forecast_text(forecast):
         print(f"⚠️ Integriertes Modell temporär deaktiviert: {e}")
         new_s = None
 
-
     if not new_s:
         # Fallback: nur ALT kompakt ausgeben
         parts = []
         parts.append("🎨 <b>Legende:</b> 🔵 ALT (linear) · 🟠 NEU (integriert)")
         parts.append("\n📌 <b>Kurzprognose</b>")
-        parts.append("🎯 <b>25 July</b>")
-        parts.append(f"🔵 {_short_date(eta25_old_dt) if eta25_old_dt else '—'}"
-                     f" (in {_cal_days_until(eta25_old_dt)} Tagen)" if eta25_old_dt else "🔵 —")
-        parts.append("\n🎯 <b>28 July</b>")
-        parts.append(f"🔵 {_short_date(eta28_old_dt) if eta28_old_dt else '—'}"
-                     f" (in {_cal_days_until(eta28_old_dt)} Tagen)" if eta28_old_dt else "🔵 —")
+        parts.append(f"🎯 <b>{target1_name}</b>")
+        parts.append(f"🔵 {_short_date(eta1_old_dt) if eta1_old_dt else '—'}"
+                     f" (in {_cal_days_until(eta1_old_dt)} Tagen)" if eta1_old_dt else "🔵 —")
+        if eta2_old_dt is not None:  # Only show second target for AOA
+            parts.append(f"\n🎯 <b>{target2_name}</b>")
+            parts.append(f"🔵 {_short_date(eta2_old_dt) if eta2_old_dt else '—'}"
+                         f" (in {_cal_days_until(eta2_old_dt)} Tagen)" if eta2_old_dt else "🔵 —")
         parts.append("\n📐 <b>Modelle</b>")
         parts.append(f"R²: 🔵 {r2_old:.2f} ({pts_old})")
         parts.append(f"Fortschritt: 🔵 {slope_old:.1f} d/Tag")
@@ -941,13 +1006,18 @@ def create_enhanced_forecast_text(forecast):
     pts_new  = int(new_s["points"])
     slope_new = float(new_s.get("speed_val", 0.0))
     hb_count = int(new_s.get("heartbeats") or 0)
-    eta25_new_dt = new_s.get("eta25_dt")
-    eta28_new_dt = new_s.get("eta28_dt")
+    
+    if ACTIVE_STREAM == "pre_cas":
+        eta1_new_dt = new_s.get("eta_pre_cas_dt")
+        eta2_new_dt = None
+    else:
+        eta1_new_dt = new_s.get("eta25_dt")
+        eta2_new_dt = new_s.get("eta28_dt")
 
     # Kompakte Bullets (Kalendertage!)
     text = render_compact_bullets(
-        eta25_old_dt, eta25_new_dt,
-        eta28_old_dt, eta28_new_dt,
+        eta1_old_dt, eta1_new_dt,
+        eta2_old_dt, eta2_new_dt,
         r2_old, pts_old, slope_old,
         r2_new, pts_new, slope_new,
         hb_count=hb_count
@@ -956,11 +1026,8 @@ def create_enhanced_forecast_text(forecast):
     return "\n" + text
 
 def create_forecast_text(forecast):
-    """Wrapper für Rückwärtskompatibilität - ruft entsprechende Version basierend auf aktivem Stream auf"""
-    if ACTIVE_STREAM == "pre_cas":
-        return create_pre_cas_forecast_text(forecast)
-    else:
-        return create_enhanced_forecast_text(forecast)
+    """Verwendet immer die enhanced Version"""
+    return create_enhanced_forecast_text(forecast)
 
 def create_pre_cas_forecast_text(forecast):
     """Pre-CAS spezifische Prognose mit einzelnem Zieldatum"""
@@ -1101,7 +1168,15 @@ def create_progression_graph(history, current_date, forecast=None):
         return mid
 
     # ---------- Daten sammeln ----------
-    entries = list(_iter_observations_or_changes(history))
+    # Stream-spezifische Datenauswahl
+    if ACTIVE_STREAM == "pre_cas":
+        changes_key = "pre_cas_changes"
+    elif ACTIVE_STREAM == "cas":
+        changes_key = "cas_changes"
+    else:
+        changes_key = "changes"
+    
+    entries = list(_iter_observations_or_changes(history, changes_key))
     if len(entries) < REGRESSION_MIN_POINTS:
         return None
 
