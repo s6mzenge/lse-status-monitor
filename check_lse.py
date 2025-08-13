@@ -731,6 +731,7 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     
     # GEÄNDERT: Verwende stream-spezifische Daten
     source_data = _iter_changes_only(history, changes_key)
+    print(f"🔍 ALT-Regression nutzt: {changes_key} mit {len(source_data)} Änderungen")
     if len(source_data) < REGRESSION_MIN_POINTS:
         return None
     
@@ -1132,7 +1133,8 @@ def compute_integrated_model_metrics(history):
         changes_key = "cas_changes"
     else:
         changes_key = "changes"
-
+    series = history.get(preferred) or history.get("changes", [])
+    
     # ---- Daten aufbereiten: Changes & Heartbeats ----
     # rows_all: changes + filtered heartbeats (at most 1 heartbeat after last change)
     # rows_changes: nur echte Änderungen (für Backtest)
@@ -1141,6 +1143,7 @@ def compute_integrated_model_metrics(history):
 
     # 1) Build rows_changes from stream-specific data and sort them
     for ch in history.get(changes_key, []):
+        print(f"🔍 NEU-Regression nutzt: {changes_key} mit {len(rows_changes)} Änderungen")
         rows_changes.append({"timestamp": ch["timestamp"], "date": ch["date"]})
         rows_all.append({"timestamp": ch["timestamp"], "date": ch["date"]})
     
@@ -1276,7 +1279,7 @@ def compute_integrated_model_metrics(history):
         }
 
 
-def create_enhanced_forecast_text(forecast):
+def create_enhanced_forecast_text(forecast, active_history=None):
     """Kompakte, mobilfreundliche Prognose (ALT vs. NEU) mit Legende und Kalendertagen."""
     if not forecast:
         return "\n📊 Prognose: Noch nicht genügend Daten für eine zuverlässige Vorhersage."
@@ -1311,9 +1314,10 @@ def create_enhanced_forecast_text(forecast):
         eta2_old_dt = _old_eta_dt(forecast, "28 July")
 
     # Neue (integrierte) Metriken + echte ETA-Datetimes
-    hist = get_history()
+    # Neue (integrierte) Metriken + echte ETA-Datetimes
+    hist = active_history if active_history else get_history()
     try:
-        new_s = compute_integrated_model_metrics(hist)
+        new_s = compute_integrated_model_metrics(hist)    
     except Exception as e:
         print(f"⚠️ Integriertes Modell temporär deaktiviert: {e}")
         new_s = None
@@ -1359,9 +1363,9 @@ def create_enhanced_forecast_text(forecast):
 
     return "\n" + text
 
-def create_forecast_text(forecast):
+def create_forecast_text(forecast, active_history=None):
     """Verwendet immer die enhanced Version"""
-    return create_enhanced_forecast_text(forecast)
+    return create_enhanced_forecast_text(forecast, active_history)
 
 def create_pre_cas_forecast_text(forecast):
     """Pre-CAS spezifische Prognose mit einzelnem Zieldatum"""
@@ -2477,7 +2481,7 @@ def main():
             
             # Use ALT/NEU enhanced forecast with fallback for compatibility
             try:
-                forecast_text = create_enhanced_forecast_text(forecast) or ""
+                forecast_text = create_enhanced_forecast_text(forecast, active_history) or ""
             except Exception:
                 try:
                     forecast_text = create_forecast_text(forecast) or ""
@@ -2646,7 +2650,7 @@ Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
             
             # Use ALT/NEU enhanced forecast with fallback for compatibility
             try:
-                forecast_text = create_enhanced_forecast_text(forecast) or ""
+                forecast_text = create_enhanced_forecast_text(forecast, active_history) or ""
             except Exception:
                 try:
                     forecast_text = create_forecast_text(forecast) or ""
