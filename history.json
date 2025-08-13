@@ -78,6 +78,11 @@
       "timestamp": "2025-08-12T10:10:42.858932",
       "date": "06 August",
       "from": "05 August"
+    },
+    {
+      "timestamp": "2025-08-13T15:48:43.060092+00:00",
+      "date": "07 August",
+      "from": "06 August"
     }
   ],
   "observations": [
@@ -99,6 +104,11 @@
     {
       "timestamp": "2025-08-12T14:30:00+00:00",
       "date": "24 July",
+      "kind": "heartbeat"
+    },
+    {
+      "timestamp": "2025-08-13T15:00:00+00:00",
+      "date": "25 July",
       "kind": "heartbeat"
     }
   ]
