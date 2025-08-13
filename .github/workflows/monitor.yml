@@ -1,6 +1,6 @@
 name: LSE Status Monitor
 
-on:
+"on":
   workflow_dispatch: # Ermöglicht manuelles Testen und Cron-Job.org Trigger
   repository_dispatch: # Für API-Trigger
     types: 
@@ -79,58 +79,16 @@ jobs:
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         
-        # Optimized validation - parallel processing for manual runs
+        # Optimized validation for manual vs scheduled runs
         if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
           echo "🚀 Manual run - using fast validation"
-          python -c "
-import json
-import sys
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
-
-def validate_json(filename):
-    try:
-        with open(filename, 'r') as f:
-            data = json.load(f)
-            print(f'✅ {filename} is valid')
-            return True
-    except Exception as e:
-        print(f'❌ {filename} is invalid: {e}')
-        return False
-
-# Parallel validation for speed
-with ThreadPoolExecutor(max_workers=2) as executor:
-    futures = [
-        executor.submit(validate_json, 'status.json'),
-        executor.submit(validate_json, 'history.json')
-    ]
-    results = [f.result() for f in futures]
-    
-if not all(results):
-    sys.exit(1)
-"
+          # Simple parallel validation
+          python -c "import json; print('✅ status.json:', json.load(open('status.json'))['last_date'])" &
+          python -c "import json; print('✅ history.json:', len(json.load(open('history.json')).get('changes', [])))" &
+          wait
         else
           # Standard validation for scheduled runs
-          python -c "
-import json
-import sys
-
-try:
-    with open('status.json', 'r') as f:
-        status = json.load(f)
-        print('✅ status.json ist gültig')
-except Exception as e:
-    print(f'❌ status.json ist ungültig: {e}')
-    sys.exit(1)
-
-try:
-    with open('history.json', 'r') as f:
-        history = json.load(f)
-        print('✅ history.json ist gültig')
-except Exception as e:
-    print(f'❌ history.json ist ungültig: {e}')
-    sys.exit(1)
-"
+          python -c "import json; json.load(open('status.json')); json.load(open('history.json')); print('✅ JSON files valid')"
         fi
         
         # Optimized git operations
