@@ -77,9 +77,7 @@ def _get_requests_session():
     return _requests_session
 
 
-# === Konfiguration und Konstanten (ergänzt) ===
-# Constants now imported from config.py
-# === Business-day helpers (x-axis skips weekends) ===
+# === Business-day helpers ===
 
 def business_days_elapsed(start_dt, end_dt):
     '''
@@ -350,7 +348,6 @@ def render_compact_bullets(eta1_old_dt, eta1_new_dt,
     parts.append(f"Fortschritt: 🔵 {slope_old:.1f} d/Tag · 🟠 {slope_new:.1f} d/Tag")
 
     return "\n".join(parts)
-# ====================================================
 
 
 def _iter_observations_or_changes(history: Dict, changes_key: str = "changes") -> List[Dict]:
