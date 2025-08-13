@@ -955,8 +955,50 @@ def create_enhanced_forecast_text(forecast):
     return "\n" + text
 
 def create_forecast_text(forecast):
-    """Wrapper für Rückwärtskompatibilität - ruft erweiterte Version auf"""
-    return create_enhanced_forecast_text(forecast)
+    """Wrapper für Rückwärtskompatibilität - ruft entsprechende Version basierend auf aktivem Stream auf"""
+    if ACTIVE_STREAM == "pre_cas":
+        return create_pre_cas_forecast_text(forecast)
+    else:
+        return create_enhanced_forecast_text(forecast)
+
+def create_pre_cas_forecast_text(forecast):
+    """Pre-CAS spezifische Prognose mit einzelnem Zieldatum"""
+    if not forecast:
+        return "\n📊 Prognose: Noch nicht genügend Daten für eine zuverlässige Pre-CAS Vorhersage."
+    
+    # Basis Metriken
+    r2 = float(forecast.get("r_squared", 0.0))
+    pts = int(forecast.get("data_points", 0))
+    slope = float(forecast.get("slope", 0.0))
+    
+    parts = []
+    parts.append("\n📊 <b>Pre-CAS Prognose</b>")
+    parts.append(f"🎯 <b>Target:</b> {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)")
+    
+    # Versuche ETA zu berechnen für Pre-CAS Zieldatum
+    try:
+        target_date_str = TARGET_DATE_PRE_CAS.strftime('%d %B')
+        target_days = date_to_days(target_date_str)
+        
+        if target_days and slope > 0:
+            current_predicted_days = forecast.get("current_trend_days", 0)
+            days_until = (target_days - current_predicted_days) / slope
+            
+            if days_until > 0:
+                from datetime import datetime, timedelta
+                eta_date = datetime.now() + timedelta(days=days_until)
+                parts.append(f"📅 <b>ETA:</b> {eta_date.strftime('%d.%m.%Y')} (in ~{days_until:.0f} Tagen)")
+            else:
+                parts.append(f"📅 <b>ETA:</b> Ziel bereits erreicht oder überschritten")
+        else:
+            parts.append(f"📅 <b>ETA:</b> Nicht berechenbar (Trend zu schwach)")
+    except Exception as e:
+        parts.append(f"📅 <b>ETA:</b> Berechnung fehlgeschlagen")
+    
+    parts.append(f"\n📐 <b>Modell:</b> R²={r2:.2f} ({pts} Punkte)")
+    parts.append(f"🚀 <b>Fortschritt:</b> {slope:.1f} Tage/Tag")
+    
+    return "\n".join(parts)
 
 def create_progression_graph(history, current_date, forecast=None):
     """
