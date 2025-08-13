@@ -9,8 +9,8 @@ name: LSE Status Monitor
 
 # Optimized concurrency - allow parallel manual runs, serialize scheduled runs
 concurrency:
-  group: ${{ github.event_name == 'repository_dispatch' && github.run_id || 'lse-monitor' }}
-  cancel-in-progress: ${{ github.event_name == 'repository_dispatch' }}
+  group: ${{ github.event_name != 'schedule' && github.run_id || 'lse-monitor' }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
   check-status:
@@ -20,7 +20,7 @@ jobs:
     - name: Performance monitoring setup
       run: |
         echo "WORKFLOW_START_TIME=$(date +%s)" >> $GITHUB_ENV
-        if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+        if [ "${{ github.event_name }}" != "schedule" ]; then
           echo "🎯 MANUAL RUN - Optimizing for speed (target: <12s total)"
         else
           echo "📊 SCHEDULED RUN - Full functionality enabled"
@@ -30,7 +30,7 @@ jobs:
       with:
         token: ${{ secrets.GITHUB_TOKEN || github.token }}
         # Optimize fetch for manual runs - only need current commit
-        fetch-depth: ${{ github.event_name == 'repository_dispatch' && '1' || '0' }}
+        fetch-depth: ${{ github.event_name != 'schedule' && '1' || '0' }}
     
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -53,7 +53,7 @@ jobs:
           ${{ runner.os }}-python-3.11-
     
     - name: Cache advanced dependencies
-      if: ${{ github.event_name != 'repository_dispatch' }}
+      if: ${{ github.event_name == 'schedule' }}
       uses: actions/cache@v4
       with:
         path: |
@@ -67,10 +67,11 @@ jobs:
     - name: Smart dependency installation
       run: |
         # Export environment variables for the installation script
-        export MANUAL_RUN="${{ github.event_name == 'repository_dispatch' && 'true' || 'false' }}"
-        export INSTALL_ADVANCED="${{ github.event_name != 'repository_dispatch' && 'true' || 'false' }}"
+        export MANUAL_RUN="${{ github.event_name != 'schedule' && 'true' || 'false' }}"
+        export INSTALL_ADVANCED="${{ github.event_name == 'schedule' && 'true' || 'false' }}"
         
         echo "🚀 Smart installation mode:"
+        echo "  Event name: ${{ github.event_name }}"
         echo "  Manual run: $MANUAL_RUN"
         echo "  Install advanced: $INSTALL_ADVANCED"
         
@@ -130,7 +131,7 @@ jobs:
         DURATION=$((END_TIME - START_TIME))
         echo "⏱️ LSE check completed in ${DURATION} seconds"
         
-        if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+        if [ "${{ github.event_name }}" != "schedule" ]; then
           echo "📊 Manual run performance: ${DURATION}s script execution"
           echo "🎯 Optimization target: <5s total script time"
           
@@ -151,7 +152,7 @@ jobs:
         git config --local user.name "GitHub Action"
         
         # Optimized validation for manual vs scheduled runs
-        if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+        if [ "${{ github.event_name }}" != "schedule" ]; then
           echo "🚀 Manual run - using fast validation"
           # Simple parallel validation
           python -c "import json; print('✅ status.json:', json.load(open('status.json'))['last_date'])" &
@@ -163,7 +164,7 @@ jobs:
         fi
         
         # Optimized git operations
-        if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+        if [ "${{ github.event_name }}" != "schedule" ]; then
           echo "🚀 Manual run - optimized git operations"
           # Skip full fetch for manual runs, just sync current state
           git add status.json history.json
@@ -182,8 +183,8 @@ jobs:
           
           # Committe mit timestamp
           TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            git commit -m "Manual update via Telegram [skip ci] - $TIMESTAMP"
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            git commit -m "Manual update via ${{ github.event_name }} [skip ci] - $TIMESTAMP"
           else
             git commit -m "Update status and history [skip ci] - $TIMESTAMP"
           fi
@@ -209,7 +210,7 @@ jobs:
         echo "========================================"
         echo "Total workflow time: ${TOTAL_WORKFLOW_TIME}s"
         
-        if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+        if [ "${{ github.event_name }}" != "schedule" ]; then
           echo "Run type: MANUAL (optimized)"
           if [ $TOTAL_WORKFLOW_TIME -lt 12 ]; then
             echo "🚀 SUCCESS: Under 12s target (${TOTAL_WORKFLOW_TIME}s)"
