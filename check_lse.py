@@ -1,12 +1,8 @@
-import requests
-from bs4 import BeautifulSoup
+# Essential lightweight imports only
 import json
 import os
 import re
-import smtplib
-from email.mime.text import MIMEText
 from datetime import datetime, timedelta
-import math
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -15,7 +11,14 @@ from typing import Dict, List, Optional
 from collections import defaultdict
 import time
 import sys
-from io import BytesIO
+
+# Lazy imports - loaded only when needed
+_requests = None
+_beautifulsoup = None
+_smtplib = None
+_email_mime = None
+_math = None
+_io_bytesio = None
 
 # Import configuration
 from config import (
@@ -25,12 +28,159 @@ from config import (
     TARGET_DATES_MAP, LON, UK_HOLIDAYS
 )
 
+# Precompiled regex patterns for better performance
+DATE_PATTERN = re.compile(r'^\d{1,2}\s+\w+$')
+LAST_UPDATED_PATTERN = re.compile(r'Last\s+updated:\s*(\d{1,2}\s+\w+\s+\d{4}),\s*(\d{1,2}:\d{2})', re.IGNORECASE)
+ALL_OTHER_PATTERN = re.compile(r'all other graduate applicants', re.IGNORECASE)
+
+# Date extraction patterns for web scraping
+FULL_DATE_PATTERN = re.compile(r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))\b', re.IGNORECASE)
+MONTH_DATE_PATTERN = re.compile(r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))', re.IGNORECASE)
+
+# AOA patterns
+AOA_PATTERN1 = re.compile(r'All\s+other\s+graduate\s+applicants.*?applications\s+received\s+by.*?will\s+receive\s+their\s+decision.*?on\s+(\d{1,2}\s+\w+)', re.IGNORECASE | re.DOTALL)
+AOA_PATTERN2 = re.compile(r'decisions\s+for\s+applications\s+will\s+be\s+released\s+from\s+(\d{1,2}\s+\w+)', re.IGNORECASE)
+AOA_DATE_PATTERN = re.compile(r'(\d{1,2}\s+\w+)', re.IGNORECASE)
+AOA_PATTERN3 = re.compile(r'decisions\s+will\s+be\s+released\s+on\s+(\d{1,2}\s+\w+)', re.IGNORECASE)
+
+# Pre-CAS patterns
+PRE_CAS_PATTERN1 = re.compile(r'issuing\s+Pre-CAS.*?criteria\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))', re.IGNORECASE | re.DOTALL)
+PRE_CAS_PATTERN2 = re.compile(r'issuing\s+Pre-CAS\s+for\s+offer\s+holders.*?criteria\s+on:?\s*([^.]*?)(?:Please|We\s+are|$)', re.IGNORECASE)
+PRE_CAS_PATTERN3 = re.compile(r'issuing\s+Pre-CAS.*?(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))', re.IGNORECASE)
+PRE_CAS_PATTERN = re.compile(r'Pre-CAS\s+applications.*?decisions\s+will\s+be\s+released\s+on\s+(\d{1,2}\s+\w+)', re.IGNORECASE | re.DOTALL)
+
+# CAS pattern
+CAS_PATTERN = re.compile(r'Confirmation\s+of\s+Acceptance.*?(\d{1,2}\s+\w+)', re.IGNORECASE | re.DOTALL)
+
+# Fallback patterns
+ALL_OTHER_FALLBACK_PATTERN = re.compile(r'all other graduate applicants[^0-9]*?((?:\d{1,2}\s+\w+\s*)+)', re.IGNORECASE | re.DOTALL)
+CAS_EXTRACTION_PATTERN = re.compile(r'issuing\s+CAS\s+to.*?Pre-CAS\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))', re.IGNORECASE | re.DOTALL)
+
 # Lazy imports for heavy dependencies - only loaded when needed
 _numpy = None
 _matplotlib_plt = None
 _matplotlib_dates = None
 _warnings = None
 _requests_session = None
+
+# Lazy imports for web scraping - only loaded when actually scraping
+_requests = None
+_beautifulsoup = None
+
+# Lazy imports for notifications - only loaded when sending notifications  
+_smtplib = None
+_email_mime = None
+
+# Lazy imports for math operations - only loaded when doing calculations
+_math = None
+
+# Lazy imports for file operations - only loaded when needed
+_io_bytesio = None
+
+# Fast JSON library when available
+_json_lib = None
+
+def _get_fast_json():
+    """Get the fastest available JSON library"""
+    global _json_lib
+    if _json_lib is None:
+        try:
+            # Try to use orjson for better performance
+            import orjson
+            _json_lib = 'orjson'
+            return orjson
+        except ImportError:
+            try:
+                # Try ujson as second choice
+                import ujson
+                _json_lib = 'ujson'
+                return ujson
+            except ImportError:
+                # Fall back to standard json
+                import json
+                _json_lib = 'json'
+                return json
+    
+    # Return cached library
+    if _json_lib == 'orjson':
+        import orjson
+        return orjson
+    elif _json_lib == 'ujson':
+        import ujson
+        return ujson
+    else:
+        import json
+        return json
+
+def _fast_json_loads(text):
+    """Fast JSON loading with library-specific handling"""
+    json_lib = _get_fast_json()
+    if _json_lib == 'orjson':
+        return json_lib.loads(text)
+    elif _json_lib == 'ujson':
+        return json_lib.loads(text)
+    else:
+        return json_lib.loads(text)
+
+def _fast_json_dumps(data, **kwargs):
+    """Fast JSON dumping with library-specific handling"""
+    json_lib = _get_fast_json()
+    if _json_lib == 'orjson':
+        # orjson doesn't support indent in dumps, fall back to standard json for pretty printing
+        if kwargs.get('indent'):
+            import json
+            return json.dumps(data, **kwargs)
+        return json_lib.dumps(data).decode('utf-8')
+    elif _json_lib == 'ujson':
+        # ujson doesn't support all options, fall back for complex cases
+        if kwargs.get('indent'):
+            import json
+            return json.dumps(data, **kwargs)
+        return json_lib.dumps(data)
+    else:
+        return json_lib.dumps(data, **kwargs)
+
+def _get_requests():
+    """Lazy load requests module"""
+    global _requests
+    if _requests is None:
+        import requests
+        _requests = requests
+    return _requests
+
+def _get_beautifulsoup():
+    """Lazy load BeautifulSoup"""
+    global _beautifulsoup
+    if _beautifulsoup is None:
+        from bs4 import BeautifulSoup
+        _beautifulsoup = BeautifulSoup
+    return _beautifulsoup
+
+def _get_email_modules():
+    """Lazy load email modules"""
+    global _smtplib, _email_mime
+    if _smtplib is None or _email_mime is None:
+        import smtplib
+        from email.mime.text import MIMEText
+        _smtplib = smtplib
+        _email_mime = MIMEText
+    return _smtplib, _email_mime
+
+def _get_math():
+    """Lazy load math module"""
+    global _math
+    if _math is None:
+        import math
+        _math = math
+    return _math
+
+def _get_io_bytesio():
+    """Lazy load BytesIO"""
+    global _io_bytesio
+    if _io_bytesio is None:
+        from io import BytesIO
+        _io_bytesio = BytesIO
+    return _io_bytesio
 
 def _get_numpy():
     global _numpy
@@ -55,7 +205,7 @@ def _get_requests_session():
     """Get a reusable requests session with optimized settings"""
     global _requests_session
     if _requests_session is None:
-        import requests
+        requests = _get_requests()
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
         
@@ -194,9 +344,63 @@ def _file_lock(filepath):
             except (OSError, FileNotFoundError):
                 pass
 
-# File cache to reduce redundant I/O operations
+# Enhanced caching system for maximum performance
 _file_cache = {}
 _cache_timestamps = {}
+_cache_stats = {'hits': 0, 'misses': 0}
+
+# Add memory-based cache for computation results
+_computation_cache = {}
+_max_cache_size = 100  # Limit cache size to prevent memory issues
+
+def _get_cache_stats():
+    """Get cache performance statistics"""
+    total = _cache_stats['hits'] + _cache_stats['misses']
+    hit_rate = (_cache_stats['hits'] / total * 100) if total > 0 else 0
+    return f"Cache: {_cache_stats['hits']} hits, {_cache_stats['misses']} misses ({hit_rate:.1f}% hit rate)"
+
+def _clear_old_cache_entries():
+    """Clear old cache entries to prevent memory bloat"""
+    if len(_computation_cache) > _max_cache_size:
+        # Remove oldest 20% of entries
+        items = list(_computation_cache.items())
+        items.sort(key=lambda x: x[1].get('timestamp', 0))
+        to_remove = len(items) // 5
+        for key, _ in items[:to_remove]:
+            del _computation_cache[key]
+
+def _memoize(func):
+    """Decorator for memoizing expensive function calls"""
+    import functools
+    import hashlib
+    
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # Create cache key from function name and arguments
+        key_data = f"{func.__name__}:{str(args)}:{str(sorted(kwargs.items()))}"
+        cache_key = hashlib.md5(key_data.encode()).hexdigest()
+        
+        # Check cache
+        if cache_key in _computation_cache:
+            _cache_stats['hits'] += 1
+            return _computation_cache[cache_key]['result']
+        
+        # Compute result
+        _cache_stats['misses'] += 1
+        result = func(*args, **kwargs)
+        
+        # Clear old entries if needed
+        _clear_old_cache_entries()
+        
+        # Store in cache
+        _computation_cache[cache_key] = {
+            'result': result,
+            'timestamp': time.time()
+        }
+        
+        return result
+    
+    return wrapper
 
 def _get_file_cache_key(filepath):
     """Get cache key for file operations"""
@@ -212,11 +416,13 @@ def _cached_json_load(filepath):
     cache_key = _get_file_cache_key(filepath)
     
     if cache_key in _file_cache:
+        _cache_stats['hits'] += 1
         return _file_cache[cache_key].copy()  # Return copy to avoid mutations
     
+    _cache_stats['misses'] += 1
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+            data = _fast_json_loads(f.read())
             _file_cache[cache_key] = data
             return data.copy()
     except (FileNotFoundError, json.JSONDecodeError):
@@ -234,7 +440,7 @@ def _cached_json_dump(data, filepath):
     try:
         temp_fd, temp_path = tempfile.mkstemp(dir=dir_path, suffix='.tmp')
         with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
+            f.write(_fast_json_dumps(data, indent=2))
         temp_fd = None  # File is now closed
         
         # Atomic replace
@@ -263,9 +469,42 @@ def _cached_json_dump(data, filepath):
 def get_advanced_regression_status():
     return _check_advanced_regression_available()
 
+def get_performance_stats():
+    """Get comprehensive performance statistics"""
+    stats = {
+        'cache_stats': _get_cache_stats() if 'hits' in _cache_stats else "Cache not used yet",
+        'lazy_modules_loaded': {
+            'numpy': _numpy is not None,
+            'matplotlib': _matplotlib_plt is not None,
+            'scipy': _scipy_stats is not None,
+            'sklearn': _sklearn_modules is not None,
+            'requests': _requests is not None,
+            'beautifulsoup': _beautifulsoup is not None,
+            'email': _smtplib is not None,
+            'math': _math is not None,
+        },
+        'json_library': _json_lib or 'not initialized',
+        'computation_cache_size': len(_computation_cache),
+        'file_cache_size': len(_file_cache),
+    }
+    return stats
+
+# Apply memoization to frequently called functions for better performance
+# This must be done after the functions are defined
+business_days_elapsed = _memoize(business_days_elapsed)
+
+# Performance micro-optimizations
+# Pre-allocate common objects to avoid repeated allocations
+_EMPTY_DICT = {}
+_EMPTY_LIST = []
+
+# Common timezone objects to avoid repeated lookups
+_UTC_TZ = ZoneInfo("UTC")
+_BER_TZ = ZoneInfo("Europe/Berlin")
+
 # Timezone constants imported from config - use those consistently
-UTC = ZoneInfo("UTC")
-BER = ZoneInfo("Europe/Berlin")
+UTC = _UTC_TZ
+BER = _BER_TZ
 
 def get_german_time():
     return datetime.now(BER)
@@ -363,10 +602,7 @@ def _iter_observations_or_changes(history: Dict, changes_key: str = "changes") -
     
     if not src:
         return []
-    
-    # Pre-compile regex for better performance
-    date_pattern = re.compile(r'^\d{1,2}\s+\w+$')
-    
+    # Use precompiled regex for better performance
     out: List[Dict] = []
     utc_tz = UTC
     
@@ -378,8 +614,8 @@ def _iter_observations_or_changes(history: Dict, changes_key: str = "changes") -
         ts = e.get("timestamp")
         dt = e.get("date")
         
-        # Early validation
-        if not ts or not dt or not date_pattern.match(str(dt)):
+        # Early validation using precompiled pattern
+        if not ts or not dt or not DATE_PATTERN.match(str(dt)):
             continue
             
         try:
@@ -409,8 +645,7 @@ def _iter_changes_only(history: Dict, changes_key: str = "changes") -> List[Dict
     if not src:
         return []
     
-    # Pre-compile regex and timezone for better performance
-    date_pattern = re.compile(r'^\d{1,2}\s+\w+$')
+    # Use precompiled regex and timezone for better performance
     utc_tz = UTC
     
     out: List[Dict] = []
@@ -423,7 +658,7 @@ def _iter_changes_only(history: Dict, changes_key: str = "changes") -> List[Dict
         ts = e.get("timestamp")
         dt = e.get("date")
         
-        if not ts or not dt or not date_pattern.match(str(dt)):
+        if not ts or not dt or not DATE_PATTERN.match(str(dt)):
             continue
             
         try:
@@ -792,7 +1027,7 @@ def _recency_weight(hours_since_change, tau_hours):
     # Center leicht unter tau_hours, damit Umschalten nicht zu spät kommt
     denom = max(1e-6, 0.25 * tau_hours)
     z = (hours_since_change - 0.75 * tau_hours) / denom
-    return 1.0 / (1.0 + math.exp(-z))  # Sigmoid
+    return 1.0 / (1.0 + _get_math().exp(-z))  # Sigmoid
 
 def _subset_rows_until(rows_all, t_cut):
     """Alle Punkte (inkl. Heartbeats) bis < t_cut."""
@@ -1488,7 +1723,7 @@ def create_progression_graph(history, current_date, forecast=None):
 
     # ---------- Export ----------
     try:
-        buf = BytesIO()
+        buf = _get_io_bytesio()()
         plt.savefig(buf, format="png", dpi=110, bbox_inches="tight")
         buf.seek(0)
         plt.close()
@@ -1541,7 +1776,7 @@ def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=
                 'caption': caption or '',
                 'parse_mode': parse_mode
             }
-            response = requests.post(url, files=files, data=data)
+            response = _get_requests().post(url, files=files, data=data)
         else:
             # Send text message
             url = f"{TELEGRAM_API_BASE}{bot_token}/sendMessage"
@@ -1550,7 +1785,7 @@ def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=
                 "text": message,
                 "parse_mode": parse_mode
             }
-            response = requests.post(url, json=data)
+            response = _get_requests().post(url, json=data)
         
         if response.status_code == 200:
             print(f"✅ Telegram-Nachricht an {chat_type} gesendet!")
@@ -1869,8 +2104,7 @@ def extract_all_other_date(text):
     """Extrahiert nur das Datum für 'all other graduate applicants'"""
     text = ' '.join(text.split())
     
-    date_pattern = r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))\b'
-    all_dates = re.findall(date_pattern, text, re.IGNORECASE)
+    all_dates = FULL_DATE_PATTERN.findall(text)
     
     if len(all_dates) >= 3:
         return all_dates[-1].strip()
@@ -1882,8 +2116,7 @@ def extract_all_other_date(text):
 def extract_pre_cas_date(text):
     """Extrahiert das Datum für Pre-CAS"""
     # Pattern 1: Suche nach Pre-CAS mit Datum in der gleichen Zeile
-    pattern1 = r'issuing\s+Pre-CAS.*?criteria\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-    match = re.search(pattern1, text, re.IGNORECASE | re.DOTALL)
+    match = PRE_CAS_PATTERN1.search(text)
     if match:
         return match.group(1).strip()
     
@@ -1892,19 +2125,16 @@ def extract_pre_cas_date(text):
     clean_text = ' '.join(text.split())
     
     # Suche nach Pre-CAS und dem nächsten Datum danach
-    pattern2 = r'issuing\s+Pre-CAS\s+for\s+offer\s+holders.*?criteria\s+on:?\s*([^.]*?)(?:Please|We\s+are|$)'
-    match = re.search(pattern2, clean_text, re.IGNORECASE)
+    match = PRE_CAS_PATTERN2.search(clean_text)
     if match:
         potential_text = match.group(1)
         # Extrahiere das erste Datum aus diesem Bereich
-        date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-        date_match = re.search(date_pattern, potential_text, re.IGNORECASE)
+        date_match = MONTH_DATE_PATTERN.search(potential_text)
         if date_match:
             return date_match.group(1).strip()
     
     # Pattern 3: Allgemeinere Suche - Pre-CAS gefolgt von einem Datum innerhalb von ~100 Zeichen
-    pattern3 = r'Pre-CAS[^0-9]{0,100}?(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-    match = re.search(pattern3, clean_text, re.IGNORECASE)
+    match = PRE_CAS_PATTERN3.search(clean_text)
     if match:
         return match.group(1).strip()
     
@@ -1913,15 +2143,14 @@ def extract_pre_cas_date(text):
 def extract_cas_date(text):
     """Extrahiert das Datum für CAS"""
     # Suche nach CAS Pattern (aber nicht Pre-CAS)
-    pattern = r'issuing\s+CAS\s+to.*?Pre-CAS\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
-    match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+    match = CAS_EXTRACTION_PATTERN.search(text)
     if match:
         return match.group(1).strip()
     return None
 def extract_last_updated(text):
     """Extrahiert 'Last updated' als UTC-datetime; None wenn nicht gefunden."""
     try:
-        m = re.search(r'Last\s+updated:\s*(\d{1,2}\s+\w+\s+\d{4}),\s*(\d{1,2}:\d{2})', text, re.IGNORECASE)
+        m = LAST_UPDATED_PATTERN.search(text)
         if not m:
             return None
         date_part, time_part = m.group(1), m.group(2)
@@ -1941,7 +2170,7 @@ def fetch_processing_dates():
         response = session.get(LSE_URL, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         
-        soup = BeautifulSoup(response.text, 'html.parser')
+        soup = _get_beautifulsoup()(response.text, 'html.parser')
         full_text = soup.get_text()
         # Parse Last updated
         last_up_dt = extract_last_updated(full_text)
@@ -1955,7 +2184,7 @@ def fetch_processing_dates():
         }
         
         # Suche nach "all other graduate applicants" (existierende Logik)
-        for element in soup.find_all(string=re.compile(r'all other graduate applicants', re.IGNORECASE)):
+        for element in soup.find_all(string=ALL_OTHER_PATTERN):
             parent = element.parent
             while parent and parent.name not in ['td', 'th', 'tr']:
                 parent = parent.parent
@@ -1986,8 +2215,7 @@ def fetch_processing_dates():
         
         # Fallback für all other
         if not dates['all_other']:
-            pattern = r'all other graduate applicants[^0-9]*?((?:\d{1,2}\s+\w+\s*)+)'
-            match = re.search(pattern, full_text, re.IGNORECASE | re.DOTALL)
+            match = ALL_OTHER_FALLBACK_PATTERN.search(full_text)
             
             if match:
                 dates_text = match.group(1)
@@ -2007,10 +2235,10 @@ def fetch_processing_dates():
         
         return dates
         
-    except requests.exceptions.Timeout:
+    except _get_requests().exceptions.Timeout:
         print("❌ Timeout beim Abrufen der Webseite")
         return {'all_other': None, 'pre_cas': None, 'cas': None}
-    except requests.exceptions.RequestException as e:
+    except _get_requests().exceptions.RequestException as e:
         print(f"❌ Netzwerkfehler beim Abrufen der Webseite: {e}")
         return {'all_other': None, 'pre_cas': None, 'cas': None}
     except Exception as e:
@@ -2034,6 +2262,7 @@ def send_gmail(subject, body, recipients):
     
     success_count = 0
     for recipient in recipients:
+        smtplib, MIMEText = _get_email_modules()
         msg = MIMEText(body)
         msg['Subject'] = subject
         msg['From'] = gmail_user
