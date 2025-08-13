@@ -1776,7 +1776,7 @@ def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=
                 'caption': caption or '',
                 'parse_mode': parse_mode
             }
-            response = _get_requests().post(url, files=files, data=data)
+            response = _get_requests_session().post(url, files=files, data=data)
         else:
             # Send text message
             url = f"{TELEGRAM_API_BASE}{bot_token}/sendMessage"
@@ -1785,7 +1785,7 @@ def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=
                 "text": message,
                 "parse_mode": parse_mode
             }
-            response = _get_requests().post(url, json=data)
+            response = _get_requests_session().post(url, json=data)
         
         if response.status_code == 200:
             print(f"✅ Telegram-Nachricht an {chat_type} gesendet!")
@@ -2165,7 +2165,13 @@ def extract_last_updated(text):
 def fetch_processing_dates():
     """Holt alle Verarbeitungsdaten von der LSE-Webseite"""
     try:
-        print("Rufe LSE-Webseite ab...")
+        # Optimierte Ausgabe für manuelle Runs
+        IS_MANUAL = os.environ.get('GITHUB_EVENT_NAME') == 'repository_dispatch'
+        if IS_MANUAL:
+            print("⚡ Fetching LSE data (optimized)...")
+        else:
+            print("Rufe LSE-Webseite ab...")
+        
         session = _get_requests_session()
         response = session.get(LSE_URL, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
@@ -2299,25 +2305,46 @@ def main():
     # Prüfe ob manueller Run via Telegram
     IS_MANUAL = os.environ.get('GITHUB_EVENT_NAME') == 'repository_dispatch'
     if IS_MANUAL:
-        print("🔄 MANUELLER CHECK VIA TELEGRAM")
+        print("🔄 MANUELLER CHECK VIA TELEGRAM - FAST EXECUTION MODE")
+        print("⚡ Optimized execution for manual runs")
     
     print("="*50)
     
-    # Lade E-Mail-Adressen
-    email_main = os.environ.get('EMAIL_TO', '')
-    email_2 = os.environ.get('EMAIL_TO_2', '')
-    email_3 = os.environ.get('EMAIL_TO_3', '')
-    
-    # Kategorisiere Empfänger
-    always_notify = [email for email in [email_main, email_2] if email and 'engelquast' not in email.lower()]
-    conditional_notify = [email for email in [email_main, email_2, email_3] if email and 'engelquast' in email.lower()]
-    
-    print(f"Immer benachrichtigen: {', '.join(always_notify)}")
-    print(f"Nur bei 25/28 July: {', '.join(conditional_notify)}")
-    
-    # Lade Status und Historie mit Fehlerbehandlung
-    status = load_status()
-    history = load_history()
+    # Fast-path für manuelle Runs: Parallele Datenverarbeitung
+    if IS_MANUAL:
+        # Optimierte E-Mail-Adressen-Verarbeitung
+        email_main = os.environ.get('EMAIL_TO', '')
+        email_2 = os.environ.get('EMAIL_TO_2', '')
+        email_3 = os.environ.get('EMAIL_TO_3', '')
+        
+        # Schnelle Kategorisierung
+        always_notify = [email for email in [email_main, email_2] if email and 'engelquast' not in email.lower()]
+        conditional_notify = [email for email in [email_main, email_2, email_3] if email and 'engelquast' in email.lower()]
+        
+        print(f"📧 Email config: {len(always_notify)} primary, {len(conditional_notify)} conditional")
+        
+        # Parallele Datenladung für manuelle Runs
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            status_future = executor.submit(load_status)
+            history_future = executor.submit(load_history)
+            
+            status = status_future.result()
+            history = history_future.result()
+    else:
+        # Standard-Verarbeitung für geplante Runs
+        email_main = os.environ.get('EMAIL_TO', '')
+        email_2 = os.environ.get('EMAIL_TO_2', '')
+        email_3 = os.environ.get('EMAIL_TO_3', '')
+        
+        always_notify = [email for email in [email_main, email_2] if email and 'engelquast' not in email.lower()]
+        conditional_notify = [email for email in [email_main, email_2, email_3] if email and 'engelquast' in email.lower()]
+        
+        print(f"Immer benachrichtigen: {', '.join(always_notify)}")
+        print(f"Nur bei 25/28 July: {', '.join(conditional_notify)}")
+        
+        status = load_status()
+        history = load_history()
     print(f"Letztes bekanntes Datum: {status['last_date']}")
     print(f"Letztes Pre-CAS: {status.get('pre_cas_date') or 'Noch nicht getrackt'}")
     print(f"Letztes CAS: {status.get('cas_date') or 'Noch nicht getrackt'}")

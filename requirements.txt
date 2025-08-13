@@ -1,0 +1,12 @@
+# Core dependencies for LSE Status Monitor
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+# Data analysis and visualization (optional, heavy dependencies)
+numpy>=1.24.0
+matplotlib>=3.7.0
+scipy>=1.10.0
+scikit-learn>=1.3.0
+
+# Timezone support for older Python versions
+backports.zoneinfo>=0.2.1; python_version<"3.9"
