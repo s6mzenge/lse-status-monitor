@@ -1513,6 +1513,38 @@ def send_telegram_papa(old_date, new_date):
     message = f"LSE-Datums-Update!\n\nVom: {old_date}\nAuf: {new_date}"
     return send_telegram_message(message, 'papa')
 
+def send_single_main_message(text, active_history=None, current_date=None, forecast=None):
+    """
+    Sends exactly one message to the main chat.
+    If graph can be generated, sends photo with text as caption.
+    Otherwise, sends text message.
+    
+    Args:
+        text: Message text to send
+        active_history: History data for graph generation (optional)
+        current_date: Current date for graph generation (optional)
+        forecast: Forecast data for graph generation (optional)
+    
+    Returns:
+        bool: True if message was sent successfully
+    """
+    # Try to create graph if we have the necessary data
+    graph_buffer = None
+    if active_history is not None and current_date is not None:
+        try:
+            graph_buffer = create_progression_graph(active_history, current_date, forecast)
+        except Exception as e:
+            print(f"⚠️ Could not create graph: {e}")
+            graph_buffer = None
+    
+    # Send message
+    if graph_buffer:
+        # Send photo with text as caption
+        return send_telegram_photo(graph_buffer, text)
+    else:
+        # Send text message
+        return send_telegram(text)
+
 
 def migrate_json_files():
     """Migriert die JSON-Dateien zur neuen Struktur ohne Datenverlust"""
@@ -1997,35 +2029,6 @@ def main():
     if current_date:
         print(f"Aktuelles Datum für '{ACTIVE_STREAM}': {current_date}")
         
-        # Bei manuellem Check immer Status senden (für aktiven Pre-CAS Stream)
-        if IS_MANUAL:
-            # Berechne aktuellen Trend und erstelle vollständige Prognose basierend auf Pre-CAS
-            active_history = {"changes": history.get('pre_cas_changes', [])}
-            forecast = calculate_regression_forecast(active_history)
-            forecast_text = create_forecast_text(forecast) or ""
-            
-            telegram_msg = f"""<b>📊 LSE Status Check Ergebnis</b>
-
-<b>Active stream:</b> {ACTIVE_STREAM}
-<b>Target:</b> {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)
-<b>Aktuelles Datum:</b> {current_date}
-<b>Letzter Stand:</b> {status.get('pre_cas_date')}
-<b>Status:</b> {"🔔 ÄNDERUNG ERKANNT!" if current_date != status.get('pre_cas_date') else "✅ Keine Änderung"}
-
-<b>Zeitpunkt:</b> {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
-{forecast_text}
-
-<a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
-            
-            # Sende Text-Nachricht
-            send_telegram(telegram_msg)
-            
-            # Erstelle und sende Graph
-            graph_buffer = create_progression_graph(active_history, current_date, forecast)
-            if graph_buffer:
-                graph_caption = f"📈 Progression der LSE Verarbeitungsdaten (Pre-CAS)\nAktuell: {current_date}"
-                send_telegram_photo(graph_buffer, graph_caption)
-        
         # WICHTIG: Prüfe ob sich das Pre-CAS Datum wirklich geändert hat
         if current_date != status.get('pre_cas_date'):
             print("\n🔔 PRE-CAS ÄNDERUNG ERKANNT!")
@@ -2103,13 +2106,8 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 
 <a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
                 
-                send_telegram(telegram_msg)
-                
-                # Sende Graph als separates Bild
-                graph_buffer = create_progression_graph(active_history, current_date, forecast)
-                if graph_buffer:
-                    graph_caption = f"📈 Pre-CAS Progression Update\nNeues Datum: {current_date}"
-                    send_telegram_photo(graph_buffer, graph_caption)
+                # Send single consolidated message (text + graph if available)
+                send_single_main_message(telegram_msg, active_history, current_date, forecast)
             else:
                 # Manueller Check: Spezielle Nachricht bei Änderung mit Graph
                 telegram_msg = f"""<b>🚨 PRE-CAS ÄNDERUNG GEFUNDEN!</b>
@@ -2127,13 +2125,8 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 
 <a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
                 
-                send_telegram(telegram_msg)
-                
-                # Sende Graph
-                graph_buffer = create_progression_graph(active_history, current_date, forecast)
-                if graph_buffer:
-                    graph_caption = f"📈 Pre-CAS Änderung erkannt!\nVon {status.get('pre_cas_date')} auf {current_date}"
-                    send_telegram_photo(graph_buffer, graph_caption)
+                # Send single consolidated message (text + graph if available)
+                send_single_main_message(telegram_msg, active_history, current_date, forecast)
             
             # Sende E-Mails
             emails_sent = False
@@ -2159,13 +2152,8 @@ Target: {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)
 Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
 
 <a href="{LSE_URL}">📄 Jetzt zur LSE Webseite</a>"""
-                send_telegram(telegram_special)
-                
-                # Sende speziellen Graph für Zieldatum
-                graph_buffer = create_progression_graph(active_history, current_date, forecast)
-                if graph_buffer:
-                    graph_caption = f"🎯 PRE-CAS ZIELDATUM ERREICHT: {current_date}!"
-                    send_telegram_photo(graph_buffer, graph_caption)
+                # Send single consolidated message (text + graph if available)
+                send_single_main_message(telegram_special, active_history, current_date, forecast)
             
             if emails_sent or os.environ.get('TELEGRAM_BOT_TOKEN'):
                 # KRITISCH: Update Pre-CAS Status IMMER nach einer erkannten Änderung
@@ -2209,22 +2197,22 @@ Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
             print("✅ Keine Pre-CAS Änderung - alles beim Alten.")
             status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()  # UTC für Konsistenz
             
-            # Send structured manual no-change status message
-            if IS_MANUAL:
-                # Calculate forecast for status message (same as change branch)
-                active_history = {"changes": history.get('pre_cas_changes', [])}
-                forecast = calculate_regression_forecast(active_history)
-                
-                # Use ALT/NEU enhanced forecast with fallback for compatibility
+            # Calculate forecast for status message (for both manual and automatic)
+            active_history = {"changes": history.get('pre_cas_changes', [])}
+            forecast = calculate_regression_forecast(active_history)
+            
+            # Use ALT/NEU enhanced forecast with fallback for compatibility
+            try:
+                forecast_text = create_enhanced_forecast_text(forecast) or ""
+            except Exception:
                 try:
-                    forecast_text = create_enhanced_forecast_text(forecast) or ""
+                    forecast_text = create_forecast_text(forecast) or ""
                 except Exception:
-                    try:
-                        forecast_text = create_forecast_text(forecast) or ""
-                    except Exception:
-                        forecast_text = ""
-                
-                # Build structured status message
+                    forecast_text = ""
+            
+            # Send structured no-change status message 
+            if IS_MANUAL:
+                # Manual runs: send comprehensive status
                 telegram_msg = f"""<b>📊 LSE Status Check Ergebnis</b>
 
 <b>Aktuelles Datum:</b> {status.get('pre_cas_date')}
@@ -2236,7 +2224,9 @@ Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
 
 <a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
                 
-                send_telegram(telegram_msg)
+                # Send single consolidated message (text + graph if available)
+                send_single_main_message(telegram_msg, active_history, current_date, forecast)
+            # Note: Scheduled runs with no change don't send notifications to main chat
             
             # Speichere auch bei keiner Änderung den aktualisierten Timestamp
             save_status(status)
@@ -2257,7 +2247,8 @@ Bitte prüfe die Webseite manuell.
 
 <a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
             
-            send_telegram(telegram_error)
+            # Send single error message (no graph for error case)
+            send_single_main_message(telegram_error)
         
         # Sende Warnung per E-Mail
         subject = "LSE Pre-CAS Monitor WARNUNG: Datum nicht gefunden"
@@ -2295,7 +2286,8 @@ Mögliche Gründe:
 
 <a href="{LSE_URL}">📄 Webseite manuell prüfen</a>"""
             
-            send_telegram(telegram_warning)
+            # Send single error message (no graph for error case)
+            send_single_main_message(telegram_warning)
         
         # Speichere trotzdem den Status (mit last_check Update)
         status['last_check'] = datetime.now().astimezone(ZoneInfo('UTC')).isoformat()
