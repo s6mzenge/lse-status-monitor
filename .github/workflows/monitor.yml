@@ -7,29 +7,41 @@ on:
       - check-lse-status
       - check-lse-status-manual # Spezielle manuelle Trigger vom Telegram Bot
 
-# Verhindert parallele Ausführungen
+# Optimized concurrency - allow parallel manual runs, serialize scheduled runs
 concurrency:
-  group: lse-monitor
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'repository_dispatch' && github.run_id || 'lse-monitor' }}
+  cancel-in-progress: ${{ github.event_name == 'repository_dispatch' }}
 
 jobs:
   check-status:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
       with:
         token: ${{ secrets.GITHUB_TOKEN || github.token }}
-        fetch-depth: 0  # Vollständige Historie für besseres Merging
+        # Optimize fetch for manual runs - only need current commit
+        fetch-depth: ${{ github.event_name == 'repository_dispatch' && '1' || '0' }}
     
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.10'
+        python-version: '3.11'  # Faster than 3.10
+        cache: 'pip'  # Enable pip caching
+    
+    - name: Cache dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-lse-deps-v1
     
     - name: Install dependencies
       run: |
-        pip install requests beautifulsoup4 numpy matplotlib scipy scikit-learn
+        # Install in optimized order - lightweight first, heavy last
+        pip install --upgrade pip wheel
+        pip install -r requirements.txt --prefer-binary
     
     - name: Check LSE Status
       id: check_status
@@ -48,7 +60,18 @@ jobs:
         # Setze MANUAL_RUN flag für manuelle Ausführungen
         MANUAL_RUN: ${{ github.event_name == 'workflow_dispatch' || github.event.action == 'check-lse-status-manual' }}
       run: |
+        echo "🚀 Starting LSE check at $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+        START_TIME=$(date +%s)
+        
         python check_lse.py
+        
+        END_TIME=$(date +%s)
+        DURATION=$((END_TIME - START_TIME))
+        echo "⏱️ LSE check completed in ${DURATION} seconds"
+        
+        if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+          echo "📊 Manual run performance: ${DURATION}s script execution"
+        fi
     
     - name: Validate and commit changes
       run: |
@@ -56,31 +79,70 @@ jobs:
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         
-        # Validiere JSON-Dateien
-        python -c "
-        import json
-        import sys
+        # Optimized validation - parallel processing for manual runs
+        if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+          echo "🚀 Manual run - using fast validation"
+          python -c "
+import json
+import sys
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+def validate_json(filename):
+    try:
+        with open(filename, 'r') as f:
+            data = json.load(f)
+            print(f'✅ {filename} is valid')
+            return True
+    except Exception as e:
+        print(f'❌ {filename} is invalid: {e}')
+        return False
+
+# Parallel validation for speed
+with ThreadPoolExecutor(max_workers=2) as executor:
+    futures = [
+        executor.submit(validate_json, 'status.json'),
+        executor.submit(validate_json, 'history.json')
+    ]
+    results = [f.result() for f in futures]
+    
+if not all(results):
+    sys.exit(1)
+"
+        else
+          # Standard validation for scheduled runs
+          python -c "
+import json
+import sys
+
+try:
+    with open('status.json', 'r') as f:
+        status = json.load(f)
+        print('✅ status.json ist gültig')
+except Exception as e:
+    print(f'❌ status.json ist ungültig: {e}')
+    sys.exit(1)
+
+try:
+    with open('history.json', 'r') as f:
+        history = json.load(f)
+        print('✅ history.json ist gültig')
+except Exception as e:
+    print(f'❌ history.json ist ungültig: {e}')
+    sys.exit(1)
+"
+        fi
         
-        try:
-            with open('status.json', 'r') as f:
-                status = json.load(f)
-                print('✅ status.json ist gültig')
-        except Exception as e:
-            print(f'❌ status.json ist ungültig: {e}')
-            sys.exit(1)
-        
-        try:
-            with open('history.json', 'r') as f:
-                history = json.load(f)
-                print('✅ history.json ist gültig')
-        except Exception as e:
-            print(f'❌ history.json ist ungültig: {e}')
-            sys.exit(1)
-        "
-        
-        # Stelle sicher, dass wir auf dem neuesten Stand sind
-        git fetch origin main
-        git add status.json history.json
+        # Optimized git operations
+        if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+          echo "🚀 Manual run - optimized git operations"
+          # Skip full fetch for manual runs, just sync current state
+          git add status.json history.json
+        else
+          # Full sync for scheduled runs
+          git fetch origin main
+          git add status.json history.json
+        fi
         
         # Prüfe ob es Änderungen gibt
         if git diff --cached --quiet; then
@@ -91,18 +153,18 @@ jobs:
           
           # Committe mit timestamp
           TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          git commit -m "Update status and history [skip ci] - $TIMESTAMP"
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            git commit -m "Manual update via Telegram [skip ci] - $TIMESTAMP"
+          else
+            git commit -m "Update status and history [skip ci] - $TIMESTAMP"
+          fi
           
-          # Push mit einfacher Retry-Logik
-          for i in 1 2 3; do
-            echo "Push Versuch $i..."
-            if git push origin main; then
-              echo "✅ Push erfolgreich!"
-              break
-            else
-              echo "❌ Push fehlgeschlagen, warte 3 Sekunden..."
-              sleep 3
-              git pull --rebase origin main
-            fi
-          done
+          # Optimized push strategy
+          echo "📤 Pushing changes..."
+          if git push origin main; then
+            echo "✅ Push erfolgreich!"
+          else
+            echo "⚠️ Push conflict, attempting rebase..."
+            git pull --rebase origin main && git push origin main
+          fi
         fi
