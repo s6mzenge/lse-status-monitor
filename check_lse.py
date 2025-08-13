@@ -1133,7 +1133,7 @@ def compute_integrated_model_metrics(history):
         changes_key = "cas_changes"
     else:
         changes_key = "changes"
-    series = history.get(preferred) or history.get("changes", [])
+    series = history.get(changes_key) or history.get("changes", [])
     
     # ---- Daten aufbereiten: Changes & Heartbeats ----
     # rows_all: changes + filtered heartbeats (at most 1 heartbeat after last change)
