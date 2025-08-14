@@ -1778,6 +1778,70 @@ def create_progression_graph(history, current_date, forecast=None):
         except Exception: pass
         return None
 
+def create_placeholder_graph():
+    """
+    Creates a simple placeholder graph when progression graph cannot be generated.
+    Returns BytesIO (PNG) or None.
+    """
+    try:
+        # Lazy load matplotlib
+        plt, mdates = _get_matplotlib()
+        
+        from datetime import datetime
+        import matplotlib.patches as mpatches
+        
+        # Create figure and axis
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Set background color
+        fig.patch.set_facecolor('white')
+        ax.set_facecolor('#f8f9fa')
+        
+        # Remove axes
+        ax.set_xlim(0, 10)
+        ax.set_ylim(0, 10)
+        ax.axis('off')
+        
+        # Add main text
+        ax.text(5, 7, '📊 Graph nicht verfügbar', 
+                ha='center', va='center', fontsize=20, fontweight='bold', color='#333')
+        
+        ax.text(5, 5.5, 'Noch nicht genügend Datenpunkte für eine Verlaufsgrafik',
+                ha='center', va='center', fontsize=14, color='#666')
+        
+        # Add stream and timestamp info
+        now_str = get_german_time().strftime('%d.%m.%Y %H:%M:%S')
+        ax.text(5, 4, f'Active Stream: {ACTIVE_STREAM.upper()}',
+                ha='center', va='center', fontsize=12, color='#888')
+        
+        ax.text(5, 3.2, f'Zeitpunkt: {now_str}',
+                ha='center', va='center', fontsize=12, color='#888')
+        
+        if ACTIVE_STREAM == "pre_cas":
+            target_str = TARGET_DATE_PRE_CAS.strftime('%d %B %Y')
+            ax.text(5, 2.4, f'Target: {target_str}',
+                    ha='center', va='center', fontsize=12, color='#888')
+        
+        # Add a simple decorative border
+        border = mpatches.Rectangle((0.5, 1), 9, 8, linewidth=2, 
+                                  edgecolor='#ddd', facecolor='none')
+        ax.add_patch(border)
+        
+        # Save to buffer
+        buf = _get_io_bytesio()()
+        plt.savefig(buf, format="png", dpi=110, bbox_inches="tight", facecolor='white')
+        buf.seek(0)
+        plt.close()
+        return buf
+        
+    except Exception as e:
+        print(f"⚠️ Placeholder-Graph konnte nicht erstellt werden: {e}")
+        try: 
+            plt.close()
+        except Exception: 
+            pass
+        return None
+
 def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=None, parse_mode='HTML'):
     """
     Unified Telegram sending function for all chat types.
@@ -1873,6 +1937,80 @@ def send_telegram_papa(old_date, new_date):
     """Sendet eine einfache Nachricht an Papa über separaten Bot"""
     message = f"LSE-Datums-Update!\n\nVom: {old_date}\nAuf: {new_date}"
     return send_telegram_message(message, 'papa')
+
+def send_main_text_and_graph(message, current_date, active_history, forecast=None, caption=None):
+    """
+    Centralized function to send text message + graph/placeholder to main chat.
+    
+    Args:
+        message: Text message to send
+        current_date: Current date string
+        active_history: History data for graph creation
+        forecast: Optional forecast data
+        caption: Optional custom caption for graph, otherwise generates default
+    
+    Returns:
+        tuple: (text_success, graph_success) - boolean results for each operation
+    """
+    # Send text message first
+    text_success = send_telegram(message)
+    
+    # Generate or use provided caption
+    if caption is None:
+        if ACTIVE_STREAM == "pre_cas":
+            caption = (
+                f"📈 Pre-CAS Progression Update\n"
+                f"Aktuell: {current_date}\n"
+                f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
+            )
+        else:
+            caption = f"📈 Status Update\nAktuell: {current_date}"
+    
+    # Try to create progression graph, fallback to placeholder
+    graph_buffer = None
+    graph_success = False
+    
+    try:
+        # Try creating the real progression graph
+        graph_buffer = create_progression_graph(active_history, current_date, forecast)
+        
+        if graph_buffer:
+            print("🖼️ Sende separaten Graph...")
+        else:
+            print("⚠️ Kein Graph-Buffer zurückgegeben, erstelle Placeholder...")
+            # Create placeholder if progression graph failed
+            graph_buffer = create_placeholder_graph()
+            
+        if graph_buffer:
+            # Ensure buffer is at the beginning
+            try:
+                if hasattr(graph_buffer, "seek"):
+                    graph_buffer.seek(0)
+            except Exception:
+                pass
+                
+            # Send the graph/placeholder with HTML parse mode for consistent formatting
+            graph_success = send_telegram_photo(graph_buffer, caption, parse_mode='HTML')
+            
+            if graph_success:
+                print("✅ Graph/Placeholder erfolgreich gesendet!")
+            else:
+                print("❌ Fehler beim Senden des Graph/Placeholder")
+        else:
+            print("❌ Weder Graph noch Placeholder konnte erstellt werden")
+            
+    except Exception as e:
+        print(f"⚠️ Graph/Placeholder konnte nicht erstellt oder gesendet werden: {e}")
+        
+    finally:
+        # Clean up buffer
+        if graph_buffer:
+            try:
+                graph_buffer.close()
+            except Exception:
+                pass
+    
+    return text_success, graph_success
 
 
 def migrate_json_files():
@@ -2505,36 +2643,15 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 
 <a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
                 
-                # Sende Text-Nachricht
-                send_telegram(telegram_msg)
-                
-                # Erstelle und sende Graph als separate Nachricht
-                graph_buffer = None
-                try:
-                    graph_buffer = create_progression_graph(active_history, current_date, forecast)
-                    if graph_buffer:
-                        try:
-                            if hasattr(graph_buffer, "seek"):
-                                graph_buffer.seek(0)
-                        except Exception:
-                            pass
-                        graph_caption = (
-                            f"📈 Pre-CAS Progression Update\n"
-                            f"Aktuell: {current_date}\n"
-                            f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
-                        )
-                        print("🖼️ Sende separaten Graph (ÄNDERUNG erkannt)...")
-                        send_telegram_photo(graph_buffer, graph_caption, parse_mode=None)
-                    else:
-                        print("⚠️ Kein Graph-Buffer zurückgegeben (ÄNDERUNG erkannt).")
-                except Exception as e:
-                    print(f"⚠️ Graph konnte nicht erstellt oder gesendet werden (ÄNDERUNG erkannt): {e}")
-                finally:
-                    if graph_buffer:
-                        try:
-                            graph_buffer.close()
-                        except Exception:
-                            pass
+                # Use centralized function to send text + graph/placeholder
+                caption = (
+                    f"📈 Pre-CAS Progression Update\n"
+                    f"Aktuell: {current_date}\n"
+                    f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
+                )
+                text_success, graph_success = send_main_text_and_graph(
+                    telegram_msg, current_date, active_history, forecast, caption
+                )
 
             else:
                 # Manueller Check: Spezielle Nachricht bei Änderung mit Graph
@@ -2553,36 +2670,15 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 
 <a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
                 
-                # Sende Text-Nachricht
-                send_telegram(telegram_msg)
-                                
-                # Erstelle und sende Graph als separate Nachricht
-                graph_buffer = None
-                try:
-                    graph_buffer = create_progression_graph(active_history, current_date, forecast)
-                    if graph_buffer:
-                        try:
-                            if hasattr(graph_buffer, "seek"):
-                                graph_buffer.seek(0)
-                        except Exception:
-                            pass
-                        graph_caption = (
-                            f"📈 Pre-CAS Progression Update\n"
-                            f"Aktuell: {current_date}\n"
-                            f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
-                        )
-                        print("🖼️ Sende separaten Graph (ÄNDERUNG erkannt)...")
-                        send_telegram_photo(graph_buffer, graph_caption, parse_mode=None)
-                    else:
-                        print("⚠️ Kein Graph-Buffer zurückgegeben (ÄNDERUNG erkannt).")
-                except Exception as e:
-                    print(f"⚠️ Graph konnte nicht erstellt oder gesendet werden (ÄNDERUNG erkannt): {e}")
-                finally:
-                    if graph_buffer:
-                        try:
-                            graph_buffer.close()
-                        except Exception:
-                            pass
+                # Use centralized function to send text + graph/placeholder
+                caption = (
+                    f"📈 Pre-CAS Progression Update\n"
+                    f"Aktuell: {current_date}\n"
+                    f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
+                )
+                text_success, graph_success = send_main_text_and_graph(
+                    telegram_msg, current_date, active_history, forecast, caption
+                )
             
             # Sende E-Mails
             emails_sent = False
@@ -2609,32 +2705,11 @@ Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
 
 <a href="{LSE_URL}">📄 Jetzt zur LSE Webseite</a>"""
                 
-                # Sende Text-Nachricht
-                send_telegram(telegram_special)
-                                
-                # Sende speziellen Graph für Zieldatum
-                graph_buffer = None
-                try:
-                    graph_buffer = create_progression_graph(active_history, current_date, forecast)
-                    if graph_buffer:
-                        try:
-                            if hasattr(graph_buffer, "seek"):
-                                graph_buffer.seek(0)
-                        except Exception:
-                            pass
-                        graph_caption = f"🎯 PRE-CAS ZIELDATUM ERREICHT: {current_date}!"
-                        print("🖼️ Sende separaten Graph (ZIELDATUM erreicht)...")
-                        send_telegram_photo(graph_buffer, graph_caption, parse_mode=None)
-                    else:
-                        print("⚠️ Kein Graph-Buffer zurückgegeben (ZIELDATUM erreicht).")
-                except Exception as e:
-                    print(f"⚠️ Graph konnte nicht erstellt oder gesendet werden (ZIELDATUM erreicht): {e}")
-                finally:
-                    if graph_buffer:
-                        try:
-                            graph_buffer.close()
-                        except Exception:
-                            pass
+                # Use centralized function to send text + graph/placeholder
+                caption = f"🎯 PRE-CAS ZIELDATUM ERREICHT: {current_date}!"
+                text_success, graph_success = send_main_text_and_graph(
+                    telegram_special, current_date, active_history, forecast, caption
+                )
 
             
             if emails_sent or os.environ.get('TELEGRAM_BOT_TOKEN'):
@@ -2730,36 +2805,15 @@ Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
 
 <a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
                                 
-                # 1) Text separat senden
-                send_telegram(telegram_msg)
-                
-                # 2) Graph separat als Foto senden
-                graph_buffer = None
-                try:
-                    graph_buffer = create_progression_graph(active_history, current_date, forecast)
-                    if graph_buffer:
-                        try:
-                            if hasattr(graph_buffer, "seek"):
-                                graph_buffer.seek(0)
-                        except Exception:
-                            pass
-                        graph_caption = (
-                            f"📊 Pre-CAS Status\n"
-                            f"Aktuell: {current_date}\n"
-                            f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
-                        )
-                        print("🖼️ Sende separaten Graph (no-change, MANUAL)...")
-                        send_telegram_photo(graph_buffer, graph_caption, parse_mode=None)
-                    else:
-                        print("⚠️ Kein Graph-Buffer zurückgegeben (no-change, MANUAL).")
-                except Exception as e:
-                    print(f"⚠️ Graph konnte nicht erstellt oder gesendet werden (no-change, MANUAL): {e}")
-                finally:
-                    if graph_buffer:
-                        try:
-                            graph_buffer.close()
-                        except Exception:
-                            pass
+                # Use centralized function to send text + graph/placeholder
+                caption = (
+                    f"📊 Pre-CAS Status\n"
+                    f"Aktuell: {current_date}\n"
+                    f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
+                )
+                text_success, graph_success = send_main_text_and_graph(
+                    telegram_msg, current_date, active_history, forecast, caption
+                )
 
             # Note: Scheduled runs with no change don't send notifications to main chat
             
@@ -2782,8 +2836,25 @@ Bitte prüfe die Webseite manuell.
 
 <a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
             
-            # Sende Fehlernachricht (ohne Graph bei Fehler)
-            send_telegram(telegram_error)
+            # Send error message with graph/placeholder using centralized function
+            try:
+                # Try to get history and forecast for error message graph  
+                active_history = get_active_history(history)
+                forecast = calculate_regression_forecast(active_history)
+                current_date_for_graph = status.get('pre_cas_date') or 'Unbekannt'
+                
+                caption = (
+                    f"❌ Error Report\n"
+                    f"Letztes bekanntes Datum: {current_date_for_graph}\n"
+                    f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
+                )
+                text_success, graph_success = send_main_text_and_graph(
+                    telegram_error, current_date_for_graph, active_history, forecast, caption
+                )
+            except Exception as e:
+                print(f"⚠️ Fehler beim Senden der Fehlernachricht mit Graph: {e}")
+                # Fallback to text-only if graph fails
+                send_telegram(telegram_error)
         
         # Sende Warnung per E-Mail
         subject = "LSE Pre-CAS Monitor WARNUNG: Datum nicht gefunden"
