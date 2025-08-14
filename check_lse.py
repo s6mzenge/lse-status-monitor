@@ -753,7 +753,7 @@ def create_enhanced_forecast_text_precas(forecast):
     eta_old_dt = _old_eta_dt(forecast)
 
     # Neue (integrierte) Metriken + echte ETA-Datetime
-    hist = get_active_history(get_history())
+    hist = get_history()
     try:
         new_s = compute_integrated_model_metrics(hist, stream="pre_cas")
     except Exception as e:
