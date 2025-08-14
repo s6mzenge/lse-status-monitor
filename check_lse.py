@@ -207,6 +207,8 @@ def _get_matplotlib():
     if _matplotlib_plt is None:
         import warnings
         warnings.filterwarnings('ignore')
+        import matplotlib
+        matplotlib.use('Agg')  # Use non-interactive backend for headless operation
         import matplotlib.pyplot as plt
         import matplotlib.dates as mdates
         _matplotlib_plt = plt
@@ -1434,15 +1436,19 @@ def create_progression_graph(history, current_date, forecast=None):
 
     # ---------- Helfer ----------
     def _to_naive_berlin(dt_like):
+        # Define timezone directly to avoid scope issues
+        from zoneinfo import ZoneInfo
+        ber_tz = ZoneInfo("Europe/Berlin")
+        
         if dt_like is None:
             return None
         if isinstance(dt_like, datetime):
             if dt_like.tzinfo is None:
-                return dt_like.replace(tzinfo=BER).astimezone(BER).replace(tzinfo=None)
-            return dt_like.astimezone(BER).replace(tzinfo=None)
+                return dt_like.replace(tzinfo=ber_tz).astimezone(ber_tz).replace(tzinfo=None)
+            return dt_like.astimezone(ber_tz).replace(tzinfo=None)
         try:
             dtx = datetime.fromisoformat(str(dt_like))
-            return dtx.astimezone(BER).replace(tzinfo=None)
+            return dtx.astimezone(ber_tz).replace(tzinfo=None)
         except Exception:
             return None
 
@@ -1521,9 +1527,6 @@ def create_progression_graph(history, current_date, forecast=None):
         changes_key = "changes"
     
     entries = list(_iter_observations_or_changes(history, changes_key))
-    print(f"📊 DEBUG Graph: Stream={ACTIVE_STREAM}, changes_key={changes_key}")
-    print(f"📊 DEBUG Graph: Gefundene Einträge: {len(entries)} (min: {REGRESSION_MIN_POINTS})")
-    print(f"📊 DEBUG Graph: Erste 3 entries: {entries[:3] if entries else 'keine'}")
     if len(entries) < REGRESSION_MIN_POINTS:
         return None
 
