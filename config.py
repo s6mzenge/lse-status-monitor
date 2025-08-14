@@ -11,8 +11,11 @@ HISTORY_FILE = "history.json"
 REGRESSION_MIN_POINTS = 2
 CONFIDENCE_LEVEL = 1.96  # 95%-Konfidenzniveau
 
-# Target dates to monitor
-TARGET_DATES = ["25 July", "28 July"]
+# Target date for Pre-CAS monitoring
+TARGET_DATES = ["13 August"]  # Single target for Pre-CAS
+
+# Active tracking configuration
+ACTIVE_STREAM = "pre_cas"  # Changed from "all_other" to "pre_cas"
 
 # Request settings
 REQUEST_TIMEOUT = 30
@@ -32,9 +35,7 @@ GMAIL_SMTP_PORT = 587
 # Telegram settings
 TELEGRAM_API_BASE = "https://api.telegram.org/bot"
 
-# config.py
-
-# Feste, zentral gepflegte UK-Feiertage (ISO, YYYY-MM-DD)
+# UK Bank Holidays (ISO, YYYY-MM-DD)
 UK_HOLIDAYS = (
-    "2025-08-25",  # Summer Bank Holiday 2025 (dein konkreter Wunsch)
+    "2025-08-25",  # Summer Bank Holiday 2025
 )
