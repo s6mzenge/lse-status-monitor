@@ -1061,7 +1061,21 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
             
             if len(y_new) > 0:
                 y_new = np.array(y_new)
-                
+                # Nach Zeile 2384 in check_lse.py, direkt nach y_new = np.array(y_new):
+                if len(y_new) > 0:
+                    y_new = np.array(y_new)
+                    
+                    # DEBUG: Prüfe die Werte
+                    print(f"DEBUG NEU-Linie: {len(y_new)} Punkte")
+                    print(f"DEBUG NEU y-Werte (erste 5): {y_new[:5]}")
+                    print(f"DEBUG ALT y-Werte (erste 5): {y_old[:5] if 'y_old' in locals() else 'nicht definiert'}")
+                    print(f"DEBUG Differenz NEU-ALT (max): {np.max(np.abs(y_new - y_old)) if 'y_old' in locals() else 'n/a'}")
+                    
+                    # Zeichne die Blend-Kurve mit angepasstem Stil
+                    ax.plot(grid_ts, y_new, linewidth=3.5,  # Dickere Linie
+                            linestyle='-',  # Durchgezogen
+                            label=f"NEU: integrierte Regression (R²={r2_value:.2f})",
+                            color=COL_NEU, alpha=0.95, zorder=10)  # Höherer z-order
                 # Zeichne die Blend-Kurve
                 ax.plot(grid_ts, y_new, linewidth=2.6, 
                         label=f"NEU: integrierte Regression (R²={r2_value:.2f})",
