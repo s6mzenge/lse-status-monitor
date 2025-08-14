@@ -562,11 +562,9 @@ def _hours_since(ts, now=None):
     return max(0.0, (now - ts).total_seconds() / 3600.0)
 
 def _recency_weight(hours_since_change, tau_hours):
-    # Smooth 0→1: kurz nach Änderung ~0 (mehr TS), lange Ruhe ~1 (mehr LOESS)
-    # Center leicht unter tau_hours, damit Umschalten nicht zu spät kommt
-    denom = max(1e-6, 0.25 * tau_hours)
-    z = (hours_since_change - 0.75 * tau_hours) / denom
-    return 1.0 / (1.0 + math.exp(-z))  # Sigmoid
+    # Sanfterer Übergang
+    z = (hours_since_change - tau_hours) / (0.5 * tau_hours)
+    return 1.0 / (1.0 + math.exp(-z))
 
 def _subset_rows_until(rows_all, t_cut):
     """Alle Punkte (inkl. Heartbeats) bis < t_cut."""
@@ -673,16 +671,20 @@ def compute_integrated_model_metrics(history, stream="all_other", return_model=F
                 if latest_heartbeat is None or ob_ts > _to_aware_berlin(latest_heartbeat["timestamp"]):
                     latest_heartbeat = {"timestamp": ob["timestamp"], "date": ob["date"]}
     
-    # Add only the latest heartbeat (if any) to rows_all
-    if latest_heartbeat is not None:
-        rows_all.append(latest_heartbeat)
-        heartbeats = 1
+    # Alle Heartbeats nach letzter Änderung einbeziehen
+    for ob in history.get(obs_key, []):
+        if ob.get("kind") == "heartbeat":
+            ob_ts = _to_aware_berlin(ob["timestamp"])
+            if ob_ts > last_change_ts:
+                rows_all.append({"timestamp": ob["timestamp"], "date": ob["date"]})
+                heartbeats += 1
 
     # 5) Sort rows_all and continue with existing logic
     rows_all.sort(key=lambda r: _to_aware_berlin(r["timestamp"]))
 
+    from config import UK_HOLIDAYS
     # ---- Kalender / Konstanten ----
-    cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
+    cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=UK_HOLIDAYS)
     tz_out = BER
 
     # ---- (1) ETA-Backtest: kleines Grid ----
