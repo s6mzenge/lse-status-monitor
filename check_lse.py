@@ -1122,13 +1122,14 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
                         xytext=(6, 9), textcoords="offset points", ha="left", va="bottom", fontsize=9,
                         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
             
-            # NEU: Vertikales Datum direkt an der Linie
-            # KORRIGIERT: Dynamisches Datumsformat
-            date_str = alt_pt[0].strftime('%d. %B')  # z.B. "27. August"
-            y_mid = (ax.get_ylim()[0] + alt_pt[1]) / 2  # Mitte zwischen unten und Zielpunkt
-            ax.text(alt_pt[0], y_mid, date_str, 
-                    ha='center', va='center', fontsize=9, color=COL_ALT,
-                    rotation=90,  # Vertikal!
+            # NEU: Vertikales Datum LINKS NEBEN der Linie UNTEN
+            date_str = alt_pt[0].strftime('%d. %B')
+            y_bottom = ax.get_ylim()[0]  # Unterer Rand des Graphs
+            
+            # Links von der Linie platzieren
+            ax.text(alt_pt[0] - timedelta(days=0.5), y_bottom + 0.5, date_str, 
+                    ha='right', va='bottom', fontsize=8, color=COL_ALT,
+                    rotation=90,  # Vertikal
                     alpha=0.8)
         
         if neu_pt:
@@ -1141,19 +1142,19 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
                         xytext=(6, -12), textcoords="offset points", ha="left", va="top", fontsize=9,
                         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
             
-            # NEU: Vertikales Datum direkt an der Linie
-            # KORRIGIERT: Dynamisches Datumsformat
-            date_str = neu_pt[0].strftime('%d. %B')  # z.B. "27. August"
-            y_mid = (ax.get_ylim()[0] + neu_pt[1]) / 2  # Mitte zwischen unten und Zielpunkt
+            # NEU: Vertikales Datum LINKS NEBEN der Linie UNTEN
+            date_str = neu_pt[0].strftime('%d. %B')
+            y_bottom = ax.get_ylim()[0]  # Unterer Rand des Graphs
             
-            # Leichte horizontale Verschiebung wenn zu nah an ALT
-            x_offset = 0
-            if alt_pt and abs((neu_pt[0] - alt_pt[0]).days) < 1:
-                x_offset = 0.3  # Leicht nach rechts wenn Linien überlappen
+            # Links von der Linie platzieren
+            # Bei Überlappung etwas mehr nach links
+            x_offset = 0.5  # Standard: halber Tag links
+            if alt_pt and abs((neu_pt[0] - alt_pt[0]).days) < 2:
+                x_offset = 1.0  # Bei Nähe zu ALT: ganzer Tag links
             
-            ax.text(neu_pt[0] + timedelta(days=x_offset), y_mid, date_str, 
-                    ha='center', va='center', fontsize=9, color=COL_NEU,
-                    rotation=90,  # Vertikal!
+            ax.text(neu_pt[0] - timedelta(days=x_offset), y_bottom + 0.5, date_str, 
+                    ha='right', va='bottom', fontsize=8, color=COL_NEU,
+                    rotation=90,  # Vertikal
                     alpha=0.8)
 
     # Für Pre-CAS nur ein Ziel
