@@ -1043,42 +1043,37 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
                 bd = _bizdays_float(first_ts, t)
                 x_hours = bd * hours_per_day
                 
-                # Verwende die integrierte Vorhersage
-                # Das Modell selbst sollte bei Extrapolation stabil sein
-                try:
-                    # Prüfe ob wir innerhalb der Trainingsdaten sind
-                    max_train_x = float(imodel.x_[-1]) if len(imodel.x_) > 0 else 0
-                    
-                    if x_hours <= max_train_x + 6.0:  # Bis zu 1 Arbeitstag über Training
-                        # Innerhalb oder nahe der Daten: Nutze vollen Blend
+                # Prüfe ob x_hours im vernünftigen Bereich liegt
+                max_x = float(imodel.x_[-1]) if len(imodel.x_) > 0 else 1000
+                
+                if x_hours < max_x + 100:  # Innerhalb oder nahe der Trainingsdaten
+                    try:
                         y_pred = imodel._blend_predict_scalar(x_hours)
-                    else:
-                        # Weit außerhalb: Nutze nur Theil-Sen für Stabilität
-                        # aber mit dem korrekten tau-basierten Übergang
-                        ts_val = float(imodel.ts_.predict(x_hours))
-                        # Sanfter Übergang basierend auf Distanz
-                        dist_beyond = x_hours - max_train_x
-                        fade_factor = max(0.0, 1.0 - dist_beyond / 24.0)  # Über 4 Tage ausblenden
-                        
-                        # Hole letzten LOESS-Wert am Rand der Daten
-                        if fade_factor > 0:
-                            edge_loess = float(imodel.loess_.predict_one(imodel.x_, imodel.y_, max_train_x))
-                            edge_ts = float(imodel.ts_.predict(max_train_x))
-                            loess_offset = edge_loess - edge_ts
-                            # Fade out the LOESS influence
-                            y_pred = ts_val + loess_offset * fade_factor
-                        else:
-                            y_pred = ts_val
-                    
-                    y_new.append(y_pred)
-                except Exception as e:
-                    # Fallback bei Fehler
-                    print(f"⚠️ Blend-Fehler bei x={x_hours:.1f}: {e}")
+                        y_new.append(y_pred)
+                    except Exception as e:
+                        # Fallback: Verwende nur Theil-Sen für diesen Punkt
+                        y_pred = imodel.ts_.predict(x_hours)
+                        y_new.append(float(y_pred))
+                else:
+                    # Für weit entfernte Punkte: verwende nur Theil-Sen (linear)
                     y_pred = imodel.ts_.predict(x_hours)
                     y_new.append(float(y_pred))
             
             if len(y_new) > 0:
                 y_new = np.array(y_new)
+                
+                # GLÄTTUNG: Entferne Sprünge mit Savitzky-Golay-Filter
+                from scipy.signal import savgol_filter
+                if len(y_new) > 11:  # Brauchen mindestens 11 Punkte für window_length=11
+                    try:
+                        # Glätte die Kurve, aber behalte den generellen Trend
+                        y_smooth = savgol_filter(y_new, 
+                                                window_length=11,  # Fensterbreite (muss ungerade sein)
+                                                polyorder=3,       # Polynomial-Grad
+                                                mode='interp')     # Extrapoliere an den Rändern
+                        y_new = y_smooth
+                    except Exception as e:
+                        print(f"⚠️ Glättung fehlgeschlagen: {e}")
                 
                 # OFFSET-KORREKTUR: Von Juli-Basis auf Januar-Basis
                 y_new = y_new + 181  # 181 = Tage zwischen 1. Jan und 1. Juli
@@ -1088,25 +1083,19 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
                         label=f"NEU: integrierte Regression (R²={r2_value:.2f})",
                         color=COL_NEU, alpha=0.95)
                 
-                # ETAs mit der predict_datetime Methode (diese nutzt intern schon die richtige Logik)
+                # ETAs mit der predict_datetime Methode
                 for name, ty in target_map.items():
                     if ty is None: continue
                     try:
                         pred = imodel.predict_datetime(name, tz_out=BER)
                         if pred and pred.get("when_point"):
                             t_star = _to_naive_berlin(pred["when_point"])
-                            # Berechne y-Wert an dieser Stelle mit derselben Logik
+                            # Berechne y-Wert an dieser Stelle
                             bd_star = _bizdays_float(first_ts, t_star)
                             x_hours_star = bd_star * hours_per_day
-                            
-                            # Nutze dieselbe stabile Vorhersage-Logik
-                            max_train_x = float(imodel.x_[-1]) if len(imodel.x_) > 0 else 0
-                            if x_hours_star <= max_train_x + 6.0:
-                                try:
-                                    y_star = imodel._blend_predict_scalar(x_hours_star)
-                                except:
-                                    y_star = float(imodel.ts_.predict(x_hours_star))
-                            else:
+                            try:
+                                y_star = imodel._blend_predict_scalar(x_hours_star)
+                            except:
                                 y_star = float(imodel.ts_.predict(x_hours_star))
                             
                             # OFFSET-KORREKTUR auch für ETA-Punkte
