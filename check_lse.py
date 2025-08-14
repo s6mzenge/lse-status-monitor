@@ -1063,17 +1063,7 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
                 y_new = np.array(y_new)
                 
                 # GLÄTTUNG: Entferne Sprünge mit Savitzky-Golay-Filter
-                from scipy.signal import savgol_filter
-                if len(y_new) > 11:  # Brauchen mindestens 11 Punkte für window_length=11
-                    try:
-                        # Glätte die Kurve, aber behalte den generellen Trend
-                        y_smooth = savgol_filter(y_new, 
-                                                window_length=11,  # Fensterbreite (muss ungerade sein)
-                                                polyorder=3,       # Polynomial-Grad
-                                                mode='interp')     # Extrapoliere an den Rändern
-                        y_new = y_smooth
-                    except Exception as e:
-                        print(f"⚠️ Glättung fehlgeschlagen: {e}")
+                
                 
                 # OFFSET-KORREKTUR: Von Juli-Basis auf Januar-Basis
                 y_new = y_new + 181  # 181 = Tage zwischen 1. Jan und 1. Juli
