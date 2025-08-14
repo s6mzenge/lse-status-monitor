@@ -1014,65 +1014,91 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
                 y_star = m_old * _bizdays_float(first_ts, t_star) + b_old
                 alt_eta[name] = (t_star, y_star)
 
+    
     # ---------- NEU-Linie + ETAs ----------
     neu_eta = {}
     try:
-        from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
-        from datetime import time as _time
-    
-        rows = [{"timestamp": e["timestamp"], "date": e["date"]} for e in entries]
-        if len(rows) >= REGRESSION_MIN_POINTS:
-            cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
+        # WICHTIG: Verwende die GLEICHE Modell-Berechnung wie in compute_integrated_model_metrics!
+        new_metrics = compute_integrated_model_metrics(history, stream=stream)
+        
+        if new_metrics:
+            # Hole die optimierten Parameter aus den Metriken
+            params = new_metrics.get("params", {})
+            eff_frac = params.get("eff_frac", 0.6)
+            eff_tau = params.get("eff_tau", 12.0)
             
-            # Trainiere das Modell
-            imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
+            from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
+            from datetime import time as _time
             
-            # WICHTIG: Verwende die gleiche Zeitberechnung wie beim Training!
-            t0_aware = imodel.t0_  # Das ist der Startzeitpunkt aus dem Training
+            # Baue die gleichen Daten auf wie in compute_integrated_model_metrics
+            rows_all = []
+            rows_changes = []
             
-            # Berechne y-Werte für alle grid_ts Punkte
-            y_new = []
-            for t in grid_ts:
-                # Konvertiere t zu aware datetime in London Zeit
-                t_aware = t.replace(tzinfo=ZoneInfo("Europe/Berlin")).astimezone(cal.tz)
-                
-                # Berechne business minutes genau wie beim Training
-                business_mins = cal.business_minutes_between(t0_aware, t_aware)
-                x_hours = business_mins / 60.0
-                
-                # Verwende das Modell zur Vorhersage
-                if x_hours >= 0:  # Nur für Zeiten nach t0
-                    try:
-                        # Benutze die interne Blend-Methode des Modells
-                        y_pred = imodel._blend_predict_scalar(x_hours)
-                        y_new.append(y_pred)
-                    except Exception as e:
-                        # Fallback auf Theil-Sen
-                        y_pred = float(imodel.ts_.predict(x_hours))
-                        y_new.append(y_pred)
-                else:
-                    # Für Zeiten vor t0, verwende nur Theil-Sen Extrapolation
-                    y_pred = float(imodel.ts_.predict(x_hours))
-                    y_new.append(y_pred)
+            # Verwende stream-spezifische Daten (genau wie in compute_integrated_model_metrics)
+            if stream == "pre_cas":
+                changes_key = "pre_cas_changes"
+                obs_key = "pre_cas_observations"
+            elif stream == "cas":
+                changes_key = "cas_changes"
+                obs_key = "cas_observations"
+            else:
+                changes_key = "changes"
+                obs_key = "observations"
             
-            if len(y_new) > 0:
-                y_new = np.array(y_new)
+            # Sammle Changes
+            for ch in history.get(changes_key, []):
+                rows_changes.append({"timestamp": ch["timestamp"], "date": ch["date"]})
+                rows_all.append({"timestamp": ch["timestamp"], "date": ch["date"]})
+            
+            rows_changes.sort(key=lambda r: _to_aware_berlin(r["timestamp"]))
+            
+            if len(rows_changes) >= 3:
+                # Füge nur den neuesten Heartbeat hinzu (wie in compute_integrated_model_metrics)
+                last_change_ts = _to_aware_berlin(rows_changes[-1]["timestamp"])
+                latest_heartbeat = None
                 
-                # Berechne R² korrekt
-                x_train = imodel.x_
-                y_train = imodel.y_
-                y_pred_train = np.array([imodel._blend_predict_scalar(float(x)) for x in x_train])
-                ss_res = np.sum((y_train - y_pred_train)**2)
-                ss_tot = np.sum((y_train - np.mean(y_train))**2)
-                r2_value = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+                for ob in history.get(obs_key, []):
+                    if ob.get("kind") == "heartbeat":
+                        ob_ts = _to_aware_berlin(ob["timestamp"])
+                        if ob_ts > last_change_ts:
+                            if latest_heartbeat is None or ob_ts > _to_aware_berlin(latest_heartbeat["timestamp"]):
+                                latest_heartbeat = {"timestamp": ob["timestamp"], "date": ob["date"]}
                 
-                # Zeichne die Kurve
-                ax.plot(grid_ts, y_new, linewidth=2.6, 
-                        label=f"NEU: integrierte Regression (R²={r2_value:.2f})",
-                        color=COL_NEU, alpha=0.95)
+                if latest_heartbeat:
+                    rows_all.append(latest_heartbeat)
                 
-                # ETAs berechnen...
-                # (Rest des Codes bleibt gleich)
+                rows_all.sort(key=lambda r: _to_aware_berlin(r["timestamp"]))
+                
+                # Trainiere mit den GLEICHEN optimierten Parametern
+                cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
+                imodel = IntegratedRegressor(cal=cal, loess_frac=eff_frac, tau_hours=eff_tau).fit(rows_all)
+                
+                # Jetzt plotte mit konsistenter Zeitberechnung
+                t0_aware = imodel.t0_
+                
+                y_new = []
+                for t in grid_ts:
+                    # Konvertiere zu London Zeit
+                    t_aware = t.replace(tzinfo=ZoneInfo("Europe/Berlin")).astimezone(cal.tz)
+                    
+                    # Berechne business minutes (konsistent mit Training)
+                    business_mins = cal.business_minutes_between(t0_aware, t_aware)
+                    x_hours = business_mins / 60.0
+                    
+                    if x_hours >= 0:
+                        try:
+                            y_pred = imodel._blend_predict_scalar(x_hours)
+                            y_new.append(y_pred)
+                        except:
+                            y_new.append(float(imodel.ts_.predict(x_hours)))
+                    else:
+                        y_new.append(float(imodel.ts_.predict(x_hours)))
+                
+                # Plot die Linie
+                if y_new:
+                    ax.plot(grid_ts, np.array(y_new), linewidth=2.6,
+                            label=f"NEU: integrierte Regression (R²={new_metrics['r2']:.2f})",
+                            color=COL_NEU, alpha=0.95)
                 
                 # ETAs mit der predict_datetime Methode
                 for name, ty in target_map.items():
