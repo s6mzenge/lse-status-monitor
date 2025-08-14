@@ -20,7 +20,7 @@ from io import BytesIO
 from config import (
     LSE_URL, STATUS_FILE, HISTORY_FILE, REGRESSION_MIN_POINTS, CONFIDENCE_LEVEL,
     TARGET_DATES, REQUEST_TIMEOUT, REQUEST_HEADERS, GMAIL_SMTP_SERVER, 
-    GMAIL_SMTP_PORT, TELEGRAM_API_BASE
+    GMAIL_SMTP_PORT, TELEGRAM_API_BASE, ACTIVE_STREAM
 )
 
 # Lazy imports for heavy dependencies - only loaded when needed
@@ -49,8 +49,6 @@ def _get_matplotlib():
     return _matplotlib_plt, _matplotlib_dates
 
 
-# === Konfiguration und Konstanten (ergänzt) ===
-# Constants now imported from config.py
 # === Business-day helpers (x-axis skips weekends) ===
 
 def business_days_elapsed(start_dt, end_dt):
@@ -161,12 +159,11 @@ def _diff_days(neu_dt, alt_dt):
     sign = "+" if d > 0 else "−"
     return f" ({sign}{abs(d)} Tag{'e' if abs(d)!=1 else ''} ggü. 🔵)"
 
-def render_compact_bullets(eta25_old_dt, eta25_new_dt,
-                           eta28_old_dt, eta28_new_dt,
+def render_compact_bullets_precas(eta_old_dt, eta_new_dt,
                            r2_old, pts_old, slope_old,
                            r2_new, pts_new, slope_new,
                            hb_count=None):
-    """Kompakte, mobilfreundliche Prognose als Bullet-Liste."""
+    """Kompakte, mobilfreundliche Prognose für Pre-CAS mit nur einem Zieldatum."""
     now = _now_berlin()
 
     def line_for(dt):
@@ -178,31 +175,33 @@ def render_compact_bullets(eta25_old_dt, eta25_new_dt,
 
     parts = []
     parts.append("🎨 <b>Legende:</b> 🔵 ALT (linear) · 🟠 NEU (integriert)")
-    parts.append("\n📌 <b>Kurzprognose</b>")
+    parts.append("\n📌 <b>Pre-CAS Kurzprognose</b>")
 
-    parts.append("🎯 <b>25 July</b>")
-    parts.append(f"🔵 {line_for(eta25_old_dt)}")
-    parts.append(f"🟠 {line_for(eta25_new_dt)}{_diff_days(eta25_new_dt, eta25_old_dt)}")
-
-    parts.append("\n🎯 <b>28 July</b>")
-    parts.append(f"🔵 {line_for(eta28_old_dt)}")
-    parts.append(f"🟠 {line_for(eta28_new_dt)}{_diff_days(eta28_new_dt, eta28_old_dt)}")
+    parts.append("🎯 <b>13 August</b>")
+    parts.append(f"🔵 {line_for(eta_old_dt)}")
+    parts.append(f"🟠 {line_for(eta_new_dt)}{_diff_days(eta_new_dt, eta_old_dt)}")
 
     parts.append("\n📐 <b>Modelle</b>")
     parts.append(f"R²: 🔵 {r2_old:.2f} ({pts_old}) · 🟠 {r2_new:.2f} ({pts_new}){hb_badge}")
     parts.append(f"Fortschritt: 🔵 {slope_old:.1f} d/Tag · 🟠 {slope_new:.1f} d/Tag")
 
     return "\n".join(parts)
-# ====================================================
 
 
-def _iter_observations_or_changes(history: Dict) -> List[Dict]:
+def _iter_observations_or_changes(history: Dict, stream: str = "all_other") -> List[Dict]:
     """
-    Kombiniert observations und changes, normiert Timestamps auf ISO-UTC,
-    validiert Daten, sortiert aufsteigend.
+    Kombiniert observations und changes für den angegebenen Stream.
+    stream: "all_other", "pre_cas", oder "cas"
     """
     out: List[Dict] = []
-    src = (history.get("observations", []) or []) + (history.get("changes", []) or [])
+    
+    if stream == "pre_cas":
+        src = (history.get("pre_cas_observations", []) or []) + (history.get("pre_cas_changes", []) or [])
+    elif stream == "cas":
+        src = (history.get("cas_observations", []) or []) + (history.get("cas_changes", []) or [])
+    else:  # all_other (default)
+        src = (history.get("observations", []) or []) + (history.get("changes", []) or [])
+    
     for e in src:
         if not isinstance(e, dict):
             continue
@@ -225,13 +224,19 @@ def _iter_observations_or_changes(history: Dict) -> List[Dict]:
     out.sort(key=lambda r: r["timestamp"])
     return out
 
-def _iter_changes_only(history: Dict) -> List[Dict]:
+def _iter_changes_only(history: Dict, stream: str = "all_other") -> List[Dict]:
     """
-    Gibt nur echte Änderungen zurück (keine Heartbeats), normiert Timestamps auf ISO-UTC,
-    validiert Daten, sortiert aufsteigend.
+    Gibt nur echte Änderungen zurück (keine Heartbeats) für den angegebenen Stream.
     """
     out: List[Dict] = []
-    src = history.get("changes", []) or []
+    
+    if stream == "pre_cas":
+        src = history.get("pre_cas_changes", []) or []
+    elif stream == "cas":
+        src = history.get("cas_changes", []) or []
+    else:  # all_other
+        src = history.get("changes", []) or []
+    
     for e in src:
         if not isinstance(e, dict):
             continue
@@ -253,28 +258,22 @@ def _iter_changes_only(history: Dict) -> List[Dict]:
     out.sort(key=lambda r: r["timestamp"])
     return out
 
-def calculate_advanced_regression_forecast(history, current_date=None):
+def calculate_advanced_regression_forecast(history, current_date=None, stream="all_other"):
     """
-    Erweiterte Regression mit mehreren Verbesserungen:
-    - Outlier-resistente Regression
-    - Polynomielle Regression 
-    - Gewichtete Regression (neuere Daten wichtiger)
-    - Konfidenzintervalle
-    - Arbeitstagberechnung
-    
-    WICHTIG: Diese (alte) Regression verwendet nur echte Änderungen, keine Heartbeats!
+    Erweiterte Regression für den angegebenen Stream.
+    stream: "all_other", "pre_cas", oder "cas"
     """
     np = _get_numpy()  # Lazy load numpy
     
-    # GEÄNDERT: Verwende nur echte Änderungen, keine Heartbeats
-    source_data = _iter_changes_only(history)
+    # Verwende nur echte Änderungen für den angegebenen Stream
+    source_data = _iter_changes_only(history, stream)
     if len(source_data) < REGRESSION_MIN_POINTS:
         return None
     
     # Extrahiere Datenpunkte
     data_points = []
     first_timestamp = None
-    for entry in source_data:  # GEÄNDERT: Verwende source_data (nur Änderungen)
+    for entry in source_data:
         try:
             timestamp = datetime.fromisoformat(entry["timestamp"])
             date_days = date_to_days(entry["date"])
@@ -407,15 +406,17 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     current_days_elapsed = business_days_elapsed(first_timestamp, current_time)
     current_predicted_days = best_slope * current_days_elapsed + best_intercept
     
-    # Zieldaten
-    target_25_days = date_to_days(TARGET_DATES[0])  # "25 July" 
-    target_28_days = date_to_days(TARGET_DATES[1])  # "28 July"
+    # Zieldaten - für Pre-CAS nur ein Ziel
+    if stream == "pre_cas":
+        target_dates_list = TARGET_DATES  # ["13 August"]
+    else:
+        target_dates_list = TARGET_DATES  # Für andere Streams
     
     predictions = {}
-    days_until_25 = None
-    days_until_28 = None
+    days_until_target = None
     
-    for target_name, target_days in [(TARGET_DATES[0], target_25_days), (TARGET_DATES[1], target_28_days)]:
+    for target_name in target_dates_list:
+        target_days = date_to_days(target_name)
         if target_days and best_slope > 0:
             days_until = (target_days - current_predicted_days) / best_slope
             
@@ -423,7 +424,6 @@ def calculate_advanced_regression_forecast(history, current_date=None):
             confidence_margin = (CONFIDENCE_LEVEL * std_error / abs(best_slope)) if best_slope != 0 else 0
             days_until_lower = max(0, days_until - confidence_margin)
             days_until_upper = days_until + confidence_margin
-            
             
             predictions[target_name] = {
                 "days": days_until,
@@ -434,13 +434,9 @@ def calculate_advanced_regression_forecast(history, current_date=None):
                 "date_lower": add_business_days(current_time, days_until_upper) if days_until_upper > 0 else None,
                 "date_upper": add_business_days(current_time, days_until_lower) if days_until_lower > 0 else None,
             }
-
             
             # Für Legacy-Kompatibilität
-            if target_name == TARGET_DATES[0]:  # "25 July"
-                days_until_25 = days_until
-            elif target_name == TARGET_DATES[1]:  # "28 July"
-                days_until_28 = days_until
+            days_until_target = days_until
     
     # 8. TREND-ANALYSE
     trend_analysis = "unbekannt"
@@ -460,8 +456,7 @@ def calculate_advanced_regression_forecast(history, current_date=None):
         "r_squared": best_r2,
         "current_trend_days": current_predicted_days,
         "data_points": len(data_points),
-        "days_until_25_july": days_until_25,
-        "days_until_28_july": days_until_28,
+        "days_until_target": days_until_target,
         
         # Erweiterte Informationen
         "model_name": best_name,
@@ -472,9 +467,9 @@ def calculate_advanced_regression_forecast(history, current_date=None):
         "predictions": predictions,
     }
 
-def calculate_regression_forecast(history):
+def calculate_regression_forecast(history, stream="all_other"):
     """Wrapper-Funktion für Rückwärtskompatibilität - ruft die erweiterte Version auf"""
-    return calculate_advanced_regression_forecast(history)
+    return calculate_advanced_regression_forecast(history, stream=stream)
 
 def _fmt_eta(days, date_obj):
     """Gibt 'In X Tagen — Am DD. Monat YYYY' oder '—' zurück."""
@@ -489,29 +484,25 @@ def _old_regression_summary(forecast):
     pts = forecast.get('data_points', 0)
     slope = forecast.get('slope', 0.0)
     trend = forecast.get('trend_analysis', None)
-    # 25 July
-    if 'predictions' in forecast and '25 July' in forecast['predictions']:
-        p25 = forecast['predictions']['25 July']
-        eta25 = _fmt_eta(p25.get('days'), p25.get('date'))
+    
+    # Für Pre-CAS nur ein Zieldatum
+    if 'predictions' in forecast and '13 August' in forecast['predictions']:
+        p_target = forecast['predictions']['13 August']
+        eta_target = _fmt_eta(p_target.get('days'), p_target.get('date'))
     else:
-        d25 = forecast.get('days_until_25_july')
-        eta25 = _fmt_eta(d25, None)
-    # 28 July
-    if 'predictions' in forecast and '28 July' in forecast['predictions']:
-        p28 = forecast['predictions']['28 July']
-        eta28 = _fmt_eta(p28.get('days'), p28.get('date'))
-    else:
-        d28 = forecast.get('days_until_28_july')
-        eta28 = _fmt_eta(d28, None)
+        d_target = forecast.get('days_until_target')
+        eta_target = _fmt_eta(d_target, None)
+    
     return {
         "name": "ALT (linear)",
         "r2": r2, "points": pts,
         "speed": f"{slope:.1f} Tage/Tag" if slope > 0 else "—",
         "trend": (trend.upper() if trend and trend != "unbekannt" else "—"),
-        "eta25": eta25, "eta28": eta28
+        "eta_target": eta_target
     }
 
-# ===== ETA-Backtest & Recency-Blend Helpers =====
+
+# ===== ETA-Backtest & Recency-Blend Helpers (unchanged) =====
 import math
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -608,33 +599,39 @@ def _eta_backtest_score(rows_all, rows_changes, cal, loess_frac, tau_hours, tz_o
     if len(errors_days) == 0:
         return float("inf")
     return _median(errors_days)
-# ================================================
 
 
-def compute_integrated_model_metrics(history):
+def compute_integrated_model_metrics(history, stream="all_other"):
     """
-    Integrierte Regression mit:
-      (1) Hyperparameter-Tuning per ETA-Backtest
-      (3) Recency-Blending (mehr LOESS nach längerer Ruhe, mehr TS direkt nach Change)
+    Integrierte Regression für den angegebenen Stream.
     """
     from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
     from datetime import time as _time
     _np = _get_numpy()  # Lazy load numpy
 
-    # ---- Daten aufbereiten: Changes & Heartbeats ----
-    # rows_all: changes + filtered heartbeats (at most 1 heartbeat after last change)
-    # rows_changes: nur echte Änderungen (für Backtest)
+    # ---- Daten aufbereiten: Changes & Heartbeats für den gewählten Stream ----
     rows_all = []
     rows_changes = []
 
-    # 1) Build rows_changes from history.changes and sort them
-    for ch in history.get("changes", []):
+    # Verwende stream-spezifische Daten
+    if stream == "pre_cas":
+        changes_key = "pre_cas_changes"
+        obs_key = "pre_cas_observations"
+    elif stream == "cas":
+        changes_key = "cas_changes"
+        obs_key = "cas_observations"
+    else:  # all_other
+        changes_key = "changes"
+        obs_key = "observations"
+
+    # 1) Build rows_changes from history changes and sort them
+    for ch in history.get(changes_key, []):
         rows_changes.append({"timestamp": ch["timestamp"], "date": ch["date"]})
         rows_all.append({"timestamp": ch["timestamp"], "date": ch["date"]})
     
     rows_changes.sort(key=lambda r: _to_aware_berlin(r["timestamp"]))
 
-    # 2) If fewer than 3 changes exist, return None (unchanged logic)
+    # 2) If fewer than 3 changes exist, return None
     if len(rows_changes) < 3:
         return None  # zu wenig für integriertes Modell
 
@@ -642,11 +639,10 @@ def compute_integrated_model_metrics(history):
     last_change_ts = _to_aware_berlin(rows_changes[-1]["timestamp"])
 
     # 4) Filter observations to only heartbeats with timestamp > last_change_ts
-    # If any exist, pick the one with the latest timestamp and append it to rows_all
     heartbeats = 0
     latest_heartbeat = None
     
-    for ob in history.get("observations", []):
+    for ob in history.get(obs_key, []):
         if ob.get("kind") == "heartbeat":
             ob_ts = _to_aware_berlin(ob["timestamp"])
             if ob_ts > last_change_ts:
@@ -707,9 +703,12 @@ def compute_integrated_model_metrics(history):
     hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute) / 60.0
     avg_prog_new = imodel.ts_.b * hours_per_day  # y pro Business-Day
 
-    # Vorhersagen (echte Datumsobjekte)
-    pred25 = imodel.predict_datetime("25 July", tz_out=tz_out)
-    pred28 = imodel.predict_datetime("28 July", tz_out=tz_out)
+    # Vorhersagen - für Pre-CAS nur ein Zieldatum
+    if stream == "pre_cas":
+        pred_target = imodel.predict_datetime("13 August", tz_out=tz_out)
+    else:
+        # Für andere Streams könnten mehrere Ziele sein
+        pred_target = imodel.predict_datetime(TARGET_DATES[0], tz_out=tz_out) if TARGET_DATES else None
 
     def _fmt_eta(diff_days, when_dt):
         if when_dt is None:
@@ -718,65 +717,57 @@ def compute_integrated_model_metrics(history):
 
     # Für "in X Tagen" verwenden wir Kalendertage (inkl. WE)
     now_de = _now_berlin()
-    d25 = (pred25["when_point"] - now_de).total_seconds() / 86400.0 if pred25 and pred25.get("when_point") else None
-    d28 = (pred28["when_point"] - now_de).total_seconds() / 86400.0 if pred28 and pred28.get("when_point") else None
+    d_target = (pred_target["when_point"] - now_de).total_seconds() / 86400.0 if pred_target and pred_target.get("when_point") else None
 
     return {
         "name": "NEU (integriert)",
         "r2": r2_new,
         "points": len(rows_all),
         "speed": f"{avg_prog_new:.1f} Tage/Tag",
-        "speed_val": float(avg_prog_new),                 # numerisch
-        "eta25": _fmt_eta(d25, pred25["when_point"]) if d25 is not None else "—",
-        "eta28": _fmt_eta(d28, pred28["when_point"]) if d28 is not None else "—",
-        "eta25_dt": pred25["when_point"] if pred25 else None,
-        "eta28_dt": pred28["when_point"] if pred28 else None,
+        "speed_val": float(avg_prog_new),
+        "eta_target": _fmt_eta(d_target, pred_target["when_point"]) if d_target is not None else "—",
+        "eta_target_dt": pred_target["when_point"] if pred_target else None,
         "heartbeats": heartbeats,
         # Debug/Transparenz (optional):
         "params": {"base_frac": base_frac, "base_tau": base_tau, "eff_frac": eff_frac, "eff_tau": eff_tau, "recency_w": w, "h_since_change": h_since, "backtest_score_med_days": best["score"]},
     }
 
 
-def create_enhanced_forecast_text(forecast):
-    """Kompakte, mobilfreundliche Prognose (ALT vs. NEU) mit Legende und Kalendertagen."""
+def create_enhanced_forecast_text_precas(forecast):
+    """Kompakte, mobilfreundliche Prognose für Pre-CAS (ALT vs. NEU) mit nur einem Zieldatum."""
     if not forecast:
-        return "\n📊 Prognose: Noch nicht genügend Daten für eine zuverlässige Vorhersage."
+        return "\n📊 Pre-CAS Prognose: Noch nicht genügend Daten für eine zuverlässige Vorhersage."
 
     # Basis (ALT)
     r2_old   = float(forecast.get("r_squared", 0.0))
     pts_old  = int(forecast.get("data_points", 0))
     slope_old = float(forecast.get("slope", 0.0))
 
-    # Alte ETAs (echte Datumsobjekte, falls vorhanden)
-    def _old_eta_dt(frc, key):
+    # Alte ETA
+    def _old_eta_dt(frc):
         try:
-            return frc.get("predictions", {}).get(key, {}).get("date")
+            return frc.get("predictions", {}).get("13 August", {}).get("date")
         except Exception:
             return None
 
-    eta25_old_dt = _old_eta_dt(forecast, "25 July")
-    eta28_old_dt = _old_eta_dt(forecast, "28 July")
+    eta_old_dt = _old_eta_dt(forecast)
 
-    # Neue (integrierte) Metriken + echte ETA-Datetimes
+    # Neue (integrierte) Metriken + echte ETA-Datetime
     hist = get_history()
     try:
-        new_s = compute_integrated_model_metrics(hist)
+        new_s = compute_integrated_model_metrics(hist, stream="pre_cas")
     except Exception as e:
         print(f"⚠️ Integriertes Modell temporär deaktiviert: {e}")
         new_s = None
-
 
     if not new_s:
         # Fallback: nur ALT kompakt ausgeben
         parts = []
         parts.append("🎨 <b>Legende:</b> 🔵 ALT (linear) · 🟠 NEU (integriert)")
-        parts.append("\n📌 <b>Kurzprognose</b>")
-        parts.append("🎯 <b>25 July</b>")
-        parts.append(f"🔵 {_short_date(eta25_old_dt) if eta25_old_dt else '—'}"
-                     f" (in {_cal_days_until(eta25_old_dt)} Tagen)" if eta25_old_dt else "🔵 —")
-        parts.append("\n🎯 <b>28 July</b>")
-        parts.append(f"🔵 {_short_date(eta28_old_dt) if eta28_old_dt else '—'}"
-                     f" (in {_cal_days_until(eta28_old_dt)} Tagen)" if eta28_old_dt else "🔵 —")
+        parts.append("\n📌 <b>Pre-CAS Kurzprognose</b>")
+        parts.append("🎯 <b>13 August</b>")
+        parts.append(f"🔵 {_short_date(eta_old_dt) if eta_old_dt else '—'}"
+                     f" (in {_cal_days_until(eta_old_dt)} Tagen)" if eta_old_dt else "🔵 —")
         parts.append("\n📐 <b>Modelle</b>")
         parts.append(f"R²: 🔵 {r2_old:.2f} ({pts_old})")
         parts.append(f"Fortschritt: 🔵 {slope_old:.1f} d/Tag")
@@ -787,13 +778,11 @@ def create_enhanced_forecast_text(forecast):
     pts_new  = int(new_s["points"])
     slope_new = float(new_s.get("speed_val", 0.0))
     hb_count = int(new_s.get("heartbeats") or 0)
-    eta25_new_dt = new_s.get("eta25_dt")
-    eta28_new_dt = new_s.get("eta28_dt")
+    eta_new_dt = new_s.get("eta_target_dt")
 
-    # Kompakte Bullets (Kalendertage!)
-    text = render_compact_bullets(
-        eta25_old_dt, eta25_new_dt,
-        eta28_old_dt, eta28_new_dt,
+    # Kompakte Bullets für Pre-CAS
+    text = render_compact_bullets_precas(
+        eta_old_dt, eta_new_dt,
         r2_old, pts_old, slope_old,
         r2_new, pts_new, slope_new,
         hb_count=hb_count
@@ -801,19 +790,17 @@ def create_enhanced_forecast_text(forecast):
 
     return "\n" + text
 
-def create_forecast_text(forecast):
-    """Wrapper für Rückwärtskompatibilität - ruft erweiterte Version auf"""
-    return create_enhanced_forecast_text(forecast)
+def create_forecast_text(forecast, stream="all_other"):
+    """Wrapper für Rückwärtskompatibilität"""
+    if stream == "pre_cas":
+        return create_enhanced_forecast_text_precas(forecast)
+    else:
+        # Für andere Streams könnte man die alte Funktion verwenden
+        return create_enhanced_forecast_text_precas(forecast)
 
-def create_progression_graph(history, current_date, forecast=None):
+def create_progression_graph(history, current_date, forecast=None, stream="all_other"):
     """
-    ALT vs. NEU mit:
-      • exakten ETA-Schnittpunkten (25/28 July) auf den Regressionslinien,
-      • Heartbeats als Kreuze auf dem jeweiligen y-Wert,
-      • glatten Linien (fraktionale Business-Days) ohne Unsicherheitsflächen,
-      • kompakten Achsen & Datumsformaten.
-
-    Gibt BytesIO (PNG) zurück oder None.
+    Graph für den angegebenen Stream erstellen.
     """
     # Lazy load matplotlib and numpy
     plt, mdates = _get_matplotlib()
@@ -826,6 +813,17 @@ def create_progression_graph(history, current_date, forecast=None):
     COL_ALT = "#1f77b4"   # Alt: blau
     COL_NEU = "#ff7f0e"   # Neu: orange
     COL_HB  = "#2ca02c"   # Heartbeats: grün
+
+    # Stream-spezifischer Titel
+    if stream == "pre_cas":
+        title = "Pre-CAS Fortschritt & Prognose — ALT vs. NEU"
+        ylabel = "Pre-CAS Verarbeitungsdatum"
+    elif stream == "cas":
+        title = "CAS Fortschritt & Prognose — ALT vs. NEU"
+        ylabel = "CAS Verarbeitungsdatum"
+    else:
+        title = "Fortschritt & Prognose — ALT vs. NEU"
+        ylabel = "Verarbeitungsdatum"
 
     # ---------- Helfer ----------
     def _to_naive_berlin(dt_like):
@@ -905,7 +903,7 @@ def create_progression_graph(history, current_date, forecast=None):
         return mid
 
     # ---------- Daten sammeln ----------
-    entries = list(_iter_observations_or_changes(history))
+    entries = list(_iter_observations_or_changes(history, stream))
     if len(entries) < REGRESSION_MIN_POINTS:
         return None
 
@@ -929,7 +927,7 @@ def create_progression_graph(history, current_date, forecast=None):
     ordered = sorted(zip(change_ts, change_y, change_labels), key=lambda r: r[0])
     change_ts, change_y, change_labels = [list(t) for t in zip(*ordered)]
     
-    # GEÄNDERT: Filtere Heartbeats - nur den neuesten nach der letzten echten Änderung
+    # Filtere Heartbeats - nur den neuesten nach der letzten echten Änderung
     hb_ts, hb_y = [], []
     if change_ts:  # Wenn es echte Änderungen gibt
         last_change_ts = change_ts[-1]  # Letzter Change-Zeitpunkt
@@ -975,8 +973,13 @@ def create_progression_graph(history, current_date, forecast=None):
     ax.axvline(now_de, linewidth=1.0, linestyle=":", alpha=0.8)
     ax.scatter([change_ts[-1]], [change_y[-1]], s=100, zorder=6, label="Aktuell", color=COL_NEU)
 
-    # Zielhöhen (horizontale Linien)
-    target_map = {TARGET_DATES[0]: date_to_days(TARGET_DATES[0]), TARGET_DATES[1]: date_to_days(TARGET_DATES[1])}
+    # Zielhöhen (horizontale Linien) - für Pre-CAS nur ein Ziel
+    if stream == "pre_cas":
+        target_map = {"13 August": date_to_days("13 August")}
+    else:
+        # Für andere Streams
+        target_map = {name: date_to_days(name) for name in TARGET_DATES}
+    
     for tname, ty in target_map.items():
         if ty is not None:
             ax.axhline(ty, linestyle=":", linewidth=1.0, alpha=0.5)
@@ -1060,8 +1063,13 @@ def create_progression_graph(history, current_date, forecast=None):
                         xytext=(6, -12), textcoords="offset points", ha="left", va="top", fontsize=9,
                         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
 
-    _plot_eta("25", alt_eta.get("25 July"), neu_eta.get("25 July"))
-    _plot_eta("28", alt_eta.get("28 July"), neu_eta.get("28 July"))
+    # Für Pre-CAS nur ein Ziel
+    if stream == "pre_cas":
+        _plot_eta("13 Aug", alt_eta.get("13 August"), neu_eta.get("13 August"))
+    else:
+        # Für andere Streams könnten mehrere Ziele sein
+        for name in target_map:
+            _plot_eta(name.split()[0], alt_eta.get(name), neu_eta.get(name))
 
     # ---------- Achsenbegrenzungen ----------
     eta_dates = [p[0] for p in list(alt_eta.values()) + list(neu_eta.values()) if p]
@@ -1081,14 +1089,11 @@ def create_progression_graph(history, current_date, forecast=None):
             color=COL_HB, alpha=0.9,
             label="Heartbeats (NEU)"
         )
-        # Optionale, dezente Führungslinien:
-        # ylo, yhi = ax.get_ylim()
-        # ax.vlines(hb_ts, ylo + 0.01*(yhi-ylo), hb_y, colors=COL_HB, linewidth=0.8, alpha=0.35)
 
     # ---------- Achsenformat ----------
-    ax.set_title("Fortschritt & Prognose — ALT vs. NEU")
+    ax.set_title(title)
     ax.set_xlabel("Datum")
-    ax.set_ylabel("Verarbeitungsdatum")
+    ax.set_ylabel(ylabel)
 
     ax.xaxis.set_major_locator(mdates.DayLocator(interval=2))
     ax.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
@@ -1185,14 +1190,14 @@ def send_telegram_photo(photo_buffer, caption, parse_mode='HTML'):
     """Sendet ein Foto über Telegram Bot"""
     return send_telegram_message('', 'main', photo_buffer, caption, parse_mode)
 
-def send_telegram_mama(old_date, new_date):
+def send_telegram_mama(stream_name, old_date, new_date):
     """Sendet eine einfache Nachricht an Mama über separaten Bot"""
-    message = f"LSE-Datums-Update!\n\nVom: {old_date}\nAuf: {new_date}"
+    message = f"LSE {stream_name}-Update!\n\nVom: {old_date}\nAuf: {new_date}"
     return send_telegram_message(message, 'mama')
 
-def send_telegram_papa(old_date, new_date):
+def send_telegram_papa(stream_name, old_date, new_date):
     """Sendet eine einfache Nachricht an Papa über separaten Bot"""
-    message = f"LSE-Datums-Update!\n\nVom: {old_date}\nAuf: {new_date}"
+    message = f"LSE {stream_name}-Update!\n\nVom: {old_date}\nAuf: {new_date}"
     return send_telegram_message(message, 'papa')
 
 
@@ -1231,6 +1236,10 @@ def migrate_json_files():
             history['cas_changes'] = []
         if 'observations' not in history:
             history['observations'] = []
+        if 'pre_cas_observations' not in history:
+            history['pre_cas_observations'] = []
+        if 'cas_observations' not in history:
+            history['cas_observations'] = []
         with open(HISTORY_FILE, 'w') as f:
             json.dump(history, f, indent=2)
     except FileNotFoundError:
@@ -1257,7 +1266,7 @@ def load_status():
             status['cas_date'] = None
         if 'last_updated_seen_utc' not in status:
             status['last_updated_seen_utc'] = None
-        print(f"✅ Status geladen: {status['last_date']}")
+        print(f"✅ Status geladen: AOA={status['last_date']}, Pre-CAS={status['pre_cas_date']}, CAS={status['cas_date']}")
         return status
     except FileNotFoundError:
         print("ℹ️ status.json nicht gefunden, erstelle neue Datei")
@@ -1269,12 +1278,12 @@ def load_status():
     except Exception as e:
         print(f"❌ Unerwarteter Fehler beim Laden von status.json: {e}")
         return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
+
 def save_status(status):
     """Speichert Status mit Validierung und Verifikation"""
-    # Validiere dass last_date gesetzt ist
-    if not status.get('last_date'):
-        print("❌ Fehler: last_date ist leer, Status wird nicht gespeichert")
-        return False
+    # Validiere dass wichtige Felder gesetzt sind
+    if not status.get('pre_cas_date'):
+        print("⚠️ Warnung: pre_cas_date ist leer")
     
     # Erstelle Backup bevor wir speichern
     try:
@@ -1298,17 +1307,8 @@ def save_status(status):
         # Verifiziere dass es korrekt gespeichert wurde
         with open(STATUS_FILE, 'r') as f:
             saved = json.load(f)
-            if saved.get('last_date') == status['last_date']:
-                print(f"✅ Status erfolgreich gespeichert: {status['last_date']}")
-                return True
-            else:
-                print(f"❌ FEHLER: Status nicht korrekt gespeichert!")
-                print(f"   Erwartet: {status['last_date']}")
-                print(f"   Gespeichert: {saved.get('last_date')}")
-                # Restore backup
-                if os.path.exists(STATUS_FILE + '.backup'):
-                    os.rename(STATUS_FILE + '.backup', STATUS_FILE)
-                return False
+            print(f"✅ Status erfolgreich gespeichert: Pre-CAS={status['pre_cas_date']}")
+            return True
                 
     except Exception as e:
         print(f"❌ Fehler beim Speichern von status.json: {e}")
@@ -1324,33 +1324,33 @@ def load_history():
             history = json.load(f)
             
         # Validiere die geladenen Daten
-        if not isinstance(history, dict) or 'changes' not in history:
+        if not isinstance(history, dict):
             print("⚠️ History ist ungültig, verwende leere Historie")
-            return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+            return {"changes": [], "pre_cas_changes": [], "cas_changes": [], 
+                   "observations": [], "pre_cas_observations": [], "cas_observations": []}
             
-        if not isinstance(history['changes'], list):
-            print("⚠️ History changes ist keine Liste, verwende leere Historie")
-            return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
-        
-        # Stelle sicher dass neue Arrays existieren
-        if 'pre_cas_changes' not in history:
-            history['pre_cas_changes'] = []
-        if 'cas_changes' not in history:
-            history['cas_changes'] = []
-        if 'observations' not in history:
-            history['observations'] = []
+        # Stelle sicher dass alle Arrays existieren
+        for key in ['changes', 'pre_cas_changes', 'cas_changes', 
+                   'observations', 'pre_cas_observations', 'cas_observations']:
+            if key not in history:
+                history[key] = []
             
-        print(f"✅ Historie geladen: {len(history['changes'])} Änderungen, {len(history.get('observations', []))} Beobachtungen")
+        print(f"✅ Historie geladen: AOA={len(history['changes'])} Änderungen, "
+              f"Pre-CAS={len(history['pre_cas_changes'])} Änderungen, "
+              f"CAS={len(history['cas_changes'])} Änderungen")
         return history
     except FileNotFoundError:
         print("ℹ️ history.json nicht gefunden, erstelle neue Datei")
-        return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+        return {"changes": [], "pre_cas_changes": [], "cas_changes": [], 
+               "observations": [], "pre_cas_observations": [], "cas_observations": []}
     except json.JSONDecodeError as e:
         print(f"❌ Fehler beim Parsen von history.json: {e}")
-        return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+        return {"changes": [], "pre_cas_changes": [], "cas_changes": [], 
+               "observations": [], "pre_cas_observations": [], "cas_observations": []}
     except Exception as e:
         print(f"❌ Unerwarteter Fehler beim Laden von history.json: {e}")
-        return {"changes": [], "pre_cas_changes": [], "cas_changes": [], "observations": []}
+        return {"changes": [], "pre_cas_changes": [], "cas_changes": [], 
+               "observations": [], "pre_cas_observations": [], "cas_observations": []}
 
 def get_history():
     """Backward-compat wrapper to load history."""
@@ -1361,13 +1361,13 @@ def save_history(history):
     """Speichert Historie mit Validierung"""
     try:
         # Validiere die Historie
-        if not isinstance(history, dict) or 'changes' not in history:
+        if not isinstance(history, dict):
             print("❌ Fehler: Historie ist ungültig")
             return False
             
         with open(HISTORY_FILE, 'w') as f:
             json.dump(history, f, indent=2)
-        print(f"✅ Historie gespeichert: {len(history['changes'])} Änderungen")
+        print(f"✅ Historie gespeichert")
         return True
     except Exception as e:
         print(f"❌ Fehler beim Speichern von history.json: {e}")
@@ -1444,6 +1444,7 @@ def extract_cas_date(text):
     if match:
         return match.group(1).strip()
     return None
+
 def extract_last_updated(text):
     """Extrahiert 'Last updated' als UTC-datetime; None wenn nicht gefunden."""
     try:
@@ -1580,6 +1581,7 @@ def send_gmail(subject, body, recipients):
 def main():
     print("="*50)
     print(f"LSE Status Check - {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}")
+    print(f"AKTIVES TRACKING: {ACTIVE_STREAM.upper()}")
     
     # Zeige ob erweiterte Regression verfügbar ist
     if ADVANCED_REGRESSION:
@@ -1607,21 +1609,17 @@ def main():
     conditional_notify = [email for email in [email_main, email_2, email_3] if email and 'engelquast' in email.lower()]
     
     print(f"Immer benachrichtigen: {', '.join(always_notify)}")
-    print(f"Nur bei 25/28 July: {', '.join(conditional_notify)}")
+    print(f"Nur bei Zieldatum: {', '.join(conditional_notify)}")
     
     # Lade Status und Historie mit Fehlerbehandlung
     status = load_status()
     history = load_history()
-    print(f"Letztes bekanntes Datum: {status['last_date']}")
-    print(f"Letztes Pre-CAS: {status.get('pre_cas_date') or 'Noch nicht getrackt'}")
-    print(f"Letztes CAS: {status.get('cas_date') or 'Noch nicht getrackt'}")
     
     # Hole alle aktuellen Daten
     print("\nRufe LSE-Webseite ab...")
     current_dates = fetch_processing_dates()
     
-    
-    # Heartbeat-Beobachtung (Seite aktualisiert, Datum gleich)
+    # Heartbeat-Beobachtung für alle Streams
     try:
         last_up_iso = current_dates.get('last_updated_utc')
         if last_up_iso:
@@ -1633,6 +1631,20 @@ def main():
         if is_new_update:
             status['last_updated_seen_utc'] = last_up_iso
             save_status(status)
+            
+            # Heartbeat für Pre-CAS (aktiv)
+            current_pre_cas = current_dates.get('pre_cas')
+            if current_pre_cas == status.get('pre_cas_date'):
+                history.setdefault('pre_cas_observations', [])
+                if not any(o.get('timestamp') == last_up_iso for o in history['pre_cas_observations']):
+                    history['pre_cas_observations'].append({
+                        'timestamp': last_up_iso,
+                        'date': current_pre_cas,
+                        'kind': 'heartbeat'
+                    })
+                    save_history(history)
+            
+            # Heartbeat für AOA (passiv)
             current_all_other = current_dates.get('all_other')
             if current_all_other == status.get('last_date'):
                 history.setdefault('observations', [])
@@ -1643,49 +1655,62 @@ def main():
                         'kind': 'heartbeat'
                     })
                     save_history(history)
+            
+            # Heartbeat für CAS (passiv)
+            current_cas = current_dates.get('cas')
+            if current_cas == status.get('cas_date'):
+                history.setdefault('cas_observations', [])
+                if not any(o.get('timestamp') == last_up_iso for o in history['cas_observations']):
+                    history['cas_observations'].append({
+                        'timestamp': last_up_iso,
+                        'date': current_cas,
+                        'kind': 'heartbeat'
+                    })
+                    save_history(history)
     except Exception as _e:
         print(f"⚠️ Heartbeat-Logik übersprungen: {_e}")
-# Stilles Tracking für Pre-CAS (keine Benachrichtigungen)
-    if current_dates['pre_cas'] and current_dates['pre_cas'] != status.get('pre_cas_date'):
-        print(f"\n📝 Pre-CAS Änderung (stilles Tracking): {status.get('pre_cas_date') or 'Unbekannt'} → {current_dates['pre_cas']}")
-        history['pre_cas_changes'].append({
+
+    # PASSIVE TRACKING FÜR AOA (stilles Tracking, keine Benachrichtigungen)
+    if current_dates['all_other'] and current_dates['all_other'] != status.get('last_date'):
+        print(f"\n📝 AOA Änderung (passives Tracking): {status.get('last_date') or 'Unbekannt'} → {current_dates['all_other']}")
+        history['changes'].append({
             "timestamp": datetime.utcnow().isoformat(),
-            "date": current_dates['pre_cas'],
-            "from": status.get('pre_cas_date')
+            "date": current_dates['all_other'],
+            "from": status.get('last_date')
         })
-        status['pre_cas_date'] = current_dates['pre_cas']
-        # Speichere sofort
+        status['last_date'] = current_dates['all_other']
         save_history(history)
+        save_status(status)
     
-    # Stilles Tracking für CAS (keine Benachrichtigungen)
+    # PASSIVE TRACKING FÜR CAS (stilles Tracking, keine Benachrichtigungen)
     if current_dates['cas'] and current_dates['cas'] != status.get('cas_date'):
-        print(f"\n📝 CAS Änderung (stilles Tracking): {status.get('cas_date') or 'Unbekannt'} → {current_dates['cas']}")
+        print(f"\n📝 CAS Änderung (passives Tracking): {status.get('cas_date') or 'Unbekannt'} → {current_dates['cas']}")
         history['cas_changes'].append({
             "timestamp": datetime.utcnow().isoformat(),
             "date": current_dates['cas'],
             "from": status.get('cas_date')
         })
         status['cas_date'] = current_dates['cas']
-        # Speichere sofort
         save_history(history)
+        save_status(status)
     
-    # Hauptlogik für "all other applicants" (mit Benachrichtigungen wie bisher)
-    current_date = current_dates['all_other']
+    # HAUPTLOGIK FÜR PRE-CAS (AKTIVES TRACKING MIT BENACHRICHTIGUNGEN)
+    current_date = current_dates['pre_cas']
     
     if current_date:
-        print(f"Aktuelles Datum für 'all other graduate applicants': {current_date}")
+        print(f"Aktuelles Pre-CAS Datum: {current_date}")
         
-        # Bei manuellem Check immer Status senden (NUR für all other applicants)
+        # Bei manuellem Check immer Status senden
         if IS_MANUAL:
             # Berechne aktuellen Trend und erstelle vollständige Prognose
-            forecast = calculate_regression_forecast(history)
-            forecast_text = create_forecast_text(forecast) or ""
+            forecast = calculate_regression_forecast(history, stream="pre_cas")
+            forecast_text = create_forecast_text(forecast, stream="pre_cas") or ""
             
-            telegram_msg = f"""<b>📊 LSE Status Check Ergebnis</b>
+            telegram_msg = f"""<b>📊 LSE Pre-CAS Status Check Ergebnis</b>
 
-<b>Aktuelles Datum:</b> {current_date}
-<b>Letzter Stand:</b> {status['last_date']}
-<b>Status:</b> {"🔔 ÄNDERUNG ERKANNT!" if current_date != status['last_date'] else "✅ Keine Änderung"}
+<b>Aktuelles Pre-CAS Datum:</b> {current_date}
+<b>Letzter Stand:</b> {status.get('pre_cas_date', 'Unbekannt')}
+<b>Status:</b> {"🔔 ÄNDERUNG ERKANNT!" if current_date != status.get('pre_cas_date') else "✅ Keine Änderung"}
 
 <b>Zeitpunkt:</b> {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 {forecast_text}
@@ -1696,28 +1721,28 @@ def main():
             send_telegram(telegram_msg)
             
             # Erstelle und sende Graph
-            graph_buffer = create_progression_graph(history, current_date, forecast)
+            graph_buffer = create_progression_graph(history, current_date, forecast, stream="pre_cas")
             if graph_buffer:
-                graph_caption = f"📈 Progression der LSE Verarbeitungsdaten\nAktuell: {current_date}"
+                graph_caption = f"📈 Progression der Pre-CAS Verarbeitungsdaten\nAktuell: {current_date}"
                 send_telegram_photo(graph_buffer, graph_caption)
         
-        # WICHTIG: Prüfe ob sich das Datum wirklich geändert hat
-        if current_date != status['last_date']:
-            print("\n🔔 ÄNDERUNG ERKANNT!")
-            print(f"   Von: {status['last_date']}")
+        # WICHTIG: Prüfe ob sich das Pre-CAS Datum wirklich geändert hat
+        if current_date != status.get('pre_cas_date'):
+            print("\n🔔 PRE-CAS ÄNDERUNG ERKANNT!")
+            print(f"   Von: {status.get('pre_cas_date', 'Unbekannt')}")
             print(f"   Auf: {current_date}")
             
             # Sende einfache Nachricht an Mama
-            send_telegram_mama(status['last_date'], current_date)
+            send_telegram_mama("Pre-CAS", status.get('pre_cas_date', 'Unbekannt'), current_date)
             
             # Sende einfache Nachricht an Papa
-            send_telegram_papa(status['last_date'], current_date)
+            send_telegram_papa("Pre-CAS", status.get('pre_cas_date', 'Unbekannt'), current_date)
             
             # Speichere in Historie mit UTC Zeit (für Konsistenz)
-            history["changes"].append({
+            history["pre_cas_changes"].append({
                 "timestamp": datetime.utcnow().isoformat(),
                 "date": current_date,
-                "from": status['last_date']
+                "from": status.get('pre_cas_date')
             })
             
             # Speichere Historie sofort
@@ -1725,20 +1750,20 @@ def main():
                 print("❌ Fehler beim Speichern der Historie!")
             
             # Berechne Prognose
-            forecast = calculate_regression_forecast(history)
-            forecast_text = create_forecast_text(forecast) or ""
+            forecast = calculate_regression_forecast(history, stream="pre_cas")
+            forecast_text = create_forecast_text(forecast, stream="pre_cas") or ""
             
             # Erstelle E-Mail-Inhalt
-            subject = f"LSE Status Update: Neues Datum {current_date}"
+            subject = f"LSE Pre-CAS Update: Neues Datum {current_date}"
             
             # Bei manuellem Check: Hinweis in E-Mail
             manual_hint = "\n\n(Änderung durch manuellen Check via Telegram entdeckt)" if IS_MANUAL else ""
             
             # Basis-E-Mail für alle
-            base_body = f"""Das Verarbeitungsdatum für "all other graduate applicants" hat sich geändert!
+            base_body = f"""Das Pre-CAS Verarbeitungsdatum hat sich geändert!
 
 ÄNDERUNG:
-Von: {status['last_date']}
+Von: {status.get('pre_cas_date', 'Unbekannt')}
 Auf: {current_date}
 
 Zeitpunkt der Erkennung: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
@@ -1754,10 +1779,10 @@ Link zur Seite: {URL}{manual_hint}"""
             # Telegram-Nachricht formatieren
             if not IS_MANUAL:
                 # Automatischer Check: Standard-Änderungsnachricht mit Graph
-                telegram_msg = f"""<b>🔔 LSE Status Update</b>
+                telegram_msg = f"""<b>🔔 LSE Pre-CAS Update</b>
 
 <b>ÄNDERUNG ERKANNT!</b>
-Von: {status['last_date']}
+Von: {status.get('pre_cas_date', 'Unbekannt')}
 Auf: <b>{current_date}</b>
 
 Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
@@ -1768,17 +1793,17 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
                 send_telegram(telegram_msg)
                 
                 # Sende Graph als separates Bild
-                graph_buffer = create_progression_graph(history, current_date, forecast)
+                graph_buffer = create_progression_graph(history, current_date, forecast, stream="pre_cas")
                 if graph_buffer:
-                    graph_caption = f"📈 Progression Update\nNeues Datum: {current_date}"
+                    graph_caption = f"📈 Pre-CAS Progression Update\nNeues Datum: {current_date}"
                     send_telegram_photo(graph_buffer, graph_caption)
             else:
                 # Manueller Check: Spezielle Nachricht bei Änderung mit Graph
-                telegram_msg = f"""<b>🚨 ÄNDERUNG GEFUNDEN!</b>
+                telegram_msg = f"""<b>🚨 PRE-CAS ÄNDERUNG GEFUNDEN!</b>
 
-Dein manueller Check hat eine Änderung entdeckt!
+Dein manueller Check hat eine Pre-CAS Änderung entdeckt!
 
-Von: {status['last_date']}
+Von: {status.get('pre_cas_date', 'Unbekannt')}
 Auf: <b>{current_date}</b>
 
 Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
@@ -1791,9 +1816,9 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
                 send_telegram(telegram_msg)
                 
                 # Sende Graph
-                graph_buffer = create_progression_graph(history, current_date, forecast)
+                graph_buffer = create_progression_graph(history, current_date, forecast, stream="pre_cas")
                 if graph_buffer:
-                    graph_caption = f"📈 Änderung erkannt!\nVon {status['last_date']} auf {current_date}"
+                    graph_caption = f"📈 Pre-CAS Änderung erkannt!\nVon {status.get('pre_cas_date', 'Unbekannt')} auf {current_date}"
                     send_telegram_photo(graph_buffer, graph_caption)
             
             # Sende E-Mails
@@ -1804,36 +1829,35 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
                 if send_gmail(subject, body_with_forecast, always_notify):
                     emails_sent = True
             
-            # Bedingt benachrichtigen (nur bei 25 oder 28 July)
-            if conditional_notify and current_date in TARGET_DATES:
-                print(f"\n🎯 Zieldatum {current_date} erreicht! Benachrichtige zusätzliche Empfänger.")
+            # Bedingt benachrichtigen (nur bei Zieldatum 13 August)
+            if conditional_notify and current_date == "13 August":
+                print(f"\n🎯 Pre-CAS Zieldatum 13 August erreicht! Benachrichtige zusätzliche Empfänger.")
                 if send_gmail(subject, body_simple, conditional_notify):
                     emails_sent = True
                 
                 # Spezielle Telegram-Nachricht für Zieldatum mit Graph
-                telegram_special = f"""<b>🎯 ZIELDATUM ERREICHT!</b>
+                telegram_special = f"""<b>🎯 PRE-CAS ZIELDATUM ERREICHT!</b>
 
-Das Datum <b>{current_date}</b> wurde erreicht!
+Das Pre-CAS Datum <b>13 August</b> wurde erreicht!
 
-Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
+Dies ist das wichtige Zieldatum für deine Pre-CAS Verarbeitung.
 
 <a href="{URL}">📄 Jetzt zur LSE Webseite</a>"""
                 send_telegram(telegram_special)
                 
                 # Sende speziellen Graph für Zieldatum
-                graph_buffer = create_progression_graph(history, current_date, forecast)
+                graph_buffer = create_progression_graph(history, current_date, forecast, stream="pre_cas")
                 if graph_buffer:
-                    graph_caption = f"🎯 ZIELDATUM ERREICHT: {current_date}!"
+                    graph_caption = f"🎯 PRE-CAS ZIELDATUM ERREICHT: 13 August!"
                     send_telegram_photo(graph_buffer, graph_caption)
             
             if emails_sent or os.environ.get('TELEGRAM_BOT_TOKEN'):
-                # KRITISCH: Update Status IMMER nach einer erkannten Änderung
-                # Update Status nur bei erfolgreicher Benachrichtigung
-                status['last_date'] = current_date
+                # Update Status nach erfolgreicher Benachrichtigung
+                status['pre_cas_date'] = current_date
                 status['last_check'] = datetime.utcnow().isoformat()
                 
-                # KRITISCH: Speichere Status mehrfach mit Verifikation
-                print("\n🔄 Speichere aktualisierten Status...")
+                # Speichere Status mehrfach mit Verifikation
+                print("\n🔄 Speichere aktualisierten Pre-CAS Status...")
                 save_attempts = 0
                 save_success = False
                 
@@ -1844,11 +1868,11 @@ Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
                     if save_status(status):
                         # Verifiziere durch erneutes Laden
                         verify_status = load_status()
-                        if verify_status.get('last_date') == current_date:
-                            print(f"✅ Status erfolgreich gespeichert und verifiziert: {current_date}")
+                        if verify_status.get('pre_cas_date') == current_date:
+                            print(f"✅ Pre-CAS Status erfolgreich gespeichert und verifiziert: {current_date}")
                             save_success = True
                         else:
-                            print(f"❌ Verifikation fehlgeschlagen! Erwartet: {current_date}, Geladen: {verify_status.get('last_date')}")
+                            print(f"❌ Verifikation fehlgeschlagen! Erwartet: {current_date}, Geladen: {verify_status.get('pre_cas_date')}")
                     else:
                         print(f"❌ Speichern fehlgeschlagen in Versuch {save_attempts}")
                     
@@ -1856,30 +1880,30 @@ Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
                         time.sleep(1)
                 
                 if not save_success:
-                    print("❌ KRITISCHER FEHLER: Status konnte nach 3 Versuchen nicht gespeichert werden!")
+                    print("❌ KRITISCHER FEHLER: Pre-CAS Status konnte nach 3 Versuchen nicht gespeichert werden!")
                     sys.exit(1)
                 
                 # Speichere auch die Historie nochmal zur Sicherheit
                 if not save_history(history):
                     print("❌ Fehler beim erneuten Speichern der Historie!")
             else:
-                print("⚠️  Status wurde NICHT aktualisiert (keine Benachrichtigung erfolgreich)")
+                print("⚠️  Pre-CAS Status wurde NICHT aktualisiert (keine Benachrichtigung erfolgreich)")
         else:
-            print("✅ Keine Änderung - alles beim Alten.")
+            print("✅ Keine Pre-CAS Änderung - alles beim Alten.")
             status['last_check'] = datetime.utcnow().isoformat()  # UTC für Konsistenz
             # Speichere auch bei keiner Änderung den aktualisierten Timestamp
             save_status(status)
     else:
-        print("\n⚠️  WARNUNG: Konnte das Datum nicht von der Webseite extrahieren!")
+        print("\n⚠️  WARNUNG: Konnte das Pre-CAS Datum nicht von der Webseite extrahieren!")
         
         # Bei manueller Ausführung auch Fehler melden
         if IS_MANUAL:
-            telegram_error = f"""<b>❌ Manueller Check fehlgeschlagen</b>
+            telegram_error = f"""<b>❌ Manueller Pre-CAS Check fehlgeschlagen</b>
 
-Konnte das Datum nicht von der Webseite extrahieren!
+Konnte das Pre-CAS Datum nicht von der Webseite extrahieren!
 
 <b>Zeitpunkt:</b> {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
-<b>Letztes bekanntes Datum:</b> {status['last_date']}
+<b>Letztes bekanntes Pre-CAS Datum:</b> {status.get('pre_cas_date', 'Unbekannt')}
 
 Bitte prüfe die Webseite manuell.
 
@@ -1888,11 +1912,11 @@ Bitte prüfe die Webseite manuell.
             send_telegram(telegram_error)
         
         # Sende Warnung per E-Mail
-        subject = "LSE Monitor WARNUNG: Datum nicht gefunden"
-        body = f"""WARNUNG: Der LSE Monitor konnte das Datum nicht von der Webseite extrahieren!
+        subject = "LSE Monitor WARNUNG: Pre-CAS Datum nicht gefunden"
+        body = f"""WARNUNG: Der LSE Monitor konnte das Pre-CAS Datum nicht von der Webseite extrahieren!
 
 Zeitpunkt: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
-Letztes bekanntes Datum: {status['last_date']}
+Letztes bekanntes Pre-CAS Datum: {status.get('pre_cas_date', 'Unbekannt')}
 
 Bitte überprüfe:
 1. Ist die Webseite erreichbar? {URL}
@@ -1907,9 +1931,9 @@ Der Monitor wird weiterhin prüfen."""
         if not IS_MANUAL:
             telegram_warning = f"""<b>⚠️ LSE Monitor WARNUNG</b>
 
-Konnte das Datum nicht von der Webseite extrahieren!
+Konnte das Pre-CAS Datum nicht von der Webseite extrahieren!
 
-Letztes bekanntes Datum: <b>{status['last_date']}</b>
+Letztes bekanntes Pre-CAS Datum: <b>{status.get('pre_cas_date', 'Unbekannt')}</b>
 Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 
 Mögliche Gründe:
@@ -1931,18 +1955,18 @@ Mögliche Gründe:
     print("\n📁 FINALE DATEIEN:")
     print("=== status.json ===")
     os.system("cat status.json")
-    print("\n=== history.json (letzte 3 Einträge) ===")
-    os.system("tail -n 20 history.json | head -n 20")
+    print("\n=== history.json (letzte 3 Pre-CAS Einträge) ===")
+    os.system("grep -A3 pre_cas_changes history.json | tail -n 10")
     
     # Finaler Status-Output für Debugging
     print("\n📊 FINALER STATUS:")
     try:
         with open(STATUS_FILE, 'r') as f:
             final_status = json.load(f)
-            print(f"   last_date: {final_status.get('last_date')}")
+            print(f"   last_date (AOA): {final_status.get('last_date')}")
+            print(f"   pre_cas_date: {final_status.get('pre_cas_date')}")
+            print(f"   cas_date: {final_status.get('cas_date')}")
             print(f"   last_check: {final_status.get('last_check')}")
-            print(f"   pre_cas_date: {final_status.get('pre_cas_date') or 'Nicht getrackt'}")
-            print(f"   cas_date: {final_status.get('cas_date') or 'Nicht getrackt'}")
     except Exception as e:
         print(f"   Fehler beim Lesen des finalen Status: {e}")
 
