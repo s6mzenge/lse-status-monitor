@@ -190,7 +190,7 @@ class IntegratedRegressor:
              y_hat(x) = (1-w)*TS(x) + w*LOESS(x), w = exp(-dist/tau)
     """
     cal: BusinessCalendar
-    base_date: date = date(2025,1,1)
+    base_date: date = date(2025,7,1)
     loess_frac: float = 0.6
     tau_hours: float = 12.0  # scale for blending; ~2 Geschäftstage à 6h
     # fitted:
