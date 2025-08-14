@@ -1134,42 +1134,59 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
         y_range = ax.get_ylim()
         y_min = y_range[0]
         
-        # Position etwa 5-10% oberhalb des unteren Rands (innerhalb des Graphbereichs)
-        y_text_pos = y_min + (y_range[1] - y_min) * 0.08  # 8% von unten
+        # Basis Y-Position etwa 8% oberhalb des unteren Rands
+        y_text_pos = y_min + (y_range[1] - y_min) * 0.08
         
         if alt_pt and neu_pt:
-            # Beide vorhanden - prüfe Abstand
-            days_diff = abs((neu_pt[0] - alt_pt[0]).days)
+            # Prüfe ob GLEICHES DATUM
+            same_date = (alt_pt[0].date() == neu_pt[0].date())
             
-            if days_diff < 2:  # Zu nah beieinander
-                # EINE gemeinsame Beschriftung zwischen beiden Linien
-                date_alt = alt_pt[0].strftime('%d.')
-                date_neu = neu_pt[0].strftime('%d. %B')
-                combined_text = f"{date_alt}/{date_neu}"
+            if same_date:
+                # GLEICHES DATUM: Eine gemeinsame Beschriftung
+                date_str = alt_pt[0].strftime('%d. %B')
                 
-                # KORRIGIERT: Berechne Mittelpunkt korrekt
-                from datetime import datetime
-                timestamp1 = alt_pt[0].timestamp()
-                timestamp2 = neu_pt[0].timestamp()
-                x_pos = datetime.fromtimestamp((timestamp1 + timestamp2) / 2)
+                # Position: Mittig zwischen beiden Linien (oder auf der ersten wenn sehr nah)
+                days_diff = abs((neu_pt[0] - alt_pt[0]).total_seconds() / 86400)
+                if days_diff < 0.1:  # Praktisch identisch
+                    x_pos = alt_pt[0]
+                else:
+                    # Berechne Mittelpunkt korrekt
+                    from datetime import datetime
+                    timestamp1 = alt_pt[0].timestamp()
+                    timestamp2 = neu_pt[0].timestamp()
+                    x_pos = datetime.fromtimestamp((timestamp1 + timestamp2) / 2)
                 
-                # Kombinierte Beschriftung in schwarz oder grau
-                ax.text(x_pos, y_text_pos, combined_text,
+                # Eine Beschriftung für beide
+                ax.text(x_pos, y_text_pos, date_str,
                         ha='center', va='bottom', fontsize=8, color='gray',
                         rotation=90, alpha=0.9, weight='semibold')
+            
             else:
-                # ZWEI separate Beschriftungen
-                # ALT Beschriftung
-                ax.text(alt_pt[0] - timedelta(days=0.8), y_text_pos, 
-                        alt_pt[0].strftime('%d. %B'),
-                        ha='right', va='bottom', fontsize=8, color=COL_ALT,
-                        rotation=90, alpha=0.9)
+                # UNTERSCHIEDLICHE DATEN
+                days_diff = abs((neu_pt[0] - alt_pt[0]).days)
                 
-                # NEU Beschriftung
-                ax.text(neu_pt[0] - timedelta(days=0.8), y_text_pos,
-                        neu_pt[0].strftime('%d. %B'),
-                        ha='right', va='bottom', fontsize=8, color=COL_NEU,
-                        rotation=90, alpha=0.9)
+                if days_diff < 2:  # Zu nah für normale Platzierung
+                    # Versetze vertikal
+                    ax.text(alt_pt[0] - timedelta(days=0.3), y_text_pos + 1.5,  # ALT höher
+                            alt_pt[0].strftime('%d. %B'),
+                            ha='right', va='bottom', fontsize=8, color=COL_ALT,
+                            rotation=90, alpha=0.9)
+                    
+                    ax.text(neu_pt[0] - timedelta(days=0.3), y_text_pos,  # NEU tiefer
+                            neu_pt[0].strftime('%d. %B'),
+                            ha='right', va='bottom', fontsize=8, color=COL_NEU,
+                            rotation=90, alpha=0.9)
+                else:
+                    # Weit genug auseinander: normale Platzierung
+                    ax.text(alt_pt[0] - timedelta(days=0.8), y_text_pos, 
+                            alt_pt[0].strftime('%d. %B'),
+                            ha='right', va='bottom', fontsize=8, color=COL_ALT,
+                            rotation=90, alpha=0.9)
+                    
+                    ax.text(neu_pt[0] - timedelta(days=0.8), y_text_pos,
+                            neu_pt[0].strftime('%d. %B'),
+                            ha='right', va='bottom', fontsize=8, color=COL_NEU,
+                            rotation=90, alpha=0.9)
         
         elif alt_pt:
             # Nur ALT vorhanden
