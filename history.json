@@ -121,5 +121,7 @@
       "date": "25 July",
       "kind": "heartbeat"
     }
-  ]
+  ],
+  "pre_cas_observations": [],
+  "cas_observations": []
 }
