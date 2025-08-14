@@ -193,6 +193,7 @@ class IntegratedRegressor:
     base_date: date = date(2025,1,1)
     loess_frac: float = 0.6
     tau_hours: float = 12.0  # scale for blending; ~2 Geschäftstage à 6h
+    use_velocity_adjustment: bool = True
     # fitted:
     x_: np.ndarray = field(default=None, init=False)
     y_: np.ndarray = field(default=None, init=False)
@@ -318,3 +319,122 @@ class IntegratedRegressor:
             "when_low": to_dt(x_lo),
             "when_high": to_dt(x_hi),
         }
+    def _calculate_velocities(self, rows: List[Dict]) -> List[float]:
+        """
+        Berechnet die Verarbeitungsgeschwindigkeit zwischen aufeinanderfolgenden Änderungen.
+        Rückgabe: Liste von Geschwindigkeiten in Tagen/Business-Stunde
+        """
+        velocities = []
+        
+        for i in range(1, len(rows)):
+            # Zeitdifferenz in Business-Stunden
+            t1 = datetime.fromisoformat(rows[i-1]["timestamp"]).replace(tzinfo=UTC).astimezone(self.cal.tz)
+            t2 = datetime.fromisoformat(rows[i]["timestamp"]).replace(tzinfo=UTC).astimezone(self.cal.tz)
+            business_hours = self.cal.business_minutes_between(t1, t2) / 60.0
+            
+            # Fortschritt in Tagen
+            y1 = parse_processing_date(rows[i-1]["date"])
+            y2 = parse_processing_date(rows[i]["date"])
+            days_progress = (y2 - y1).days
+            
+            if business_hours > 0:
+                velocity = days_progress / business_hours
+                velocities.append(velocity)
+        
+        return velocities
+    
+    def _compute_velocity_factor(self, rows: List[Dict]) -> Tuple[float, float, str]:
+        """
+        Berechnet Anpassungsfaktoren basierend auf Geschwindigkeitstrend.
+        
+        Returns:
+            Tuple[float, float, str]: (loess_frac_multiplier, tau_multiplier, trend_description)
+        """
+        if not self.use_velocity_adjustment or len(rows) < 4:
+            return 1.0, 1.0, "insufficient_data"
+        
+        velocities = self._calculate_velocities(rows)
+        
+        if len(velocities) < 3:
+            return 1.0, 1.0, "insufficient_velocities"
+        
+        # Berechne gleitende Durchschnitte
+        recent_window = min(2, len(velocities))  # Letzte 2 Änderungen
+        historical_window = min(4, len(velocities) - recent_window)  # Vorherige 4
+        
+        if historical_window <= 0:
+            return 1.0, 1.0, "insufficient_history"
+        
+        recent_velocities = velocities[-recent_window:]
+        historical_velocities = velocities[-(recent_window + historical_window):-recent_window]
+        
+        recent_avg = float(np.mean(recent_velocities))
+        historical_avg = float(np.mean(historical_velocities))
+        
+        # Vermeide Division durch Null
+        if historical_avg < 0.01:
+            historical_avg = 0.01
+        
+        acceleration_ratio = recent_avg / historical_avg
+        
+        # Bestimme Trend und Anpassungsfaktoren
+        if acceleration_ratio > 1.3:  # Beschleunigung > 30%
+            # Bei Beschleunigung: Mehr LOESS (lokale Patterns wichtiger)
+            # Kürzeres Tau (schnellere Anpassung an neue Geschwindigkeit)
+            loess_mult = min(1.3, 1.0 + (acceleration_ratio - 1.0) * 0.3)
+            tau_mult = max(0.6, 1.0 - (acceleration_ratio - 1.0) * 0.2)
+            trend = f"accelerating_{acceleration_ratio:.1f}x"
+            
+        elif acceleration_ratio < 0.7:  # Verlangsamung > 30%
+            # Bei Verlangsamung: Weniger LOESS (globaler Trend stabiler)
+            # Längeres Tau (ignoriere kurzfristige Schwankungen)
+            loess_mult = max(0.7, acceleration_ratio)
+            tau_mult = min(1.5, 2.0 - acceleration_ratio)
+            trend = f"decelerating_{acceleration_ratio:.1f}x"
+            
+        else:  # Konstante Geschwindigkeit
+            loess_mult = 1.0
+            tau_mult = 1.0
+            trend = "steady"
+        
+        # Debug-Ausgabe
+        print(f"📊 Velocity Analysis: Recent={recent_avg:.3f} d/h, "
+              f"Historical={historical_avg:.3f} d/h, Ratio={acceleration_ratio:.2f}")
+        print(f"   → Trend: {trend}, LOESS mult={loess_mult:.2f}, Tau mult={tau_mult:.2f}")
+        
+        return loess_mult, tau_mult, trend
+    
+    def fit(self, rows: List[Dict]) -> "IntegratedRegressor":
+        """Erweiterte fit-Methode mit Velocity-Anpassung"""
+        
+        # Basis-Fit wie bisher
+        x, y, t0 = self._prepare_xy(rows)
+        self.x_, self.y_, self.t0_ = x, y, t0
+        self.ts_ = RobustLinear.fit(x, y)
+        
+        # NEU: Velocity-basierte Parameter-Anpassung
+        if self.use_velocity_adjustment:
+            loess_mult, tau_mult, trend = self._compute_velocity_factor(rows)
+            
+            # Angepasste Parameter
+            adjusted_loess_frac = np.clip(self.loess_frac * loess_mult, 0.3, 0.85)
+            adjusted_tau = np.clip(self.tau_hours * tau_mult, 6.0, 30.0)
+            
+            # Speichere Original-Parameter und verwende angepasste
+            self._original_loess_frac = self.loess_frac
+            self._original_tau = self.tau_hours
+            self.loess_frac = adjusted_loess_frac
+            self.tau_hours = adjusted_tau
+            self._velocity_trend = trend
+            
+            print(f"   → Adjusted params: LOESS frac {self._original_loess_frac:.2f} → {self.loess_frac:.2f}, "
+                  f"Tau {self._original_tau:.1f}h → {self.tau_hours:.1f}h")
+        
+        # Erstelle LOESS mit angepassten Parametern
+        self.loess_ = LOESS(self.loess_frac)
+        
+        # RMSE berechnen
+        y_hat = self._blend_predict(x)
+        self.rmse_ = float(np.sqrt(np.mean((y - y_hat)**2)))
+        
+        return self
