@@ -1062,12 +1062,6 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
             if len(y_new) > 0:
                 y_new = np.array(y_new)
                 
-                # GLÄTTUNG: Entferne Sprünge mit Savitzky-Golay-Filter
-                
-                
-                # OFFSET-KORREKTUR: Von Juli-Basis auf Januar-Basis
-                y_new = y_new + 181  # 181 = Tage zwischen 1. Jan und 1. Juli
-                
                 # Zeichne die Blend-Kurve
                 ax.plot(grid_ts, y_new, linewidth=2.6, 
                         label=f"NEU: integrierte Regression (R²={r2_value:.2f})",
@@ -1087,9 +1081,6 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
                                 y_star = imodel._blend_predict_scalar(x_hours_star)
                             except:
                                 y_star = float(imodel.ts_.predict(x_hours_star))
-                            
-                            # OFFSET-KORREKTUR auch für ETA-Punkte
-                            y_star = y_star + 181
                             
                             neu_eta[name] = (t_star, y_star)
                     except Exception as e:
