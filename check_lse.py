@@ -601,9 +601,14 @@ def _eta_backtest_score(rows_all, rows_changes, cal, loess_frac, tau_hours, tz_o
     return _median(errors_days)
 
 
-def compute_integrated_model_metrics(history, stream="all_other"):
+def compute_integrated_model_metrics(history, stream="all_other", return_model=False):
     """
     Integrierte Regression für den angegebenen Stream.
+    
+    Args:
+        history: Historie-Dictionary
+        stream: "all_other", "pre_cas", oder "cas"
+        return_model: Wenn True, gibt auch das trainierte Modell und Calendar zurück
     """
     from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
     from datetime import time as _time
@@ -633,6 +638,8 @@ def compute_integrated_model_metrics(history, stream="all_other"):
 
     # 2) If fewer than 3 changes exist, return None
     if len(rows_changes) < 3:
+        if return_model:
+            return None, None, None
         return None  # zu wenig für integriertes Modell
 
     # 3) Determine last_change_ts from the last entry in rows_changes
@@ -719,7 +726,7 @@ def compute_integrated_model_metrics(history, stream="all_other"):
     now_de = _now_berlin()
     d_target = (pred_target["when_point"] - now_de).total_seconds() / 86400.0 if pred_target and pred_target.get("when_point") else None
 
-    return {
+    result = {
         "name": "NEU (integriert)",
         "r2": r2_new,
         "points": len(rows_all),
@@ -731,7 +738,10 @@ def compute_integrated_model_metrics(history, stream="all_other"):
         # Debug/Transparenz (optional):
         "params": {"base_frac": base_frac, "base_tau": base_tau, "eff_frac": eff_frac, "eff_tau": eff_tau, "recency_w": w, "h_since_change": h_since, "backtest_score_med_days": best["score"]},
     }
-
+    
+    if return_model:
+        return result, imodel, cal  # Gebe auch das trainierte Modell und Calendar zurück
+    return result
 
 def create_enhanced_forecast_text_precas(forecast):
     """Kompakte, mobilfreundliche Prognose für Pre-CAS (ALT vs. NEU) mit nur einem Zieldatum."""
@@ -1014,115 +1024,87 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
                 y_star = m_old * _bizdays_float(first_ts, t_star) + b_old
                 alt_eta[name] = (t_star, y_star)
 
-    
-    # ---------- NEU-Linie + ETAs ----------
+    # ---------- NEU-Linie + ETAs (VERWENDET DAS GLEICHE MODELL WIE DIE PROGNOSE) ----------
     neu_eta = {}
     try:
-        # WICHTIG: Verwende die GLEICHE Modell-Berechnung wie in compute_integrated_model_metrics!
-        new_metrics = compute_integrated_model_metrics(history, stream=stream)
+        # WICHTIG: Hole das GLEICHE trainierte Modell wie für die Prognose
+        new_metrics_result = compute_integrated_model_metrics(history, stream=stream, return_model=True)
         
-        if new_metrics:
-            # Hole die optimierten Parameter aus den Metriken
-            params = new_metrics.get("params", {})
-            eff_frac = params.get("eff_frac", 0.6)
-            eff_tau = params.get("eff_tau", 12.0)
+        if new_metrics_result is not None:
+            new_metrics, imodel, cal = new_metrics_result
             
-            from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
-            from datetime import time as _time
-            
-            # Baue die gleichen Daten auf wie in compute_integrated_model_metrics
-            rows_all = []
-            rows_changes = []
-            
-            # Verwende stream-spezifische Daten (genau wie in compute_integrated_model_metrics)
-            if stream == "pre_cas":
-                changes_key = "pre_cas_changes"
-                obs_key = "pre_cas_observations"
-            elif stream == "cas":
-                changes_key = "cas_changes"
-                obs_key = "cas_observations"
-            else:
-                changes_key = "changes"
-                obs_key = "observations"
-            
-            # Sammle Changes
-            for ch in history.get(changes_key, []):
-                rows_changes.append({"timestamp": ch["timestamp"], "date": ch["date"]})
-                rows_all.append({"timestamp": ch["timestamp"], "date": ch["date"]})
-            
-            rows_changes.sort(key=lambda r: _to_aware_berlin(r["timestamp"]))
-            
-            if len(rows_changes) >= 3:
-                # Füge nur den neuesten Heartbeat hinzu (wie in compute_integrated_model_metrics)
-                last_change_ts = _to_aware_berlin(rows_changes[-1]["timestamp"])
-                latest_heartbeat = None
+            if new_metrics and imodel:
+                from zoneinfo import ZoneInfo
                 
-                for ob in history.get(obs_key, []):
-                    if ob.get("kind") == "heartbeat":
-                        ob_ts = _to_aware_berlin(ob["timestamp"])
-                        if ob_ts > last_change_ts:
-                            if latest_heartbeat is None or ob_ts > _to_aware_berlin(latest_heartbeat["timestamp"]):
-                                latest_heartbeat = {"timestamp": ob["timestamp"], "date": ob["date"]}
-                
-                if latest_heartbeat:
-                    rows_all.append(latest_heartbeat)
-                
-                rows_all.sort(key=lambda r: _to_aware_berlin(r["timestamp"]))
-                
-                # Trainiere mit den GLEICHEN optimierten Parametern
-                cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
-                imodel = IntegratedRegressor(cal=cal, loess_frac=eff_frac, tau_hours=eff_tau).fit(rows_all)
-                
-                # Jetzt plotte mit konsistenter Zeitberechnung
-                t0_aware = imodel.t0_
+                # Verwende das bereits trainierte Modell zum Plotten
+                t0_aware = imodel.t0_  # Startzeitpunkt aus dem Training
                 
                 y_new = []
                 for t in grid_ts:
-                    # Konvertiere zu London Zeit
-                    t_aware = t.replace(tzinfo=ZoneInfo("Europe/Berlin")).astimezone(cal.tz)
+                    # Konvertiere zu London Zeit (konsistent mit Training)
+                    if t.tzinfo is None:
+                        t_berlin = t.replace(tzinfo=ZoneInfo("Europe/Berlin"))
+                    else:
+                        t_berlin = t.astimezone(ZoneInfo("Europe/Berlin"))
+                    t_london = t_berlin.astimezone(cal.tz)
                     
-                    # Berechne business minutes (konsistent mit Training)
-                    business_mins = cal.business_minutes_between(t0_aware, t_aware)
+                    # Berechne business minutes GENAU wie beim Training
+                    business_mins = cal.business_minutes_between(t0_aware, t_london)
                     x_hours = business_mins / 60.0
                     
-                    if x_hours >= 0:
-                        try:
+                    # Verwende das trainierte Modell
+                    try:
+                        if x_hours >= 0:
+                            # Innerhalb oder nach den Trainingsdaten
                             y_pred = imodel._blend_predict_scalar(x_hours)
-                            y_new.append(y_pred)
-                        except:
-                            y_new.append(float(imodel.ts_.predict(x_hours)))
-                    else:
-                        y_new.append(float(imodel.ts_.predict(x_hours)))
+                        else:
+                            # Extrapolation vor dem ersten Datenpunkt
+                            y_pred = float(imodel.ts_.predict(x_hours))
+                    except Exception as e:
+                        # Fallback auf Theil-Sen
+                        y_pred = float(imodel.ts_.predict(x_hours))
+                    
+                    y_new.append(y_pred)
                 
-                # Plot die Linie
+                # Plotte die Kurve
                 if y_new:
-                    ax.plot(grid_ts, np.array(y_new), linewidth=2.6,
+                    y_new = np.array(y_new)
+                    ax.plot(grid_ts, y_new, linewidth=2.6,
                             label=f"NEU: integrierte Regression (R²={new_metrics['r2']:.2f})",
                             color=COL_NEU, alpha=0.95)
-                
-                # ETAs mit der predict_datetime Methode
-                for name, ty in target_map.items():
-                    if ty is None: continue
-                    try:
-                        pred = imodel.predict_datetime(name, tz_out=BER)
-                        if pred and pred.get("when_point"):
-                            t_star = _to_naive_berlin(pred["when_point"])
-                            # Berechne y-Wert an dieser Stelle
-                            bd_star = _bizdays_float(first_ts, t_star)
-                            x_hours_star = bd_star * hours_per_day
-                            try:
-                                y_star = imodel._blend_predict_scalar(x_hours_star)
-                            except:
-                                y_star = float(imodel.ts_.predict(x_hours_star))
-                            
-                            neu_eta[name] = (t_star, y_star)
-                    except Exception as e:
-                        print(f"⚠️ Konnte ETA für {name} nicht berechnen: {e}")
+                    
+                    # ETAs mit dem GLEICHEN Modell
+                    for name, ty in target_map.items():
+                        if ty is None:
+                            continue
+                        try:
+                            # Verwende die predict_datetime Methode des trainierten Modells
+                            from lse_integrated_model import BER
+                            pred = imodel.predict_datetime(name, tz_out=BER)
+                            if pred and pred.get("when_point"):
+                                t_star = _to_naive_berlin(pred["when_point"])
+                                
+                                # Berechne y-Wert an dieser Stelle (konsistent)
+                                t_star_berlin = t_star.replace(tzinfo=ZoneInfo("Europe/Berlin"))
+                                t_star_london = t_star_berlin.astimezone(cal.tz)
+                                business_mins_star = cal.business_minutes_between(t0_aware, t_star_london)
+                                x_hours_star = business_mins_star / 60.0
+                                
+                                try:
+                                    y_star = imodel._blend_predict_scalar(x_hours_star)
+                                except:
+                                    y_star = float(imodel.ts_.predict(x_hours_star))
+                                
+                                neu_eta[name] = (t_star, y_star)
+                        except Exception as e:
+                            print(f"⚠️ Konnte ETA für {name} nicht berechnen: {e}")
+                else:
+                    print("⚠️ Keine Punkte für NEU-Linie berechnet")
             else:
-                print("⚠️ Keine Punkte für NEU-Linie berechnet")
-                
-    except ImportError as e:
-        print(f"⚠️ Import-Fehler: {e}")
+                print("⚠️ NEU-Modell konnte nicht trainiert werden")
+        else:
+            print("⚠️ compute_integrated_model_metrics gab None zurück")
+    
     except Exception as e:
         print(f"⚠️ NEU-Regression konnte nicht gezeichnet werden: {e}")
         import traceback
