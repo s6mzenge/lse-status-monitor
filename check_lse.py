@@ -1111,48 +1111,50 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
         traceback.print_exc()
 
     # ---------- Sterne & Labels (ALT oben, NEU unten) ----------
-def _plot_eta(name, alt_pt, neu_pt):
-    if alt_pt:
-        ax.plot([alt_pt[0]], [alt_pt[1]], marker="*", markersize=12, linestyle="None",
-                zorder=7, color=COL_ALT)
-        ax.axvline(alt_pt[0], linestyle="--", linewidth=0.8, alpha=0.6, color=COL_ALT)
+    def _plot_eta(name, alt_pt, neu_pt):
+        if alt_pt:
+            ax.plot([alt_pt[0]], [alt_pt[1]], marker="*", markersize=12, linestyle="None",
+                    zorder=7, color=COL_ALT)
+            ax.axvline(alt_pt[0], linestyle="--", linewidth=0.8, alpha=0.6, color=COL_ALT)
+            
+            # Label am Stern (wie bisher)
+            ax.annotate(f"ALT ETA {name}", (alt_pt[0], alt_pt[1]),
+                        xytext=(6, 9), textcoords="offset points", ha="left", va="bottom", fontsize=9,
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
+            
+            # NEU: Vertikales Datum direkt an der Linie
+            # KORRIGIERT: Dynamisches Datumsformat
+            date_str = alt_pt[0].strftime('%d. %B')  # z.B. "27. August"
+            y_mid = (ax.get_ylim()[0] + alt_pt[1]) / 2  # Mitte zwischen unten und Zielpunkt
+            ax.text(alt_pt[0], y_mid, date_str, 
+                    ha='center', va='center', fontsize=9, color=COL_ALT,
+                    rotation=90,  # Vertikal!
+                    alpha=0.8)
         
-        # Label am Stern (wie bisher)
-        ax.annotate(f"ALT ETA {name}", (alt_pt[0], alt_pt[1]),
-                    xytext=(6, 9), textcoords="offset points", ha="left", va="bottom", fontsize=9,
-                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
-        
-        # NEU: Vertikales Datum direkt an der Linie
-        date_str = alt_pt[0].strftime('%-d. August')  # z.B. "27. August"
-        y_mid = (ax.get_ylim()[0] + alt_pt[1]) / 2  # Mitte zwischen unten und Zielpunkt
-        ax.text(alt_pt[0], y_mid, date_str, 
-                ha='center', va='center', fontsize=9, color=COL_ALT,
-                rotation=90,  # Vertikal!
-                alpha=0.8)
-    
-    if neu_pt:
-        ax.plot([neu_pt[0]], [neu_pt[1]], marker="*", markersize=12, linestyle="None",
-                zorder=7, color=COL_NEU)
-        ax.axvline(neu_pt[0], linestyle="--", linewidth=0.8, alpha=0.6, color=COL_NEU)
-        
-        # Label am Stern (wie bisher)
-        ax.annotate(f"NEU ETA {name}", (neu_pt[0], neu_pt[1]),
-                    xytext=(6, -12), textcoords="offset points", ha="left", va="top", fontsize=9,
-                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
-        
-        # NEU: Vertikales Datum direkt an der Linie
-        date_str = neu_pt[0].strftime('%-d. August')  # z.B. "27. August"
-        y_mid = (ax.get_ylim()[0] + neu_pt[1]) / 2  # Mitte zwischen unten und Zielpunkt
-        
-        # Leichte horizontale Verschiebung wenn zu nah an ALT
-        x_offset = 0
-        if alt_pt and abs((neu_pt[0] - alt_pt[0]).days) < 1:
-            x_offset = 0.3  # Leicht nach rechts wenn Linien überlappen
-        
-        ax.text(neu_pt[0] + timedelta(days=x_offset), y_mid, date_str, 
-                ha='center', va='center', fontsize=9, color=COL_NEU,
-                rotation=90,  # Vertikal!
-                alpha=0.8)
+        if neu_pt:
+            ax.plot([neu_pt[0]], [neu_pt[1]], marker="*", markersize=12, linestyle="None",
+                    zorder=7, color=COL_NEU)
+            ax.axvline(neu_pt[0], linestyle="--", linewidth=0.8, alpha=0.6, color=COL_NEU)
+            
+            # Label am Stern (wie bisher)
+            ax.annotate(f"NEU ETA {name}", (neu_pt[0], neu_pt[1]),
+                        xytext=(6, -12), textcoords="offset points", ha="left", va="top", fontsize=9,
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
+            
+            # NEU: Vertikales Datum direkt an der Linie
+            # KORRIGIERT: Dynamisches Datumsformat
+            date_str = neu_pt[0].strftime('%d. %B')  # z.B. "27. August"
+            y_mid = (ax.get_ylim()[0] + neu_pt[1]) / 2  # Mitte zwischen unten und Zielpunkt
+            
+            # Leichte horizontale Verschiebung wenn zu nah an ALT
+            x_offset = 0
+            if alt_pt and abs((neu_pt[0] - alt_pt[0]).days) < 1:
+                x_offset = 0.3  # Leicht nach rechts wenn Linien überlappen
+            
+            ax.text(neu_pt[0] + timedelta(days=x_offset), y_mid, date_str, 
+                    ha='center', va='center', fontsize=9, color=COL_NEU,
+                    rotation=90,  # Vertikal!
+                    alpha=0.8)
 
     # Für Pre-CAS nur ein Ziel
     if stream == "pre_cas":
