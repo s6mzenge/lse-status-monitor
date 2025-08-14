@@ -1146,7 +1146,12 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
                 date_alt = alt_pt[0].strftime('%d.')
                 date_neu = neu_pt[0].strftime('%d. %B')
                 combined_text = f"{date_alt}/{date_neu}"
-                x_pos = (alt_pt[0] + neu_pt[0]) / 2  # Mittig zwischen beiden
+                
+                # KORRIGIERT: Berechne Mittelpunkt korrekt
+                from datetime import datetime
+                timestamp1 = alt_pt[0].timestamp()
+                timestamp2 = neu_pt[0].timestamp()
+                x_pos = datetime.fromtimestamp((timestamp1 + timestamp2) / 2)
                 
                 # Kombinierte Beschriftung in schwarz oder grau
                 ax.text(x_pos, y_text_pos, combined_text,
