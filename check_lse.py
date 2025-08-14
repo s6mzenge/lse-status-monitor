@@ -856,7 +856,7 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
     def _days_to_dt(year, doy):
         try:
             start = datetime(year, 1, 1)
-            return (start + timedelta(days=float(doy) - 1)).replace(tzinfo=None)
+            return (start + timedelta(days=float(doy))).replace(tzinfo=None)
         except Exception:
             return None
 
