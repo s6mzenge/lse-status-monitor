@@ -1014,7 +1014,7 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
                 y_star = m_old * _bizdays_float(first_ts, t_star) + b_old
                 alt_eta[name] = (t_star, y_star)
 
-        # ---------- NEU-Linie + ETAs ----------
+    # ---------- NEU-Linie + ETAs ----------
     neu_eta = {}
     try:
         from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
@@ -1023,57 +1023,76 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
         rows = [{"timestamp": e["timestamp"], "date": e["date"]} for e in entries]
         if len(rows) >= REGRESSION_MIN_POINTS:
             cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
+            
+            # Verwende die gleichen Parameter wie in compute_integrated_model_metrics
             imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
-    
+            
             hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute) / 60.0
             
-            # NEU: Verwende das vollständige Blend-Modell statt nur Theil-Sen
+            # Berechne R² korrekt aus den Trainingsdaten
+            x_train = imodel.x_
+            y_train = imodel.y_
+            y_pred_train = np.array([imodel._blend_predict_scalar(float(x)) for x in x_train])
+            ss_res = np.sum((y_train - y_pred_train)**2)
+            ss_tot = np.sum((y_train - np.mean(y_train))**2)
+            r2_value = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+            
+            # NEU: Verwende das vollständige Blend-Modell
             y_new = []
             for t in grid_ts:
-                # Konvertiere Zeit zu Business Hours seit Start
                 bd = _bizdays_float(first_ts, t)
                 x_hours = bd * hours_per_day
                 
-                # Verwende die Blend-Vorhersage (Theil-Sen + LOESS gewichtet)
-                try:
-                    y_pred = imodel._blend_predict_scalar(x_hours)
-                    y_new.append(y_pred)
-                except:
-                    # Fallback auf lineare Vorhersage falls außerhalb des Bereichs
-                    m_new = float(imodel.ts_.b * hours_per_day)
-                    y_curr = date_to_days(current_date) or (change_y[-1] if change_y else None)
-                    b_new = y_curr - m_new * _bizdays_float(first_ts, now_de)
-                    y_new.append(m_new * bd + b_new)
-            
-            y_new = np.array(y_new)
-            
-            # Zeichne die Blend-Kurve (wird jetzt leicht gekrümmt sein)
-            ax.plot(grid_ts, y_new, linewidth=2.6, 
-                    label=f"NEU: integrierte Regression (R²={float(imodel.rmse_**2) if hasattr(imodel, 'rmse_') else 0:.2f})",
-                    color=COL_NEU, alpha=0.95)
-    
-            # Für ETAs verwende weiterhin die exakte Inversion
-            m_new = float(imodel.ts_.b * hours_per_day)
-            y_curr = date_to_days(current_date) or (change_y[-1] if change_y else None)
-            if y_curr is not None and m_new is not None:
-                b_new = y_curr - m_new * _bizdays_float(first_ts, now_de)
+                # Prüfe ob x_hours im vernünftigen Bereich liegt
+                max_x = float(imodel.x_[-1]) if len(imodel.x_) > 0 else 1000
                 
+                if x_hours < max_x + 100:  # Innerhalb oder nahe der Trainingsdaten
+                    try:
+                        y_pred = imodel._blend_predict_scalar(x_hours)
+                        y_new.append(y_pred)
+                    except Exception as e:
+                        # Fallback: Verwende nur Theil-Sen für diesen Punkt
+                        y_pred = imodel.ts_.predict(x_hours)
+                        y_new.append(float(y_pred))
+                else:
+                    # Für weit entfernte Punkte: verwende nur Theil-Sen (linear)
+                    y_pred = imodel.ts_.predict(x_hours)
+                    y_new.append(float(y_pred))
+            
+            if len(y_new) > 0:
+                y_new = np.array(y_new)
+                
+                # Zeichne die Blend-Kurve
+                ax.plot(grid_ts, y_new, linewidth=2.6, 
+                        label=f"NEU: integrierte Regression (R²={r2_value:.2f})",
+                        color=COL_NEU, alpha=0.95)
+                
+                # ETAs mit der predict_datetime Methode
                 for name, ty in target_map.items():
                     if ty is None: continue
-                    # Hier könntest du auch imodel.predict_datetime verwenden für genauere ETAs
-                    pred = imodel.predict_datetime(name, tz_out=BER)
-                    if pred and pred.get("when_point"):
-                        t_star = _to_naive_berlin(pred["when_point"])
-                        # Berechne y-Wert an dieser Stelle mit Blend
-                        bd_star = _bizdays_float(first_ts, t_star)
-                        x_hours_star = bd_star * hours_per_day
-                        y_star = imodel._blend_predict_scalar(x_hours_star)
-                        neu_eta[name] = (t_star, y_star)
-                        
-    except ImportError:
-        pass
+                    try:
+                        pred = imodel.predict_datetime(name, tz_out=BER)
+                        if pred and pred.get("when_point"):
+                            t_star = _to_naive_berlin(pred["when_point"])
+                            # Berechne y-Wert an dieser Stelle
+                            bd_star = _bizdays_float(first_ts, t_star)
+                            x_hours_star = bd_star * hours_per_day
+                            try:
+                                y_star = imodel._blend_predict_scalar(x_hours_star)
+                            except:
+                                y_star = float(imodel.ts_.predict(x_hours_star))
+                            neu_eta[name] = (t_star, y_star)
+                    except Exception as e:
+                        print(f"⚠️ Konnte ETA für {name} nicht berechnen: {e}")
+            else:
+                print("⚠️ Keine Punkte für NEU-Linie berechnet")
+                
+    except ImportError as e:
+        print(f"⚠️ Import-Fehler: {e}")
     except Exception as e:
         print(f"⚠️ NEU-Regression konnte nicht gezeichnet werden: {e}")
+        import traceback
+        traceback.print_exc()
 
     # ---------- Sterne & Labels (ALT oben, NEU unten) ----------
     def _plot_eta(name, alt_pt, neu_pt):
