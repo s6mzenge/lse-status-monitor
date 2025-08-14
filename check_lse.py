@@ -1014,33 +1014,62 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
                 y_star = m_old * _bizdays_float(first_ts, t_star) + b_old
                 alt_eta[name] = (t_star, y_star)
 
-    # ---------- NEU-Linie + ETAs ----------
+        # ---------- NEU-Linie + ETAs ----------
     neu_eta = {}
     try:
         from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
         from datetime import time as _time
-
+    
         rows = [{"timestamp": e["timestamp"], "date": e["date"]} for e in entries]
         if len(rows) >= REGRESSION_MIN_POINTS:
             cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
             imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
-
+    
             hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute) / 60.0
+            
+            # NEU: Verwende das vollständige Blend-Modell statt nur Theil-Sen
+            y_new = []
+            for t in grid_ts:
+                # Konvertiere Zeit zu Business Hours seit Start
+                bd = _bizdays_float(first_ts, t)
+                x_hours = bd * hours_per_day
+                
+                # Verwende die Blend-Vorhersage (Theil-Sen + LOESS gewichtet)
+                try:
+                    y_pred = imodel._blend_predict_scalar(x_hours)
+                    y_new.append(y_pred)
+                except:
+                    # Fallback auf lineare Vorhersage falls außerhalb des Bereichs
+                    m_new = float(imodel.ts_.b * hours_per_day)
+                    y_curr = date_to_days(current_date) or (change_y[-1] if change_y else None)
+                    b_new = y_curr - m_new * _bizdays_float(first_ts, now_de)
+                    y_new.append(m_new * bd + b_new)
+            
+            y_new = np.array(y_new)
+            
+            # Zeichne die Blend-Kurve (wird jetzt leicht gekrümmt sein)
+            ax.plot(grid_ts, y_new, linewidth=2.6, 
+                    label=f"NEU: integrierte Regression (R²={float(imodel.rmse_**2) if hasattr(imodel, 'rmse_') else 0:.2f})",
+                    color=COL_NEU, alpha=0.95)
+    
+            # Für ETAs verwende weiterhin die exakte Inversion
             m_new = float(imodel.ts_.b * hours_per_day)
-
             y_curr = date_to_days(current_date) or (change_y[-1] if change_y else None)
             if y_curr is not None and m_new is not None:
                 b_new = y_curr - m_new * _bizdays_float(first_ts, now_de)
-                y_new = np.array([m_new * bd + b_new for bd in grid_bd])
-                ax.plot(grid_ts, y_new, linewidth=2.6, label="NEU: integrierte Regression",
-                        color=COL_NEU, alpha=0.95)
-
+                
                 for name, ty in target_map.items():
                     if ty is None: continue
-                    t_star = _solve_time_for_level(m_new, b_new, ty, first_ts, now_de, sign_positive=(m_new > 0))
-                    if t_star:
-                        y_star = m_new * _bizdays_float(first_ts, t_star) + b_new
+                    # Hier könntest du auch imodel.predict_datetime verwenden für genauere ETAs
+                    pred = imodel.predict_datetime(name, tz_out=BER)
+                    if pred and pred.get("when_point"):
+                        t_star = _to_naive_berlin(pred["when_point"])
+                        # Berechne y-Wert an dieser Stelle mit Blend
+                        bd_star = _bizdays_float(first_ts, t_star)
+                        x_hours_star = bd_star * hours_per_day
+                        y_star = imodel._blend_predict_scalar(x_hours_star)
                         neu_eta[name] = (t_star, y_star)
+                        
     except ImportError:
         pass
     except Exception as e:
