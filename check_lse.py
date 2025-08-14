@@ -1,8 +1,10 @@
-
-# Essential lightweight imports only
+import requests
+from bs4 import BeautifulSoup
 import json
 import os
 import re
+import smtplib
+from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 try:
     from zoneinfo import ZoneInfo
@@ -12,188 +14,20 @@ from typing import Dict, List, Optional
 from collections import defaultdict
 import time
 import sys
-
-# Lazy imports - loaded only when needed
-_requests = None
-_beautifulsoup = None
-_smtplib = None
-_email_mime = None
-_math = None
-_io_bytesio = None
+from io import BytesIO
 
 # Import configuration
 from config import (
     LSE_URL, STATUS_FILE, HISTORY_FILE, REGRESSION_MIN_POINTS, CONFIDENCE_LEVEL,
     TARGET_DATES, REQUEST_TIMEOUT, REQUEST_HEADERS, GMAIL_SMTP_SERVER, 
-    GMAIL_SMTP_PORT, TELEGRAM_API_BASE, ACTIVE_STREAM, TARGET_DATE_PRE_CAS,
-    TARGET_DATES_MAP, LON, UK_HOLIDAYS
+    GMAIL_SMTP_PORT, TELEGRAM_API_BASE
 )
-
-# Precompiled regex patterns for better performance
-DATE_PATTERN = re.compile(r'^\d{1,2}\s+\w+$')
-LAST_UPDATED_PATTERN = re.compile(r'Last\s+updated:\s*(\d{1,2}\s+\w+\s+\d{4}),\s*(\d{1,2}:\d{2})', re.IGNORECASE)
-ALL_OTHER_PATTERN = re.compile(r'all other graduate applicants', re.IGNORECASE)
-
-# Date extraction patterns for web scraping
-FULL_DATE_PATTERN = re.compile(r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))\b', re.IGNORECASE)
-MONTH_DATE_PATTERN = re.compile(r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))', re.IGNORECASE)
-
-# AOA patterns
-AOA_PATTERN1 = re.compile(r'All\s+other\s+graduate\s+applicants.*?applications\s+received\s+by.*?will\s+receive\s+their\s+decision.*?on\s+(\d{1,2}\s+\w+)', re.IGNORECASE | re.DOTALL)
-AOA_PATTERN2 = re.compile(r'decisions\s+for\s+applications\s+will\s+be\s+released\s+from\s+(\d{1,2}\s+\w+)', re.IGNORECASE)
-AOA_DATE_PATTERN = re.compile(r'(\d{1,2}\s+\w+)', re.IGNORECASE)
-AOA_PATTERN3 = re.compile(r'decisions\s+will\s+be\s+released\s+on\s+(\d{1,2}\s+\w+)', re.IGNORECASE)
-
-# Pre-CAS patterns
-PRE_CAS_PATTERN1 = re.compile(r'issuing\s+Pre-CAS.*?criteria\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))', re.IGNORECASE | re.DOTALL)
-PRE_CAS_PATTERN2 = re.compile(r'issuing\s+Pre-CAS\s+for\s+offer\s+holders.*?criteria\s+on:?\s*([^.]*?)(?:Please|We\s+are|$)', re.IGNORECASE)
-PRE_CAS_PATTERN3 = re.compile(r'issuing\s+Pre-CAS.*?(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))', re.IGNORECASE)
-PRE_CAS_PATTERN = re.compile(r'Pre-CAS\s+applications.*?decisions\s+will\s+be\s+released\s+on\s+(\d{1,2}\s+\w+)', re.IGNORECASE | re.DOTALL)
-
-# CAS pattern
-CAS_PATTERN = re.compile(r'Confirmation\s+of\s+Acceptance.*?(\d{1,2}\s+\w+)', re.IGNORECASE | re.DOTALL)
-
-# Fallback patterns
-ALL_OTHER_FALLBACK_PATTERN = re.compile(r'all other graduate applicants[^0-9]*?((?:\d{1,2}\s+\w+\s*)+)', re.IGNORECASE | re.DOTALL)
-CAS_EXTRACTION_PATTERN = re.compile(r'issuing\s+CAS\s+to.*?Pre-CAS\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))', re.IGNORECASE | re.DOTALL)
-
-# ========== STREAM-AWARE HELPER FUNCTIONS ==========
-def get_active_target_label():
-    """Returns the active target label based on stream"""
-    if ACTIVE_STREAM == "pre_cas":
-        return TARGET_DATE_PRE_CAS.strftime('%d %B')  # "13 August"
-    return TARGET_DATES[0]  # "25 July" für AOA
-
-def get_active_target_days():
-    """Returns the active target as days since Jan 1"""
-    return date_to_days(get_active_target_label())
-# ====================================================
 
 # Lazy imports for heavy dependencies - only loaded when needed
 _numpy = None
 _matplotlib_plt = None
 _matplotlib_dates = None
 _warnings = None
-_requests_session = None
-
-# Lazy imports for web scraping - only loaded when actually scraping
-_requests = None
-_beautifulsoup = None
-
-# Lazy imports for notifications - only loaded when sending notifications  
-_smtplib = None
-_email_mime = None
-
-# Lazy imports for math operations - only loaded when doing calculations
-_math = None
-
-# Lazy imports for file operations - only loaded when needed
-_io_bytesio = None
-
-# Fast JSON library when available
-_json_lib = None
-
-def _get_fast_json():
-    """Get the fastest available JSON library"""
-    global _json_lib
-    if _json_lib is None:
-        try:
-            # Try to use orjson for better performance
-            import orjson
-            _json_lib = 'orjson'
-            return orjson
-        except ImportError:
-            try:
-                # Try ujson as second choice
-                import ujson
-                _json_lib = 'ujson'
-                return ujson
-            except ImportError:
-                # Fall back to standard json
-                import json
-                _json_lib = 'json'
-                return json
-    
-    # Return cached library
-    if _json_lib == 'orjson':
-        import orjson
-        return orjson
-    elif _json_lib == 'ujson':
-        import ujson
-        return ujson
-    else:
-        import json
-        return json
-
-def _fast_json_loads(text):
-    """Fast JSON loading with library-specific handling"""
-    json_lib = _get_fast_json()
-    if _json_lib == 'orjson':
-        return json_lib.loads(text)
-    elif _json_lib == 'ujson':
-        return json_lib.loads(text)
-    else:
-        return json_lib.loads(text)
-
-def _fast_json_dumps(data, **kwargs):
-    """Fast JSON dumping with library-specific handling"""
-    json_lib = _get_fast_json()
-    if _json_lib == 'orjson':
-        # orjson doesn't support indent in dumps, fall back to standard json for pretty printing
-        if kwargs.get('indent'):
-            import json
-            return json.dumps(data, **kwargs)
-        return json_lib.dumps(data).decode('utf-8')
-    elif _json_lib == 'ujson':
-        # ujson doesn't support all options, fall back for complex cases
-        if kwargs.get('indent'):
-            import json
-            return json.dumps(data, **kwargs)
-        return json_lib.dumps(data)
-    else:
-        return json_lib.dumps(data, **kwargs)
-
-def _get_requests():
-    """Lazy load requests module"""
-    global _requests
-    if _requests is None:
-        import requests
-        _requests = requests
-    return _requests
-
-def _get_beautifulsoup():
-    """Lazy load BeautifulSoup"""
-    global _beautifulsoup
-    if _beautifulsoup is None:
-        from bs4 import BeautifulSoup
-        _beautifulsoup = BeautifulSoup
-    return _beautifulsoup
-
-def _get_email_modules():
-    """Lazy load email modules"""
-    global _smtplib, _email_mime
-    if _smtplib is None or _email_mime is None:
-        import smtplib
-        from email.mime.text import MIMEText
-        _smtplib = smtplib
-        _email_mime = MIMEText
-    return _smtplib, _email_mime
-
-def _get_math():
-    """Lazy load math module"""
-    global _math
-    if _math is None:
-        import math
-        _math = math
-    return _math
-
-def _get_io_bytesio():
-    """Lazy load BytesIO"""
-    global _io_bytesio
-    if _io_bytesio is None:
-        from io import BytesIO
-        _io_bytesio = BytesIO
-    return _io_bytesio
 
 def _get_numpy():
     global _numpy
@@ -207,8 +41,6 @@ def _get_matplotlib():
     if _matplotlib_plt is None:
         import warnings
         warnings.filterwarnings('ignore')
-        import matplotlib
-        matplotlib.use('Agg')  # Use non-interactive backend for headless operation
         import matplotlib.pyplot as plt
         import matplotlib.dates as mdates
         _matplotlib_plt = plt
@@ -216,33 +48,10 @@ def _get_matplotlib():
         _warnings = warnings
     return _matplotlib_plt, _matplotlib_dates
 
-def _get_requests_session():
-    """Get a reusable requests session with optimized settings"""
-    global _requests_session
-    if _requests_session is None:
-        requests = _get_requests()
-        from requests.adapters import HTTPAdapter
-        from urllib3.util.retry import Retry
-        
-        _requests_session = requests.Session()
-        
-        # Configure retry strategy
-        retry_strategy = Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET"]  # Updated from method_whitelist
-        )
-        
-        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=1, pool_maxsize=1)
-        _requests_session.mount("http://", adapter)
-        _requests_session.mount("https://", adapter)
-        _requests_session.headers.update(REQUEST_HEADERS)
-    
-    return _requests_session
 
-
-# === Business-day helpers ===
+# === Konfiguration und Konstanten (ergänzt) ===
+# Constants now imported from config.py
+# === Business-day helpers (x-axis skips weekends) ===
 
 def business_days_elapsed(start_dt, end_dt):
     '''
@@ -252,8 +61,8 @@ def business_days_elapsed(start_dt, end_dt):
     np = _get_numpy()
     s = np.datetime64(start_dt.date(), 'D')
     e = np.datetime64(end_dt.date(), 'D')
-    # np.busday_count zählt Werktage im Intervall [s, e) - now with UK holidays
-    return int(np.busday_count(s, e, holidays=UK_HOLIDAYS))
+    # np.busday_count zählt Werktage im Intervall [s, e)
+    return int(np.busday_count(s, e))
 
 def add_business_days(start_dt, n):
     '''
@@ -268,289 +77,79 @@ def add_business_days(start_dt, n):
     remaining = abs(steps)
     while remaining > 0:
         current = current + timedelta(days=step)
-        # Check if it's a weekday (Mo–Fr) and not a UK holiday
-        if current.weekday() < 5 and current.strftime('%Y-%m-%d') not in UK_HOLIDAYS:
+        if current.weekday() < 5:  # Mo–Fr
             remaining -= 1
     return current
 
 
 # Lazy imports for optional advanced features
 _scipy_stats = None
-_sklearn_modules = None
-_advanced_regression_available = None
-
-def _check_advanced_regression_available():
-    """Check if advanced regression libraries are available without importing them"""
-    global _advanced_regression_available
-    if _advanced_regression_available is None:
-        try:
-            import importlib.util
-            scipy_spec = importlib.util.find_spec("scipy")
-            sklearn_spec = importlib.util.find_spec("sklearn")
-            _advanced_regression_available = scipy_spec is not None and sklearn_spec is not None
-        except ImportError:
-            _advanced_regression_available = False
-    return _advanced_regression_available
+_sklearn_HuberRegressor = None
+_sklearn_RANSACRegressor = None
+_sklearn_PolynomialFeatures = None
+_sklearn_make_pipeline = None
 
 def _get_advanced_regression():
-    """Lazy load advanced regression modules only when needed"""
-    global _scipy_stats, _sklearn_modules
-    
-    if not _check_advanced_regression_available():
-        return False, (None, None, None, None, None)
-    
+    global _scipy_stats, _sklearn_HuberRegressor, _sklearn_RANSACRegressor, _sklearn_PolynomialFeatures, _sklearn_make_pipeline
     try:
-        if _scipy_stats is None or _sklearn_modules is None:
+        if _scipy_stats is None:
             from scipy import stats
             from sklearn.linear_model import HuberRegressor, RANSACRegressor
             from sklearn.preprocessing import PolynomialFeatures
             from sklearn.pipeline import make_pipeline
-            
             _scipy_stats = stats
-            _sklearn_modules = {
-                'HuberRegressor': HuberRegressor,
-                'RANSACRegressor': RANSACRegressor,
-                'PolynomialFeatures': PolynomialFeatures,
-                'make_pipeline': make_pipeline
-            }
-        
-        return True, (_scipy_stats, 
-                     _sklearn_modules['HuberRegressor'], 
-                     _sklearn_modules['RANSACRegressor'], 
-                     _sklearn_modules['PolynomialFeatures'], 
-                     _sklearn_modules['make_pipeline'])
+            _sklearn_HuberRegressor = HuberRegressor
+            _sklearn_RANSACRegressor = RANSACRegressor
+            _sklearn_PolynomialFeatures = PolynomialFeatures
+            _sklearn_make_pipeline = make_pipeline
+        return True, (_scipy_stats, _sklearn_HuberRegressor, _sklearn_RANSACRegressor, _sklearn_PolynomialFeatures, _sklearn_make_pipeline)
     except ImportError:
         return False, (None, None, None, None, None)
 
-# File locking utilities for atomic writes and race condition prevention
-import contextlib
+# Check if advanced regression is available (but don't import yet)
+ADVANCED_REGRESSION = True
+try:
+    import scipy
+    import sklearn
+except ImportError:
+    ADVANCED_REGRESSION = False
 
-@contextlib.contextmanager
-def _file_lock(filepath):
-    """Cross-platform file locking context manager"""
-    lock_filepath = filepath + '.lock'
-    lock_file = None
-    
-    try:
-        lock_file = open(lock_filepath, 'w')
-        
-        # Try platform-specific locking
-        try:
-            import fcntl
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        except ImportError:
-            try:
-                import msvcrt
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-            except (ImportError, OSError):
-                # No locking available, continue without lock
-                pass
-        
-        yield
-        
-    except OSError:
-        # Lock file could not be created, continue without lock
-        yield
-    finally:
-        if lock_file:
-            try:
-                lock_file.close()
-                os.remove(lock_filepath)
-            except (OSError, FileNotFoundError):
-                pass
+URL = LSE_URL
 
-# Enhanced caching system for maximum performance
-_file_cache = {}
-_cache_timestamps = {}
-_cache_stats = {'hits': 0, 'misses': 0}
-
-# Add memory-based cache for computation results
-_computation_cache = {}
-_max_cache_size = 100  # Limit cache size to prevent memory issues
-
-def _get_cache_stats():
-    """Get cache performance statistics"""
-    total = _cache_stats['hits'] + _cache_stats['misses']
-    hit_rate = (_cache_stats['hits'] / total * 100) if total > 0 else 0
-    return f"Cache: {_cache_stats['hits']} hits, {_cache_stats['misses']} misses ({hit_rate:.1f}% hit rate)"
-
-def _clear_old_cache_entries():
-    """Clear old cache entries to prevent memory bloat"""
-    if len(_computation_cache) > _max_cache_size:
-        # Remove oldest 20% of entries
-        items = list(_computation_cache.items())
-        items.sort(key=lambda x: x[1].get('timestamp', 0))
-        to_remove = len(items) // 5
-        for key, _ in items[:to_remove]:
-            del _computation_cache[key]
-
-def _memoize(func):
-    """Decorator for memoizing expensive function calls"""
-    import functools
-    import hashlib
-    
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        # Create cache key from function name and arguments
-        key_data = f"{func.__name__}:{str(args)}:{str(sorted(kwargs.items()))}"
-        cache_key = hashlib.md5(key_data.encode()).hexdigest()
-        
-        # Check cache
-        if cache_key in _computation_cache:
-            _cache_stats['hits'] += 1
-            return _computation_cache[cache_key]['result']
-        
-        # Compute result
-        _cache_stats['misses'] += 1
-        result = func(*args, **kwargs)
-        
-        # Clear old entries if needed
-        _clear_old_cache_entries()
-        
-        # Store in cache
-        _computation_cache[cache_key] = {
-            'result': result,
-            'timestamp': time.time()
-        }
-        
-        return result
-    
-    return wrapper
-
-def _get_file_cache_key(filepath):
-    """Get cache key for file operations"""
-    try:
-        import os
-        mtime = os.path.getmtime(filepath)
-        return f"{filepath}:{mtime}"
-    except (OSError, IOError):
-        return f"{filepath}:missing"
-
-def _cached_json_load(filepath):
-    """Load JSON file with caching to avoid redundant reads"""
-    cache_key = _get_file_cache_key(filepath)
-    
-    if cache_key in _file_cache:
-        _cache_stats['hits'] += 1
-        return _file_cache[cache_key].copy()  # Return copy to avoid mutations
-    
-    _cache_stats['misses'] += 1
-    try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            data = _fast_json_loads(f.read())
-            _file_cache[cache_key] = data
-            return data.copy()
-    except (FileNotFoundError, json.JSONDecodeError):
-        return None
-
-def _cached_json_dump(data, filepath):
-    """Save JSON file with atomic write and update cache"""
-    import tempfile
-    
-    # Write to temp file in same directory for atomic replace
-    dir_path = os.path.dirname(filepath) or '.'
-    temp_fd = None
-    temp_path = None
-    
-    try:
-        temp_fd, temp_path = tempfile.mkstemp(dir=dir_path, suffix='.tmp')
-        with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-            f.write(_fast_json_dumps(data, indent=2))
-        temp_fd = None  # File is now closed
-        
-        # Atomic replace
-        os.replace(temp_path, filepath)
-        temp_path = None  # Successfully replaced, don't clean up
-        
-        # Update cache with new data
-        cache_key = _get_file_cache_key(filepath)
-        _file_cache[cache_key] = data.copy()
-        
-    except Exception:
-        # Clean up temp file if something went wrong
-        if temp_fd is not None:
-            try:
-                os.close(temp_fd)
-            except OSError:
-                pass
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
-        raise
-
-# Use lazy checking for advanced regression availability
-def get_advanced_regression_status():
-    return _check_advanced_regression_available()
-
-def get_performance_stats():
-    """Get comprehensive performance statistics"""
-    stats = {
-        'cache_stats': _get_cache_stats() if 'hits' in _cache_stats else "Cache not used yet",
-        'lazy_modules_loaded': {
-            'numpy': _numpy is not None,
-            'matplotlib': _matplotlib_plt is not None,
-            'scipy': _scipy_stats is not None,
-            'sklearn': _sklearn_modules is not None,
-            'requests': _requests is not None,
-            'beautifulsoup': _beautifulsoup is not None,
-            'email': _smtplib is not None,
-            'math': _math is not None,
-        },
-        'json_library': _json_lib or 'not initialized',
-        'computation_cache_size': len(_computation_cache),
-        'file_cache_size': len(_file_cache),
-    }
-    return stats
-
-# Apply memoization to frequently called functions for better performance
-# This must be done after the functions are defined
-business_days_elapsed = _memoize(business_days_elapsed)
-
-# Performance micro-optimizations
-# Pre-allocate common objects to avoid repeated allocations
-_EMPTY_DICT = {}
-_EMPTY_LIST = []
-
-# Common timezone objects to avoid repeated lookups
-_UTC_TZ = ZoneInfo("UTC")
-_BER_TZ = ZoneInfo("Europe/Berlin")
-
-# Timezone constants imported from config - use those consistently
-UTC = _UTC_TZ
-BER = _BER_TZ
-
+from zoneinfo import ZoneInfo
 def get_german_time():
-    return datetime.now(BER)
+    return datetime.now(ZoneInfo("Europe/Berlin"))
 
 # ===== Compact forecast rendering (ALT vs. NEU) =====
+import math
+from zoneinfo import ZoneInfo
 
 def _now_berlin():
+    from zoneinfo import ZoneInfo
     dt = get_german_time()
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=BER)
-    return dt.astimezone(BER)
+        return dt.replace(tzinfo=ZoneInfo("Europe/Berlin"))
+    return dt.astimezone(ZoneInfo("Europe/Berlin"))
 
 def _short_date(d):  # "14 Aug"
     if d is None:
         return "—"
+    from zoneinfo import ZoneInfo
     if d.tzinfo is None:
-        d = d.replace(tzinfo=BER)
-    return d.astimezone(BER).strftime("%d %b").replace(".", "")
+        d = d.replace(tzinfo=ZoneInfo("Europe/Berlin"))
+    return d.astimezone(ZoneInfo("Europe/Berlin")).strftime("%d %b").replace(".", "")
 
 def _cal_days_until(dt, now=None):
-    """Kalendertage (inkl. Wochenende) als Datumsdifferenz, ohne Uhrzeit-Rundung."""
+    """Kalendertage (inkl. Wochenende), aufgerundet."""
     if not dt:
         return None
     if now is None:
         now = _now_berlin()
-    tz = BER
-    # Falls dt naive ist, als Berlin interpretieren
+    # Falls dt naive ist (z.B. aus ALT-Regression), als Berlin interpretieren
     if getattr(dt, "tzinfo", None) is None:
-        dt = dt.replace(tzinfo=tz)
-    # Nur die Kalendertage vergleichen (Datum vs. Datum)
-    return max(0, (dt.astimezone(tz).date() - now.date()).days)
+        dt = dt.replace(tzinfo=ZoneInfo("Europe/Berlin"))
+    secs = (dt - now).total_seconds()
+    return max(0, int(math.ceil(secs / 86400.0)))
 
 def _diff_days(neu_dt, alt_dt):
     """Differenz NEU vs. ALT in Kalendertagen als kurzer Text."""
@@ -562,8 +161,8 @@ def _diff_days(neu_dt, alt_dt):
     sign = "+" if d > 0 else "−"
     return f" ({sign}{abs(d)} Tag{'e' if abs(d)!=1 else ''} ggü. 🔵)"
 
-def render_compact_bullets(eta1_old_dt, eta1_new_dt,
-                           eta2_old_dt, eta2_new_dt,
+def render_compact_bullets(eta25_old_dt, eta25_new_dt,
+                           eta28_old_dt, eta28_new_dt,
                            r2_old, pts_old, slope_old,
                            r2_new, pts_new, slope_new,
                            hb_count=None):
@@ -581,126 +180,78 @@ def render_compact_bullets(eta1_old_dt, eta1_new_dt,
     parts.append("🎨 <b>Legende:</b> 🔵 ALT (linear) · 🟠 NEU (integriert)")
     parts.append("\n📌 <b>Kurzprognose</b>")
 
-    # Dynamische Targets basierend auf aktuellem Stream
-    if ACTIVE_STREAM == "pre_cas":
-        target_name = TARGET_DATE_PRE_CAS.strftime('%d %B')
-    else:
-        target_name = "25 July"
-    
-    parts.append(f"🎯 <b>{target_name}</b>")
-    parts.append(f"🔵 {line_for(eta1_old_dt)}")
-    parts.append(f"🟠 {line_for(eta1_new_dt)}{_diff_days(eta1_new_dt, eta1_old_dt)}")
+    parts.append("🎯 <b>25 July</b>")
+    parts.append(f"🔵 {line_for(eta25_old_dt)}")
+    parts.append(f"🟠 {line_for(eta25_new_dt)}{_diff_days(eta25_new_dt, eta25_old_dt)}")
 
-    # Nur zweites Target anzeigen, wenn nicht Pre-CAS
-    if eta2_old_dt is not None and eta2_new_dt is not None:
-        parts.append("\n🎯 <b>28 July</b>")
-        parts.append(f"🔵 {line_for(eta2_old_dt)}")
-        parts.append(f"🟠 {line_for(eta2_new_dt)}{_diff_days(eta2_new_dt, eta2_old_dt)}")
+    parts.append("\n🎯 <b>28 July</b>")
+    parts.append(f"🔵 {line_for(eta28_old_dt)}")
+    parts.append(f"🟠 {line_for(eta28_new_dt)}{_diff_days(eta28_new_dt, eta28_old_dt)}")
 
     parts.append("\n📐 <b>Modelle</b>")
     parts.append(f"R²: 🔵 {r2_old:.2f} ({pts_old}) · 🟠 {r2_new:.2f} ({pts_new}){hb_badge}")
     parts.append(f"Fortschritt: 🔵 {slope_old:.1f} d/Tag · 🟠 {slope_new:.1f} d/Tag")
 
     return "\n".join(parts)
+# ====================================================
 
 
-def _iter_observations_or_changes(history: Dict, changes_key: str = "changes") -> List[Dict]:
+def _iter_observations_or_changes(history: Dict) -> List[Dict]:
     """
     Kombiniert observations und changes, normiert Timestamps auf ISO-UTC,
     validiert Daten, sortiert aufsteigend.
-    Optimized for performance with early filtering and batch processing.
     """
-    # Pre-allocate for better performance
-    observations = history.get("observations", []) or []
-    changes = history.get(changes_key, []) or []
-    src = observations + changes
-    
-    if not src:
-        return []
-    # Use precompiled regex for better performance
     out: List[Dict] = []
-    utc_tz = UTC
-    
+    src = (history.get("observations", []) or []) + (history.get("changes", []) or [])
     for e in src:
-        # Early type check
         if not isinstance(e, dict):
             continue
-            
         ts = e.get("timestamp")
         dt = e.get("date")
-        
-        # Early validation using precompiled pattern
-        if not ts or not dt or not DATE_PATTERN.match(str(dt)):
+        if not ts or not dt:
             continue
-            
+        if not re.match(r'^\d{1,2}\s+\w+$', str(dt)):
+            continue
         try:
-            # Optimized timestamp processing
             s = str(ts).replace('Z', '+00:00')
             dt_obj = datetime.fromisoformat(s)
             if dt_obj.tzinfo is None:
-                dt_obj = dt_obj.replace(tzinfo=utc_tz)
-            ts_iso = dt_obj.astimezone(utc_tz).isoformat()
+                dt_obj = dt_obj.replace(tzinfo=ZoneInfo("UTC"))
+            ts_iso = dt_obj.astimezone(ZoneInfo("UTC")).isoformat()
         except Exception:
             continue
-            
         kind = e.get("kind") or "change"
         out.append({"timestamp": ts_iso, "date": dt, "kind": kind})
-    
-    # Use key function once for sorting
     out.sort(key=lambda r: r["timestamp"])
     return out
 
-def _iter_changes_only(history: Dict, changes_key: str = "changes") -> List[Dict]:
+def _iter_changes_only(history: Dict) -> List[Dict]:
     """
     Gibt nur echte Änderungen zurück (keine Heartbeats), normiert Timestamps auf ISO-UTC,
     validiert Daten, sortiert aufsteigend.
-    Optimized version with shared pattern and timezone objects.
     """
-    src = history.get(changes_key, []) or []
-    if not src:
-        return []
-    
-    # Use precompiled regex and timezone for better performance
-    utc_tz = UTC
-    
     out: List[Dict] = []
-    
+    src = history.get("changes", []) or []
     for e in src:
-        # Early type and content validation
         if not isinstance(e, dict):
             continue
-            
         ts = e.get("timestamp")
         dt = e.get("date")
-        
-        if not ts or not dt or not DATE_PATTERN.match(str(dt)):
+        if not ts or not dt:
             continue
-            
+        if not re.match(r'^\d{1,2}\s+\w+$', str(dt)):
+            continue
         try:
-            # Optimized timestamp processing
             s = str(ts).replace('Z', '+00:00')
             dt_obj = datetime.fromisoformat(s)
             if dt_obj.tzinfo is None:
-                dt_obj = dt_obj.replace(tzinfo=utc_tz)
-            ts_iso = dt_obj.astimezone(utc_tz).isoformat()
+                dt_obj = dt_obj.replace(tzinfo=ZoneInfo("UTC"))
+            ts_iso = dt_obj.astimezone(ZoneInfo("UTC")).isoformat()
         except Exception:
             continue
-            
         out.append({"timestamp": ts_iso, "date": dt, "kind": "change"})
-    
     out.sort(key=lambda r: r["timestamp"])
     return out
-
-# Regression result cache to avoid redundant calculations
-_regression_cache = {}
-_regression_cache_key = None
-
-def _get_regression_cache_key(history):
-    """Generate cache key for regression calculations"""
-    import hashlib
-    # Use the hash of changes for cache key
-    changes_data = str(sorted(history.get('changes', []), key=lambda x: x.get('timestamp', '')))
-    return hashlib.md5(changes_data.encode()).hexdigest()
 
 def calculate_advanced_regression_forecast(history, current_date=None):
     """
@@ -712,40 +263,17 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     - Arbeitstagberechnung
     
     WICHTIG: Diese (alte) Regression verwendet nur echte Änderungen, keine Heartbeats!
-    
-    Optimized with caching to avoid redundant calculations.
     """
-    # Stream-spezifische Datenauswahl
-    if ACTIVE_STREAM == "pre_cas":
-        changes_key = "pre_cas_changes"
-    elif ACTIVE_STREAM == "cas":
-        changes_key = "cas_changes"
-    else:
-        changes_key = "changes"
-    
-    # Check cache first
-    cache_key = _get_regression_cache_key({changes_key: history.get(changes_key, [])})
-    global _regression_cache, _regression_cache_key
-    
-    if cache_key == _regression_cache_key and _regression_cache:
-        return _regression_cache.copy()  # Return cached result
-    
     np = _get_numpy()  # Lazy load numpy
     
-    # GEÄNDERT: Verwende stream-spezifische Daten
-    source_data = _iter_changes_only(history, changes_key)
-    print(f"🔍 ALT-Regression nutzt: {changes_key} mit {len(source_data)} Änderungen")
+    # GEÄNDERT: Verwende nur echte Änderungen, keine Heartbeats
+    source_data = _iter_changes_only(history)
     if len(source_data) < REGRESSION_MIN_POINTS:
         return None
     
-    # Extrahiere Datenpunkte (optimized)
+    # Extrahiere Datenpunkte
     data_points = []
     first_timestamp = None
-    
-    # Pre-allocate list for better performance
-    timestamps = []
-    date_days_list = []
-    
     for entry in source_data:  # GEÄNDERT: Verwende source_data (nur Änderungen)
         try:
             timestamp = datetime.fromisoformat(entry["timestamp"])
@@ -756,19 +284,7 @@ def calculate_advanced_regression_forecast(history, current_date=None):
                 
             if first_timestamp is None:
                 first_timestamp = timestamp
-            
-            timestamps.append(timestamp)
-            date_days_list.append(date_days)
                 
-        except (ValueError, KeyError) as e:
-            continue
-    
-    # Calculate elapsed days in batch for better performance
-    if not timestamps:
-        return None
-        
-    for i, (timestamp, date_days) in enumerate(zip(timestamps, date_days_list)):
-        try:
             days_elapsed = business_days_elapsed(first_timestamp, timestamp)
             data_points.append((days_elapsed, date_days, timestamp))
         except Exception as e:
@@ -891,16 +407,15 @@ def calculate_advanced_regression_forecast(history, current_date=None):
     current_days_elapsed = business_days_elapsed(first_timestamp, current_time)
     current_predicted_days = best_slope * current_days_elapsed + best_intercept
     
-    # Zieldaten - Stream-spezifisch
+    # Zieldaten
+    target_25_days = date_to_days(TARGET_DATES[0])  # "25 July" 
+    target_28_days = date_to_days(TARGET_DATES[1])  # "28 July"
+    
     predictions = {}
     days_until_25 = None
     days_until_28 = None
     
-    if ACTIVE_STREAM == "pre_cas":
-        # Pre-CAS: Ein einzelnes Zieldatum
-        target_label = get_active_target_label()  # "13 August"
-        target_days = date_to_days(target_label)
-        
+    for target_name, target_days in [(TARGET_DATES[0], target_25_days), (TARGET_DATES[1], target_28_days)]:
         if target_days and best_slope > 0:
             days_until = (target_days - current_predicted_days) / best_slope
             
@@ -909,46 +424,24 @@ def calculate_advanced_regression_forecast(history, current_date=None):
             days_until_lower = max(0, days_until - confidence_margin)
             days_until_upper = days_until + confidence_margin
             
-            predictions[target_label] = {
+            
+            predictions[target_name] = {
                 "days": days_until,
                 "days_lower": days_until_lower,
                 "days_upper": days_until_upper,
-                # WICHTIG: lower = früheres Datum, upper = späteres Datum
+                # Termine werden auf Basis von Geschäftstagen (Mo–Fr) berechnet
                 "date": add_business_days(current_time, days_until) if days_until > 0 else None,
-                "date_lower": add_business_days(current_time, days_until_lower) if days_until_lower > 0 else None,
-                "date_upper": add_business_days(current_time, days_until_upper) if days_until_upper > 0 else None,
+                "date_lower": add_business_days(current_time, days_until_upper) if days_until_upper > 0 else None,
+                "date_upper": add_business_days(current_time, days_until_lower) if days_until_lower > 0 else None,
             }
-            # Legacy-Kompatibilität
-            days_until_25 = days_until
-    else:
-        # AOA/Standard: Zwei Zieldaten wie bisher
-        target_25_days = date_to_days(TARGET_DATES[0])  # "25 July"
-        target_28_days = date_to_days(TARGET_DATES[1])  # "28 July"
-        
-        for target_name, target_days in [(TARGET_DATES[0], target_25_days), (TARGET_DATES[1], target_28_days)]:
-            if target_days and best_slope > 0:
-                days_until = (target_days - current_predicted_days) / best_slope
-                
-                # Konfidenzintervall (95%)
-                confidence_margin = (CONFIDENCE_LEVEL * std_error / abs(best_slope)) if best_slope != 0 else 0
-                days_until_lower = max(0, days_until - confidence_margin)
-                days_until_upper = days_until + confidence_margin
-                
-                predictions[target_name] = {
-                    "days": days_until,
-                    "days_lower": days_until_lower,
-                    "days_upper": days_until_upper,
-                    "date": add_business_days(current_time, days_until) if days_until > 0 else None,
-                    "date_lower": add_business_days(current_time, days_until_lower) if days_until_lower > 0 else None,
-                    "date_upper": add_business_days(current_time, days_until_upper) if days_until_upper > 0 else None,
-                }
-                
-                # Für Legacy-Kompatibilität
-                if target_name == TARGET_DATES[0]:  # "25 July"
-                    days_until_25 = days_until
-                elif target_name == TARGET_DATES[1]:  # "28 July"
-                    days_until_28 = days_until
 
+            
+            # Für Legacy-Kompatibilität
+            if target_name == TARGET_DATES[0]:  # "25 July"
+                days_until_25 = days_until
+            elif target_name == TARGET_DATES[1]:  # "28 July"
+                days_until_28 = days_until
+    
     # 8. TREND-ANALYSE
     trend_analysis = "unbekannt"
     if len(velocities) >= 2:
@@ -961,7 +454,7 @@ def calculate_advanced_regression_forecast(history, current_date=None):
         else:
             trend_analysis = "konstant"
     
-    result = {
+    return {
         # Basis-Informationen (für Kompatibilität)
         "slope": best_slope,
         "r_squared": best_r2,
@@ -978,12 +471,6 @@ def calculate_advanced_regression_forecast(history, current_date=None):
         "models": models_comparison,
         "predictions": predictions,
     }
-    
-    # Cache the result for future use
-    _regression_cache = result.copy()
-    _regression_cache_key = cache_key
-    
-    return result
 
 def calculate_regression_forecast(history):
     """Wrapper-Funktion für Rückwärtskompatibilität - ruft die erweiterte Version auf"""
@@ -1002,10 +489,9 @@ def _old_regression_summary(forecast):
     pts = forecast.get('data_points', 0)
     slope = forecast.get('slope', 0.0)
     trend = forecast.get('trend_analysis', None)
-    # Stream-aware target
-    target_key = get_active_target_label() if ACTIVE_STREAM == "pre_cas" else "25 July"
-    if 'predictions' in forecast and target_key in forecast['predictions']:
-        p25 = forecast['predictions'][target_key]
+    # 25 July
+    if 'predictions' in forecast and '25 July' in forecast['predictions']:
+        p25 = forecast['predictions']['25 July']
         eta25 = _fmt_eta(p25.get('days'), p25.get('date'))
     else:
         d25 = forecast.get('days_until_25_july')
@@ -1026,6 +512,9 @@ def _old_regression_summary(forecast):
     }
 
 # ===== ETA-Backtest & Recency-Blend Helpers =====
+import math
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 def _median(xs):
     xs = sorted(xs)
@@ -1037,11 +526,14 @@ def _median(xs):
         return xs[mid]
     return 0.5 * (xs[mid-1] + xs[mid])
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 def _to_aware_berlin(dt):
     """Nimmt datetime ODER ISO-String (auch mit 'Z') und gibt tz-aware Europe/Berlin zurück."""
     if dt is None:
         return None
-    tz_berlin = BER
+    tz_berlin = ZoneInfo("Europe/Berlin")
     # Strings sauber nach datetime wandeln
     if isinstance(dt, str):
         s = dt.replace('Z', '+00:00')
@@ -1052,7 +544,7 @@ def _to_aware_berlin(dt):
             return datetime.now(tz_berlin)
     # Naive Zeitstempel als UTC interpretieren
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
+        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
     return dt.astimezone(tz_berlin)
 
 def _hours_since(ts, now=None):
@@ -1067,7 +559,7 @@ def _recency_weight(hours_since_change, tau_hours):
     # Center leicht unter tau_hours, damit Umschalten nicht zu spät kommt
     denom = max(1e-6, 0.25 * tau_hours)
     z = (hours_since_change - 0.75 * tau_hours) / denom
-    return 1.0 / (1.0 + _get_math().exp(-z))  # Sigmoid
+    return 1.0 / (1.0 + math.exp(-z))  # Sigmoid
 
 def _subset_rows_until(rows_all, t_cut):
     """Alle Punkte (inkl. Heartbeats) bis < t_cut."""
@@ -1129,24 +621,14 @@ def compute_integrated_model_metrics(history):
     from datetime import time as _time
     _np = _get_numpy()  # Lazy load numpy
 
-    # ---- Stream-spezifische Datenauswahl ----
-    if ACTIVE_STREAM == "pre_cas":
-        changes_key = "pre_cas_changes"
-    elif ACTIVE_STREAM == "cas":
-        changes_key = "cas_changes"
-    else:
-        changes_key = "changes"
-    series = history.get(changes_key) or history.get("changes", [])
-    
     # ---- Daten aufbereiten: Changes & Heartbeats ----
     # rows_all: changes + filtered heartbeats (at most 1 heartbeat after last change)
     # rows_changes: nur echte Änderungen (für Backtest)
     rows_all = []
     rows_changes = []
 
-    # 1) Build rows_changes from stream-specific data and sort them
-    for ch in history.get(changes_key, []):
-        print(f"🔍 NEU-Regression nutzt: {changes_key} mit {len(rows_changes)} Änderungen")
+    # 1) Build rows_changes from history.changes and sort them
+    for ch in history.get("changes", []):
         rows_changes.append({"timestamp": ch["timestamp"], "date": ch["date"]})
         rows_all.append({"timestamp": ch["timestamp"], "date": ch["date"]})
     
@@ -1181,7 +663,7 @@ def compute_integrated_model_metrics(history):
     rows_all.sort(key=lambda r: _to_aware_berlin(r["timestamp"]))
 
     # ---- Kalender / Konstanten ----
-    cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=UK_HOLIDAYS)
+    cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
     tz_out = BER
 
     # ---- (1) ETA-Backtest: kleines Grid ----
@@ -1225,6 +707,10 @@ def compute_integrated_model_metrics(history):
     hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute) / 60.0
     avg_prog_new = imodel.ts_.b * hours_per_day  # y pro Business-Day
 
+    # Vorhersagen (echte Datumsobjekte)
+    pred25 = imodel.predict_datetime("25 July", tz_out=tz_out)
+    pred28 = imodel.predict_datetime("28 July", tz_out=tz_out)
+
     def _fmt_eta(diff_days, when_dt):
         if when_dt is None:
             return "—"
@@ -1232,57 +718,26 @@ def compute_integrated_model_metrics(history):
 
     # Für "in X Tagen" verwenden wir Kalendertage (inkl. WE)
     now_de = _now_berlin()
+    d25 = (pred25["when_point"] - now_de).total_seconds() / 86400.0 if pred25 and pred25.get("when_point") else None
+    d28 = (pred28["when_point"] - now_de).total_seconds() / 86400.0 if pred28 and pred28.get("when_point") else None
 
-    # Vorhersagen (echte Datumsobjekte) - Stream-spezifisch
-    if ACTIVE_STREAM == "pre_cas":
-        target_str = TARGET_DATE_PRE_CAS.strftime('%d %B')
-        pred = imodel.predict_datetime(target_str, tz_out=tz_out)
-        # Eine einzelne Vorhersage für Pre-CAS
-        d_days = (pred["when_point"] - now_de).total_seconds() / 86400.0 if pred and pred.get("when_point") else None
-        
-        return {
-            "name": "NEU (integriert)",
-            "r2": r2_new,
-            "points": len(rows_all),
-            "speed": f"{avg_prog_new:.1f} Tage/Tag",
-            "speed_val": float(avg_prog_new),
-            "eta_pre_cas": _fmt_eta(d_days, pred["when_point"]) if d_days is not None else "—",
-            "eta_pre_cas_dt": pred["when_point"] if pred else None,
-            # Legacy compatibility
-            "eta25": "—",
-            "eta28": "—",
-            "eta25_dt": None,
-            "eta28_dt": None,
-            "heartbeats": heartbeats,
-            # Debug/Transparenz (optional):
-            "params": {"base_frac": base_frac, "base_tau": base_tau, "eff_frac": eff_frac, "eff_tau": eff_tau, "recency_w": w, "h_since_change": h_since, "backtest_score_med_days": best["score"]},
-        }
-    else:
-        # Existing code für AOA mit 25/28 July
-        pred25 = imodel.predict_datetime("25 July", tz_out=tz_out)
-        pred28 = imodel.predict_datetime("28 July", tz_out=tz_out)
-        
-        # Für "in X Tagen" verwenden wir Kalendertage (inkl. WE)
-        d25 = (pred25["when_point"] - now_de).total_seconds() / 86400.0 if pred25 and pred25.get("when_point") else None
-        d28 = (pred28["when_point"] - now_de).total_seconds() / 86400.0 if pred28 and pred28.get("when_point") else None
-
-        return {
-            "name": "NEU (integriert)",
-            "r2": r2_new,
-            "points": len(rows_all),
-            "speed": f"{avg_prog_new:.1f} Tage/Tag",
-            "speed_val": float(avg_prog_new),                 # numerisch
-            "eta25": _fmt_eta(d25, pred25["when_point"]) if d25 is not None else "—",
-            "eta28": _fmt_eta(d28, pred28["when_point"]) if d28 is not None else "—",
-            "eta25_dt": pred25["when_point"] if pred25 else None,
-            "eta28_dt": pred28["when_point"] if pred28 else None,
-            "heartbeats": heartbeats,
-            # Debug/Transparenz (optional):
-            "params": {"base_frac": base_frac, "base_tau": base_tau, "eff_frac": eff_frac, "eff_tau": eff_tau, "recency_w": w, "h_since_change": h_since, "backtest_score_med_days": best["score"]},
-        }
+    return {
+        "name": "NEU (integriert)",
+        "r2": r2_new,
+        "points": len(rows_all),
+        "speed": f"{avg_prog_new:.1f} Tage/Tag",
+        "speed_val": float(avg_prog_new),                 # numerisch
+        "eta25": _fmt_eta(d25, pred25["when_point"]) if d25 is not None else "—",
+        "eta28": _fmt_eta(d28, pred28["when_point"]) if d28 is not None else "—",
+        "eta25_dt": pred25["when_point"] if pred25 else None,
+        "eta28_dt": pred28["when_point"] if pred28 else None,
+        "heartbeats": heartbeats,
+        # Debug/Transparenz (optional):
+        "params": {"base_frac": base_frac, "base_tau": base_tau, "eff_frac": eff_frac, "eff_tau": eff_tau, "recency_w": w, "h_since_change": h_since, "backtest_score_med_days": best["score"]},
+    }
 
 
-def create_enhanced_forecast_text(forecast, active_history=None):
+def create_enhanced_forecast_text(forecast):
     """Kompakte, mobilfreundliche Prognose (ALT vs. NEU) mit Legende und Kalendertagen."""
     if not forecast:
         return "\n📊 Prognose: Noch nicht genügend Daten für eine zuverlässige Vorhersage."
@@ -1292,51 +747,36 @@ def create_enhanced_forecast_text(forecast, active_history=None):
     pts_old  = int(forecast.get("data_points", 0))
     slope_old = float(forecast.get("slope", 0.0))
 
-    # Stream-spezifische Target-Logik
-    if ACTIVE_STREAM == "pre_cas":
-        target_date_str = TARGET_DATE_PRE_CAS.strftime('%d %B')
-        # Für Pre-CAS nur ein Target verwenden
-        target1_name = "Pre-CAS Target"
-        def _old_eta_dt(frc, key):
-            try:
-                return frc.get("predictions", {}).get(target_date_str, {}).get("date")
-            except Exception:
-                return None
-        eta1_old_dt = _old_eta_dt(forecast, target_date_str)
-        eta2_old_dt = None
-    else:
-        # AOA: zwei Targets wie bisher
-        target1_name = "25 July"
-        target2_name = "28 July"
-        def _old_eta_dt(frc, key):
-            try:
-                return frc.get("predictions", {}).get(key, {}).get("date")
-            except Exception:
-                return None
-        eta1_old_dt = _old_eta_dt(forecast, "25 July")
-        eta2_old_dt = _old_eta_dt(forecast, "28 July")
+    # Alte ETAs (echte Datumsobjekte, falls vorhanden)
+    def _old_eta_dt(frc, key):
+        try:
+            return frc.get("predictions", {}).get(key, {}).get("date")
+        except Exception:
+            return None
+
+    eta25_old_dt = _old_eta_dt(forecast, "25 July")
+    eta28_old_dt = _old_eta_dt(forecast, "28 July")
 
     # Neue (integrierte) Metriken + echte ETA-Datetimes
-    # Neue (integrierte) Metriken + echte ETA-Datetimes
-    hist = active_history if active_history else get_history()
+    hist = get_history()
     try:
-        new_s = compute_integrated_model_metrics(hist)    
+        new_s = compute_integrated_model_metrics(hist)
     except Exception as e:
         print(f"⚠️ Integriertes Modell temporär deaktiviert: {e}")
         new_s = None
+
 
     if not new_s:
         # Fallback: nur ALT kompakt ausgeben
         parts = []
         parts.append("🎨 <b>Legende:</b> 🔵 ALT (linear) · 🟠 NEU (integriert)")
         parts.append("\n📌 <b>Kurzprognose</b>")
-        parts.append(f"🎯 <b>{target1_name}</b>")
-        parts.append(f"🔵 {_short_date(eta1_old_dt) if eta1_old_dt else '—'}"
-                     f" (in {_cal_days_until(eta1_old_dt)} Tagen)" if eta1_old_dt else "🔵 —")
-        if eta2_old_dt is not None:  # Only show second target for AOA
-            parts.append(f"\n🎯 <b>{target2_name}</b>")
-            parts.append(f"🔵 {_short_date(eta2_old_dt) if eta2_old_dt else '—'}"
-                         f" (in {_cal_days_until(eta2_old_dt)} Tagen)" if eta2_old_dt else "🔵 —")
+        parts.append("🎯 <b>25 July</b>")
+        parts.append(f"🔵 {_short_date(eta25_old_dt) if eta25_old_dt else '—'}"
+                     f" (in {_cal_days_until(eta25_old_dt)} Tagen)" if eta25_old_dt else "🔵 —")
+        parts.append("\n🎯 <b>28 July</b>")
+        parts.append(f"🔵 {_short_date(eta28_old_dt) if eta28_old_dt else '—'}"
+                     f" (in {_cal_days_until(eta28_old_dt)} Tagen)" if eta28_old_dt else "🔵 —")
         parts.append("\n📐 <b>Modelle</b>")
         parts.append(f"R²: 🔵 {r2_old:.2f} ({pts_old})")
         parts.append(f"Fortschritt: 🔵 {slope_old:.1f} d/Tag")
@@ -1347,18 +787,13 @@ def create_enhanced_forecast_text(forecast, active_history=None):
     pts_new  = int(new_s["points"])
     slope_new = float(new_s.get("speed_val", 0.0))
     hb_count = int(new_s.get("heartbeats") or 0)
-    
-    if ACTIVE_STREAM == "pre_cas":
-        eta1_new_dt = new_s.get("eta_pre_cas_dt")
-        eta2_new_dt = None
-    else:
-        eta1_new_dt = new_s.get("eta25_dt")
-        eta2_new_dt = new_s.get("eta28_dt")
+    eta25_new_dt = new_s.get("eta25_dt")
+    eta28_new_dt = new_s.get("eta28_dt")
 
     # Kompakte Bullets (Kalendertage!)
     text = render_compact_bullets(
-        eta1_old_dt, eta1_new_dt,
-        eta2_old_dt, eta2_new_dt,
+        eta25_old_dt, eta25_new_dt,
+        eta28_old_dt, eta28_new_dt,
         r2_old, pts_old, slope_old,
         r2_new, pts_new, slope_new,
         hb_count=hb_count
@@ -1366,62 +801,19 @@ def create_enhanced_forecast_text(forecast, active_history=None):
 
     return "\n" + text
 
-def create_forecast_text(forecast, active_history=None):
-    """Verwendet immer die enhanced Version"""
-    return create_enhanced_forecast_text(forecast, active_history)
-
-def create_pre_cas_forecast_text(forecast):
-    """Pre-CAS spezifische Prognose mit einzelnem Zieldatum"""
-    if not forecast:
-        return "\n📊 Prognose: Noch nicht genügend Daten für eine zuverlässige Pre-CAS Vorhersage."
-    
-    # Basis Metriken
-    r2 = float(forecast.get("r_squared", 0.0))
-    pts = int(forecast.get("data_points", 0))
-    slope = float(forecast.get("slope", 0.0))
-    
-    parts = []
-    parts.append("\n📊 <b>Pre-CAS Prognose</b>")
-    parts.append(f"🎯 <b>Target:</b> {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)")
-    
-    # Versuche ETA zu berechnen für Pre-CAS Zieldatum
-    try:
-        target_date_str = TARGET_DATE_PRE_CAS.strftime('%d %B')
-        target_days = date_to_days(target_date_str)
-        
-        if target_days and slope > 0:
-            current_predicted_days = forecast.get("current_trend_days", 0)
-            days_until = (target_days - current_predicted_days) / slope
-            
-            if days_until > 0:
-                from datetime import datetime, timedelta
-                eta_date = datetime.now() + timedelta(days=days_until)
-                parts.append(f"📅 <b>ETA:</b> {eta_date.strftime('%d.%m.%Y')} (in ~{days_until:.0f} Tagen)")
-            else:
-                parts.append(f"📅 <b>ETA:</b> Ziel bereits erreicht oder überschritten")
-        else:
-            parts.append(f"📅 <b>ETA:</b> Nicht berechenbar (Trend zu schwach)")
-    except Exception as e:
-        parts.append(f"📅 <b>ETA:</b> Berechnung fehlgeschlagen")
-    
-    parts.append(f"\n📐 <b>Modell:</b> R²={r2:.2f} ({pts} Punkte)")
-    parts.append(f"🚀 <b>Fortschritt:</b> {slope:.1f} Tage/Tag")
-    
-    return "\n".join(parts)
+def create_forecast_text(forecast):
+    """Wrapper für Rückwärtskompatibilität - ruft erweiterte Version auf"""
+    return create_enhanced_forecast_text(forecast)
 
 def create_progression_graph(history, current_date, forecast=None):
     """
-    Creates progression graph with ALT vs. NEU forecasting:
-      • exact ETA intersection points (25/28 July) on regression lines,
-      • heartbeats as crosses on respective y-values,
-      • smooth lines (fractional business days) without uncertainty areas,
-      • compact axes & date formats.
+    ALT vs. NEU mit:
+      • exakten ETA-Schnittpunkten (25/28 July) auf den Regressionslinien,
+      • Heartbeats als Kreuze auf dem jeweiligen y-Wert,
+      • glatten Linien (fraktionale Business-Days) ohne Unsicherheitsflächen,
+      • kompakten Achsen & Datumsformaten.
 
-    Note: This function receives already filtered history data, but uses ACTIVE_STREAM 
-    internally only for display purposes (titles, target markers, etc.). The actual 
-    data filtering happens before calling this function.
-
-    Returns BytesIO (PNG) or None.
+    Gibt BytesIO (PNG) zurück oder None.
     """
     # Lazy load matplotlib and numpy
     plt, mdates = _get_matplotlib()
@@ -1429,6 +821,7 @@ def create_progression_graph(history, current_date, forecast=None):
     
     from matplotlib.ticker import FuncFormatter, MaxNLocator
     from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
 
     COL_ALT = "#1f77b4"   # Alt: blau
     COL_NEU = "#ff7f0e"   # Neu: orange
@@ -1436,19 +829,17 @@ def create_progression_graph(history, current_date, forecast=None):
 
     # ---------- Helfer ----------
     def _to_naive_berlin(dt_like):
-        # Define timezone directly to avoid scope issues
-        from zoneinfo import ZoneInfo
-        ber_tz = ZoneInfo("Europe/Berlin")
-        
         if dt_like is None:
             return None
         if isinstance(dt_like, datetime):
             if dt_like.tzinfo is None:
-                return dt_like.replace(tzinfo=ber_tz).astimezone(ber_tz).replace(tzinfo=None)
-            return dt_like.astimezone(ber_tz).replace(tzinfo=None)
+                return dt_like.replace(tzinfo=ZoneInfo("Europe/Berlin")).astimezone(
+                    ZoneInfo("Europe/Berlin")
+                ).replace(tzinfo=None)
+            return dt_like.astimezone(ZoneInfo("Europe/Berlin")).replace(tzinfo=None)
         try:
             dtx = datetime.fromisoformat(str(dt_like))
-            return dtx.astimezone(ber_tz).replace(tzinfo=None)
+            return dtx.astimezone(ZoneInfo("Europe/Berlin")).replace(tzinfo=None)
         except Exception:
             return None
 
@@ -1457,9 +848,9 @@ def create_progression_graph(history, current_date, forecast=None):
         np = _get_numpy()  # Lazy load
         s0 = datetime(start.year, start.month, start.day)
         t0 = datetime(t.year, t.month, t.day)
-        full = float(np.busday_count(np.datetime64(s0.date()), np.datetime64(t0.date()), holidays=UK_HOLIDAYS))
+        full = float(np.busday_count(np.datetime64(s0.date()), np.datetime64(t0.date())))
         def _frac(d: datetime) -> float:
-            if not bool(np.is_busday(np.datetime64(d.date()), holidays=UK_HOLIDAYS)):
+            if not bool(np.is_busday(np.datetime64(d.date()))):
                 return 0.0
             return (d - datetime(d.year, d.month, d.day)).total_seconds() / 86400.0
         return full + _frac(t) - _frac(s0)
@@ -1475,36 +866,33 @@ def create_progression_graph(history, current_date, forecast=None):
         dt = _days_to_dt(year, v)
         return dt.strftime('%d %b') if dt else ''
 
+    # exakter Schnittpunkt t* für Zielhöhe y_target auf y(t) = m * BD(t) + b
     def _solve_time_for_level(m, b, y_target, t0, t_hint, sign_positive=True):
-        """
-        Finde t*, so dass y(t*) = y_target auf y(t) = m * BD(t) + b.
-        Erweiterung des Suchfensters nach rechts, falls der Schnittpunkt
-        außerhalb des aktuellen Fensters liegt. Gibt datetime|None zurück.
-        """
         if m is None or m == 0:
             return None
-    
+
         def f(t):  # y(t)
             return m * _bizdays_float(t0, t) + b
-    
-        # Startfenster um t_hint (typisch: "jetzt")
+
+        # Bracketing um t_hint (heute) – expandieren bis Zielhöhe eingeschlossen ist
         low  = t_hint - timedelta(days=5)
         high = t_hint + timedelta(days=20)
-    
-        # Dynamisches Bracketing: solange kein Vorzeichenwechsel, Fenster nach rechts schieben
-        # (begrenzt, damit wir nicht endlos laufen)
-        for _ in range(24):  # ~ 24 * 10 Tage = 240 Kalendertage max.
-            if (f(low) - y_target) * (f(high) - y_target) <= 0:
-                break
-            # bei positiver Steigung liegt das Target typischerweise rechts
-            high += timedelta(days=10)
-            # ein kleines Stück auch nach links ausdehnen, um Randfälle abzufangen
-            low  -= timedelta(days=2)
+        max_expand = 20
+        if sign_positive:
+            while f(low)  > y_target and max_expand > 0:
+                low  -= timedelta(days=10); max_expand -= 1
+            while f(high) < y_target and max_expand > 0:
+                high += timedelta(days=10); max_expand -= 1
         else:
-            # selbst nach maximaler Erweiterung kein Wechsel → keine ETA im sinnvollen Horizont
-            return None
-    
-        # Bisektion auf [low, high]
+            while f(low)  < y_target and max_expand > 0:
+                low  -= timedelta(days=10); max_expand -= 1
+            while f(high) > y_target and max_expand > 0:
+                high += timedelta(days=10); max_expand -= 1
+
+        if (f(low) - y_target) * (f(high) - y_target) > 0:
+            return None  # kein gültiges Intervall
+
+        # Bisektion
         for _ in range(50):
             mid = low + (high - low) / 2
             val = f(mid)
@@ -1516,17 +904,8 @@ def create_progression_graph(history, current_date, forecast=None):
                 high = mid
         return mid
 
-
     # ---------- Daten sammeln ----------
-    # Stream-spezifische Datenauswahl
-    if ACTIVE_STREAM == "pre_cas":
-        changes_key = "pre_cas_changes"
-    elif ACTIVE_STREAM == "cas":
-        changes_key = "cas_changes"
-    else:
-        changes_key = "changes"
-    
-    entries = list(_iter_observations_or_changes(history, changes_key))
+    entries = list(_iter_observations_or_changes(history))
     if len(entries) < REGRESSION_MIN_POINTS:
         return None
 
@@ -1596,21 +975,12 @@ def create_progression_graph(history, current_date, forecast=None):
     ax.axvline(now_de, linewidth=1.0, linestyle=":", alpha=0.8)
     ax.scatter([change_ts[-1]], [change_y[-1]], s=100, zorder=6, label="Aktuell", color=COL_NEU)
 
-    # Zielhöhen (horizontale Linien) - Single Pre-CAS target
-    if ACTIVE_STREAM == "pre_cas":
-        target_date_str = TARGET_DATE_PRE_CAS.strftime('%d %B')
-        target_days = date_to_days(target_date_str)
-        if target_days is not None:
-            ax.axhline(target_days, linestyle="--", linewidth=1.5, alpha=0.7, color='red')
-            ax.text(change_ts[0], target_days, f" {target_date_str} (Pre-CAS)", va="center", ha="left", fontsize=9, 
-                   bbox=dict(boxstyle="round,pad=0.2", fc="yellow", alpha=0.3))
-    else:
-        # Backward compatibility for AOA dual targets
-        target_map = {TARGET_DATES[0]: date_to_days(TARGET_DATES[0]), TARGET_DATES[1]: date_to_days(TARGET_DATES[1])}
-        for tname, ty in target_map.items():
-            if ty is not None:
-                ax.axhline(ty, linestyle=":", linewidth=1.0, alpha=0.5)
-                ax.text(change_ts[0], ty, f" {tname}", va="center", ha="left", fontsize=9)
+    # Zielhöhen (horizontale Linien)
+    target_map = {TARGET_DATES[0]: date_to_days(TARGET_DATES[0]), TARGET_DATES[1]: date_to_days(TARGET_DATES[1])}
+    for tname, ty in target_map.items():
+        if ty is not None:
+            ax.axhline(ty, linestyle=":", linewidth=1.0, alpha=0.5)
+            ax.text(change_ts[0], ty, f" {tname}", va="center", ha="left", fontsize=9)
 
     # feines Zeitraster (6h) für glatte Linien
     first_ts = change_ts[0]
@@ -1634,24 +1004,12 @@ def create_progression_graph(history, current_date, forecast=None):
             color=COL_ALT, alpha=0.95
         )
 
-        # ETA for active stream target
-        if ACTIVE_STREAM == "pre_cas":
-            target_date_str = TARGET_DATE_PRE_CAS.strftime('%d %B')
-            target_days = date_to_days(target_date_str)
-            if target_days is not None:
-                t_star = _solve_time_for_level(m_old, b_old, target_days, first_ts, now_de, sign_positive=(m_old > 0))
-                if t_star:
-                    y_star = m_old * _bizdays_float(first_ts, t_star) + b_old
-                    alt_eta["pre_cas"] = (t_star, y_star)
-        else:
-            # Backward compatibility for dual AOA targets
-            target_map = {TARGET_DATES[0]: date_to_days(TARGET_DATES[0]), TARGET_DATES[1]: date_to_days(TARGET_DATES[1])}
-            for name, ty in target_map.items():
-                if ty is None: continue
-                t_star = _solve_time_for_level(m_old, b_old, ty, first_ts, now_de, sign_positive=(m_old > 0))
-                if t_star:
-                    y_star = m_old * _bizdays_float(first_ts, t_star) + b_old
-                    alt_eta[name] = (t_star, y_star)
+        for name, ty in target_map.items():
+            if ty is None: continue
+            t_star = _solve_time_for_level(m_old, b_old, ty, first_ts, now_de, sign_positive=(m_old > 0))
+            if t_star:
+                y_star = m_old * _bizdays_float(first_ts, t_star) + b_old
+                alt_eta[name] = (t_star, y_star)
 
     # ---------- NEU-Linie + ETAs ----------
     neu_eta = {}
@@ -1661,7 +1019,7 @@ def create_progression_graph(history, current_date, forecast=None):
 
         rows = [{"timestamp": e["timestamp"], "date": e["date"]} for e in entries]
         if len(rows) >= REGRESSION_MIN_POINTS:
-            cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=UK_HOLIDAYS)
+            cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
             imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
 
             hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute) / 60.0
@@ -1674,24 +1032,12 @@ def create_progression_graph(history, current_date, forecast=None):
                 ax.plot(grid_ts, y_new, linewidth=2.6, label="NEU: integrierte Regression",
                         color=COL_NEU, alpha=0.95)
 
-                # ETA for active stream target
-                if ACTIVE_STREAM == "pre_cas":
-                    target_date_str = TARGET_DATE_PRE_CAS.strftime('%d %B')
-                    target_days = date_to_days(target_date_str)
-                    if target_days is not None:
-                        t_star = _solve_time_for_level(m_new, b_new, target_days, first_ts, now_de, sign_positive=(m_new > 0))
-                        if t_star:
-                            y_star = m_new * _bizdays_float(first_ts, t_star) + b_new
-                            neu_eta["pre_cas"] = (t_star, y_star)
-                else:
-                    # Backward compatibility for dual AOA targets
-                    target_map = {TARGET_DATES[0]: date_to_days(TARGET_DATES[0]), TARGET_DATES[1]: date_to_days(TARGET_DATES[1])}
-                    for name, ty in target_map.items():
-                        if ty is None: continue
-                        t_star = _solve_time_for_level(m_new, b_new, ty, first_ts, now_de, sign_positive=(m_new > 0))
-                        if t_star:
-                            y_star = m_new * _bizdays_float(first_ts, t_star) + b_new
-                            neu_eta[name] = (t_star, y_star)
+                for name, ty in target_map.items():
+                    if ty is None: continue
+                    t_star = _solve_time_for_level(m_new, b_new, ty, first_ts, now_de, sign_positive=(m_new > 0))
+                    if t_star:
+                        y_star = m_new * _bizdays_float(first_ts, t_star) + b_new
+                        neu_eta[name] = (t_star, y_star)
     except ImportError:
         pass
     except Exception as e:
@@ -1714,40 +1060,17 @@ def create_progression_graph(history, current_date, forecast=None):
                         xytext=(6, -12), textcoords="offset points", ha="left", va="top", fontsize=9,
                         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
 
-    # Plot ETAs based on active stream
-    if ACTIVE_STREAM == "pre_cas":
-        _plot_eta("Pre-CAS", alt_eta.get("pre_cas"), neu_eta.get("pre_cas"))
-    else:
-        # Backward compatibility for dual AOA targets
-        _plot_eta("25", alt_eta.get("25 July"), neu_eta.get("25 July"))
-        _plot_eta("28", alt_eta.get("28 July"), neu_eta.get("28 July"))
+    _plot_eta("25", alt_eta.get("25 July"), neu_eta.get("25 July"))
+    _plot_eta("28", alt_eta.get("28 July"), neu_eta.get("28 July"))
 
-    # ---- Achsenbereich dynamisch an späteste ETA koppeln ----
-    eta_candidates = []
-    for d in (alt_eta, neu_eta):
-        for pt in d.values():
-            if pt:
-                eta_candidates.append(pt[0])
-    
-    margin = timedelta(days=2)  # kurz hinter der spätesten ETA
-    if eta_candidates:
-        right_edge = max(eta_candidates) + margin
-    else:
-        # Fallback: keine ETA gefunden → Blick etwas über "jetzt" hinaus
-        right_edge = now_de + timedelta(days=14)
-    
-    left_edge = min(change_ts[0], now_de - timedelta(days=3)) - timedelta(days=1)
-    ax.set_xlim(left_edge, right_edge)
-
+    # ---------- Achsenbegrenzungen ----------
+    eta_dates = [p[0] for p in list(alt_eta.values()) + list(neu_eta.values()) if p]
+    right_edge = max(eta_dates) if eta_dates else change_ts[-1]
+    left_edge  = min(change_ts[0], now_de - timedelta(days=3))
+    ax.set_xlim(left_edge - timedelta(days=1), right_edge + timedelta(days=1))
 
     y_min = min(change_y)
-    if ACTIVE_STREAM == "pre_cas":
-        target_days = date_to_days(TARGET_DATE_PRE_CAS.strftime('%d %B'))
-        y_max = max([*change_y, target_days] if target_days else change_y)
-    else:
-        # Backward compatibility
-        target_map = {TARGET_DATES[0]: date_to_days(TARGET_DATES[0]), TARGET_DATES[1]: date_to_days(TARGET_DATES[1])}
-        y_max = max([*change_y, *(v for v in target_map.values() if v is not None)])
+    y_max = max([*change_y, *(v for v in target_map.values() if v is not None)])
     ax.set_ylim(y_min - 2, y_max + 2)
 
     # ---------- Heartbeats als Kreuze auf y ----------
@@ -1763,10 +1086,7 @@ def create_progression_graph(history, current_date, forecast=None):
         # ax.vlines(hb_ts, ylo + 0.01*(yhi-ylo), hb_y, colors=COL_HB, linewidth=0.8, alpha=0.35)
 
     # ---------- Achsenformat ----------
-    if ACTIVE_STREAM == "pre_cas":
-        ax.set_title(f"Forecast / ETA — {ACTIVE_STREAM.upper()} — Target: {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)")
-    else:
-        ax.set_title("Fortschritt & Prognose — ALT vs. NEU")
+    ax.set_title("Fortschritt & Prognose — ALT vs. NEU")
     ax.set_xlabel("Datum")
     ax.set_ylabel("Verarbeitungsdatum")
 
@@ -1786,7 +1106,7 @@ def create_progression_graph(history, current_date, forecast=None):
 
     # ---------- Export ----------
     try:
-        buf = _get_io_bytesio()()
+        buf = BytesIO()
         plt.savefig(buf, format="png", dpi=110, bbox_inches="tight")
         buf.seek(0)
         plt.close()
@@ -1795,70 +1115,6 @@ def create_progression_graph(history, current_date, forecast=None):
         print(f"⚠️ Diagramm konnte nicht erzeugt werden: {e}")
         try: plt.close()
         except Exception: pass
-        return None
-
-def create_placeholder_graph():
-    """
-    Creates a simple placeholder graph when progression graph cannot be generated.
-    Returns BytesIO (PNG) or None.
-    """
-    try:
-        # Lazy load matplotlib
-        plt, mdates = _get_matplotlib()
-        
-        from datetime import datetime
-        import matplotlib.patches as mpatches
-        
-        # Create figure and axis
-        fig, ax = plt.subplots(figsize=(10, 6))
-        
-        # Set background color
-        fig.patch.set_facecolor('white')
-        ax.set_facecolor('#f8f9fa')
-        
-        # Remove axes
-        ax.set_xlim(0, 10)
-        ax.set_ylim(0, 10)
-        ax.axis('off')
-        
-        # Add main text
-        ax.text(5, 7, '📊 Graph nicht verfügbar', 
-                ha='center', va='center', fontsize=20, fontweight='bold', color='#333')
-        
-        ax.text(5, 5.5, 'Noch nicht genügend Datenpunkte für eine Verlaufsgrafik',
-                ha='center', va='center', fontsize=14, color='#666')
-        
-        # Add stream and timestamp info
-        now_str = get_german_time().strftime('%d.%m.%Y %H:%M:%S')
-        ax.text(5, 4, f'Active Stream: {ACTIVE_STREAM.upper()}',
-                ha='center', va='center', fontsize=12, color='#888')
-        
-        ax.text(5, 3.2, f'Zeitpunkt: {now_str}',
-                ha='center', va='center', fontsize=12, color='#888')
-        
-        if ACTIVE_STREAM == "pre_cas":
-            target_str = TARGET_DATE_PRE_CAS.strftime('%d %B %Y')
-            ax.text(5, 2.4, f'Target: {target_str}',
-                    ha='center', va='center', fontsize=12, color='#888')
-        
-        # Add a simple decorative border
-        border = mpatches.Rectangle((0.5, 1), 9, 8, linewidth=2, 
-                                  edgecolor='#ddd', facecolor='none')
-        ax.add_patch(border)
-        
-        # Save to buffer
-        buf = _get_io_bytesio()()
-        plt.savefig(buf, format="png", dpi=110, bbox_inches="tight", facecolor='white')
-        buf.seek(0)
-        plt.close()
-        return buf
-        
-    except Exception as e:
-        print(f"⚠️ Placeholder-Graph konnte nicht erstellt werden: {e}")
-        try: 
-            plt.close()
-        except Exception: 
-            pass
         return None
 
 def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=None, parse_mode='HTML'):
@@ -1891,29 +1147,15 @@ def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=
     
     try:
         if photo_buffer:
-            # Ensure buffer is at the beginning before sending
-            if hasattr(photo_buffer, 'seekable') and photo_buffer.seekable():
-                photo_buffer.seek(0)
-                        
             # Send photo with caption
             url = f"{TELEGRAM_API_BASE}{bot_token}/sendPhoto"
-            
-            # Safety: Cursor an den Anfang
-            try:
-                if hasattr(photo_buffer, "seek"):
-                    photo_buffer.seek(0)
-            except Exception:
-                pass
-            
             files = {'photo': ('graph.png', photo_buffer, 'image/png')}
             data = {
                 'chat_id': chat_id,
                 'caption': caption or '',
-                'parse_mode': parse_mode  # bei Fotos optional; lassen wir stehen
+                'parse_mode': parse_mode
             }
-            print("🖼️ Telegram: Sende Foto (sendPhoto)...")
-            response = _get_requests().post(url, files=files, data=data)
-            print(f"🖼️ Telegram: sendPhoto Status={response.status_code}")
+            response = requests.post(url, files=files, data=data)
         else:
             # Send text message
             url = f"{TELEGRAM_API_BASE}{bot_token}/sendMessage"
@@ -1922,17 +1164,13 @@ def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=
                 "text": message,
                 "parse_mode": parse_mode
             }
-            response = _get_requests().post(url, json=data)
-                
+            response = requests.post(url, json=data)
+        
         if response.status_code == 200:
-            if photo_buffer:
-                print(f"✅ Telegram-FOTO an {chat_type} gesendet!")
-            else:
-                print(f"✅ Telegram-TEXT an {chat_type} gesendet!")
+            print(f"✅ Telegram-Nachricht an {chat_type} gesendet!")
             return True
         else:
-            kind = "FOTO" if photo_buffer else "TEXT"
-            print(f"❌ Telegram-Fehler ({chat_type}, {kind}): {response.text}")
+            print(f"❌ Telegram-Fehler ({chat_type}): {response.text}")
             return False
     except Exception as e:
         print(f"❌ Telegram-Fehler ({chat_type}): {e}")
@@ -1956,80 +1194,6 @@ def send_telegram_papa(old_date, new_date):
     """Sendet eine einfache Nachricht an Papa über separaten Bot"""
     message = f"LSE-Datums-Update!\n\nVom: {old_date}\nAuf: {new_date}"
     return send_telegram_message(message, 'papa')
-
-def send_main_text_and_graph(message, current_date, active_history, forecast=None, caption=None):
-    """
-    Centralized function to send text message + graph/placeholder to main chat.
-    
-    Args:
-        message: Text message to send
-        current_date: Current date string
-        active_history: History data for graph creation
-        forecast: Optional forecast data
-        caption: Optional custom caption for graph, otherwise generates default
-    
-    Returns:
-        tuple: (text_success, graph_success) - boolean results for each operation
-    """
-    # Send text message first
-    text_success = send_telegram(message)
-    
-    # Generate or use provided caption
-    if caption is None:
-        if ACTIVE_STREAM == "pre_cas":
-            caption = (
-                f"📈 Pre-CAS Progression Update\n"
-                f"Aktuell: {current_date}\n"
-                f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
-            )
-        else:
-            caption = f"📈 Status Update\nAktuell: {current_date}"
-    
-    # Try to create progression graph, fallback to placeholder
-    graph_buffer = None
-    graph_success = False
-    
-    try:
-        # Try creating the real progression graph
-        graph_buffer = create_progression_graph(active_history, current_date, forecast)
-        
-        if graph_buffer:
-            print("🖼️ Sende separaten Graph...")
-        else:
-            print("⚠️ Kein Graph-Buffer zurückgegeben, erstelle Placeholder...")
-            # Create placeholder if progression graph failed
-            graph_buffer = create_placeholder_graph()
-            
-        if graph_buffer:
-            # Ensure buffer is at the beginning
-            try:
-                if hasattr(graph_buffer, "seek"):
-                    graph_buffer.seek(0)
-            except Exception:
-                pass
-                
-            # Send the graph/placeholder with HTML parse mode for consistent formatting
-            graph_success = send_telegram_photo(graph_buffer, caption, parse_mode='HTML')
-            
-            if graph_success:
-                print("✅ Graph/Placeholder erfolgreich gesendet!")
-            else:
-                print("❌ Fehler beim Senden des Graph/Placeholder")
-        else:
-            print("❌ Weder Graph noch Placeholder konnte erstellt werden")
-            
-    except Exception as e:
-        print(f"⚠️ Graph/Placeholder konnte nicht erstellt oder gesendet werden: {e}")
-        
-    finally:
-        # Clean up buffer
-        if graph_buffer:
-            try:
-                graph_buffer.close()
-            except Exception:
-                pass
-    
-    return text_success, graph_success
 
 
 def migrate_json_files():
@@ -2077,10 +1241,8 @@ def migrate_json_files():
 def load_status():
     """Lädt Status mit Fehlerbehandlung und Validierung"""
     try:
-        status = _cached_json_load(STATUS_FILE)
-        if status is None:
-            raise FileNotFoundError("Status file not found")
-            
+        with open(STATUS_FILE, 'r') as f:
+            status = json.load(f)
         if not isinstance(status, dict):
             print("⚠️ Status ist kein Dictionary, verwende Standardwerte")
             return {"last_date": "10 July", "last_check": None, "pre_cas_date": None, "cas_date": None, "last_updated_seen_utc": None}
@@ -2114,52 +1276,52 @@ def save_status(status):
         print("❌ Fehler: last_date ist leer, Status wird nicht gespeichert")
         return False
     
-    with _file_lock(STATUS_FILE):
-        # Erstelle Backup bevor wir speichern
-        try:
-            if os.path.exists(STATUS_FILE):
-                with open(STATUS_FILE, 'r') as f:
-                    backup = f.read()
-                with open(STATUS_FILE + '.backup', 'w') as f:
-                    f.write(backup)
-        except Exception as e:
-            print(f"⚠️ Konnte kein Backup erstellen: {e}")
+    # Erstelle Backup bevor wir speichern
+    try:
+        if os.path.exists(STATUS_FILE):
+            with open(STATUS_FILE, 'r') as f:
+                backup = f.read()
+            with open(STATUS_FILE + '.backup', 'w') as f:
+                f.write(backup)
+    except Exception as e:
+        print(f"⚠️ Konnte kein Backup erstellen: {e}")
+    
+    # Speichere mit Fehlerbehandlung
+    try:
+        # Füge Zeitstempel hinzu wenn nicht vorhanden
+        if 'last_check' not in status:
+            status['last_check'] = datetime.utcnow().isoformat()
         
-        # Speichere mit Fehlerbehandlung
-        try:
-            # Füge Zeitstempel hinzu wenn nicht vorhanden
-            if 'last_check' not in status:
-                status['last_check'] = datetime.now().astimezone(UTC).isoformat()
-            
-            _cached_json_dump(status, STATUS_FILE)
-            
-            # Verifiziere dass es korrekt gespeichert wurde
-            saved = _cached_json_load(STATUS_FILE)
-            if saved and saved.get('last_date') == status['last_date']:
+        with open(STATUS_FILE, 'w') as f:
+            json.dump(status, f, indent=2)
+        
+        # Verifiziere dass es korrekt gespeichert wurde
+        with open(STATUS_FILE, 'r') as f:
+            saved = json.load(f)
+            if saved.get('last_date') == status['last_date']:
                 print(f"✅ Status erfolgreich gespeichert: {status['last_date']}")
                 return True
             else:
                 print(f"❌ FEHLER: Status nicht korrekt gespeichert!")
                 print(f"   Erwartet: {status['last_date']}")
-                print(f"   Gespeichert: {saved.get('last_date') if saved else 'None'}")
+                print(f"   Gespeichert: {saved.get('last_date')}")
                 # Restore backup
                 if os.path.exists(STATUS_FILE + '.backup'):
                     os.rename(STATUS_FILE + '.backup', STATUS_FILE)
                 return False
-                    
-        except Exception as e:
-            print(f"❌ Fehler beim Speichern von status.json: {e}")
-            # Restore backup
-            if os.path.exists(STATUS_FILE + '.backup'):
-                os.rename(STATUS_FILE + '.backup', STATUS_FILE)
-            return False
+                
+    except Exception as e:
+        print(f"❌ Fehler beim Speichern von status.json: {e}")
+        # Restore backup
+        if os.path.exists(STATUS_FILE + '.backup'):
+            os.rename(STATUS_FILE + '.backup', STATUS_FILE)
+        return False
 
 def load_history():
     """Lädt Historie mit Fehlerbehandlung"""
     try:
-        history = _cached_json_load(HISTORY_FILE)
-        if history is None:
-            raise FileNotFoundError("History file not found")
+        with open(HISTORY_FILE, 'r') as f:
+            history = json.load(f)
             
         # Validiere die geladenen Daten
         if not isinstance(history, dict) or 'changes' not in history:
@@ -2194,98 +1356,32 @@ def get_history():
     """Backward-compat wrapper to load history."""
     return load_history()
 
-def get_active_history(history):
-    """Returns history dict with correct key based on ACTIVE_STREAM"""
-    if ACTIVE_STREAM == "pre_cas":
-        lst = history.get("pre_cas_changes", [])
-        return {
-            "pre_cas_changes": lst, 
-            "changes": lst,  # WICHTIG: Alias für ALT-Regression!
-            "observations": history.get("observations", [])
-        }
-    elif ACTIVE_STREAM == "cas":
-        lst = history.get("cas_changes", [])
-        return {
-            "cas_changes": lst,
-            "changes": lst,  # WICHTIG: Alias für ALT-Regression!
-            "observations": history.get("observations", [])
-        }
-    else:
-        lst = history.get("changes", [])
-        return {
-            "changes": lst,
-            "observations": history.get("observations", [])
-        }
 
 def save_history(history):
     """Speichert Historie mit Validierung"""
-    with _file_lock(HISTORY_FILE):
-        try:
-            # Validiere die Historie
-            if not isinstance(history, dict) or 'changes' not in history:
-                print("❌ Fehler: Historie ist ungültig")
-                return False
-                
-            _cached_json_dump(history, HISTORY_FILE)
-            print(f"✅ Historie gespeichert: {len(history['changes'])} Änderungen")
-            return True
-        except Exception as e:
-            print(f"❌ Fehler beim Speichern von history.json: {e}")
+    try:
+        # Validiere die Historie
+        if not isinstance(history, dict) or 'changes' not in history:
+            print("❌ Fehler: Historie ist ungültig")
             return False
+            
+        with open(HISTORY_FILE, 'w') as f:
+            json.dump(history, f, indent=2)
+        print(f"✅ Historie gespeichert: {len(history['changes'])} Änderungen")
+        return True
+    except Exception as e:
+        print(f"❌ Fehler beim Speichern von history.json: {e}")
+        return False
 
 def date_to_days(date_str):
     """Konvertiert ein Datum wie '10 July' in Tage seit dem 1. Januar"""
-    # English month mapping for locale-independent parsing
-    MONTH_MAP = {
-        # Full names
-        'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
-        'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12,
-        # Short names
-        'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6, 'jul': 7,
-        'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
-    }
-    
     try:
-        # Parse date string (e.g., "15 January" or "10 July")
-        parts = date_str.strip().split()
-        if len(parts) != 2:
-            return None
-            
-        day_str, month_str = parts
-        day = int(day_str)
-        month_name = month_str.lower()
-        
-        if month_name not in MONTH_MAP:
-            return None
-            
-        month = MONTH_MAP[month_name]
-        
-        # Get current year in Berlin timezone
+        # Füge das aktuelle Jahr hinzu
         current_year = get_german_time().year
-        today = get_german_time().date()
-        
-        # Try with current year first
-        candidate_date = datetime(current_year, month, day).date()
-        
-        # Heuristic: adjust year based on how far the date is from today
-        days_diff = (candidate_date - today).days
-        
-        # Key scenario: near year end, dates in early months should be next year
-        # Near year start, dates in late months should be previous year
-        if days_diff < -90:  # More than 90 days in the past, assume next year
-            candidate_date = datetime(current_year + 1, month, day).date()
-            selected_year = current_year + 1
-        elif days_diff > 275:  # More than 275 days in the future, assume previous year
-            candidate_date = datetime(current_year - 1, month, day).date()
-            selected_year = current_year - 1
-        else:
-            selected_year = current_year
-        
-        # Return days since Jan 1 of the selected year (0-based)
-        jan_first = datetime(selected_year, 1, 1).date()
-        return (candidate_date - jan_first).days
-        
-    except (ValueError, IndexError):
+        date_obj = datetime.strptime(f"{date_str} {current_year}", "%d %B %Y")
+        jan_first = datetime(current_year, 1, 1)
+        return (date_obj - jan_first).days
+    except:
         return None
 
 def days_to_date(days):
@@ -2299,7 +1395,8 @@ def extract_all_other_date(text):
     """Extrahiert nur das Datum für 'all other graduate applicants'"""
     text = ' '.join(text.split())
     
-    all_dates = FULL_DATE_PATTERN.findall(text)
+    date_pattern = r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))\b'
+    all_dates = re.findall(date_pattern, text, re.IGNORECASE)
     
     if len(all_dates) >= 3:
         return all_dates[-1].strip()
@@ -2311,7 +1408,8 @@ def extract_all_other_date(text):
 def extract_pre_cas_date(text):
     """Extrahiert das Datum für Pre-CAS"""
     # Pattern 1: Suche nach Pre-CAS mit Datum in der gleichen Zeile
-    match = PRE_CAS_PATTERN1.search(text)
+    pattern1 = r'issuing\s+Pre-CAS.*?criteria\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+    match = re.search(pattern1, text, re.IGNORECASE | re.DOTALL)
     if match:
         return match.group(1).strip()
     
@@ -2320,16 +1418,19 @@ def extract_pre_cas_date(text):
     clean_text = ' '.join(text.split())
     
     # Suche nach Pre-CAS und dem nächsten Datum danach
-    match = PRE_CAS_PATTERN2.search(clean_text)
+    pattern2 = r'issuing\s+Pre-CAS\s+for\s+offer\s+holders.*?criteria\s+on:?\s*([^.]*?)(?:Please|We\s+are|$)'
+    match = re.search(pattern2, clean_text, re.IGNORECASE)
     if match:
         potential_text = match.group(1)
         # Extrahiere das erste Datum aus diesem Bereich
-        date_match = MONTH_DATE_PATTERN.search(potential_text)
+        date_pattern = r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+        date_match = re.search(date_pattern, potential_text, re.IGNORECASE)
         if date_match:
             return date_match.group(1).strip()
     
     # Pattern 3: Allgemeinere Suche - Pre-CAS gefolgt von einem Datum innerhalb von ~100 Zeichen
-    match = PRE_CAS_PATTERN3.search(clean_text)
+    pattern3 = r'Pre-CAS[^0-9]{0,100}?(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+    match = re.search(pattern3, clean_text, re.IGNORECASE)
     if match:
         return match.group(1).strip()
     
@@ -2338,20 +1439,21 @@ def extract_pre_cas_date(text):
 def extract_cas_date(text):
     """Extrahiert das Datum für CAS"""
     # Suche nach CAS Pattern (aber nicht Pre-CAS)
-    match = CAS_EXTRACTION_PATTERN.search(text)
+    pattern = r'issuing\s+CAS\s+to.*?Pre-CAS\s+on:?\s*(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December))'
+    match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
     if match:
         return match.group(1).strip()
     return None
 def extract_last_updated(text):
     """Extrahiert 'Last updated' als UTC-datetime; None wenn nicht gefunden."""
     try:
-        m = LAST_UPDATED_PATTERN.search(text)
+        m = re.search(r'Last\s+updated:\s*(\d{1,2}\s+\w+\s+\d{4}),\s*(\d{1,2}:\d{2})', text, re.IGNORECASE)
         if not m:
             return None
         date_part, time_part = m.group(1), m.group(2)
         naive = datetime.strptime(f"{date_part} {time_part}", "%d %B %Y %H:%M")
-        dt_lon = naive.replace(tzinfo=LON)
-        dt_utc = dt_lon.astimezone(UTC)
+        dt_lon = naive.replace(tzinfo=ZoneInfo("Europe/London"))
+        dt_utc = dt_lon.astimezone(ZoneInfo("UTC"))
         return dt_utc
     except Exception:
         return None
@@ -2361,11 +1463,10 @@ def fetch_processing_dates():
     """Holt alle Verarbeitungsdaten von der LSE-Webseite"""
     try:
         print("Rufe LSE-Webseite ab...")
-        session = _get_requests_session()
-        response = session.get(LSE_URL, timeout=REQUEST_TIMEOUT)
+        response = requests.get(URL, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         
-        soup = _get_beautifulsoup()(response.text, 'html.parser')
+        soup = BeautifulSoup(response.text, 'html.parser')
         full_text = soup.get_text()
         # Parse Last updated
         last_up_dt = extract_last_updated(full_text)
@@ -2375,11 +1476,11 @@ def fetch_processing_dates():
             'all_other': None,
             'pre_cas': None,
             'cas': None,
-            'last_updated_utc': (last_up_dt.astimezone(UTC).isoformat() if last_up_dt else None)
+            'last_updated_utc': (last_up_dt.astimezone(ZoneInfo('UTC')).isoformat() if last_up_dt else None)
         }
         
         # Suche nach "all other graduate applicants" (existierende Logik)
-        for element in soup.find_all(string=ALL_OTHER_PATTERN):
+        for element in soup.find_all(string=re.compile(r'all other graduate applicants', re.IGNORECASE)):
             parent = element.parent
             while parent and parent.name not in ['td', 'th', 'tr']:
                 parent = parent.parent
@@ -2410,7 +1511,8 @@ def fetch_processing_dates():
         
         # Fallback für all other
         if not dates['all_other']:
-            match = ALL_OTHER_FALLBACK_PATTERN.search(full_text)
+            pattern = r'all other graduate applicants[^0-9]*?((?:\d{1,2}\s+\w+\s*)+)'
+            match = re.search(pattern, full_text, re.IGNORECASE | re.DOTALL)
             
             if match:
                 dates_text = match.group(1)
@@ -2430,10 +1532,10 @@ def fetch_processing_dates():
         
         return dates
         
-    except _get_requests().exceptions.Timeout:
+    except requests.exceptions.Timeout:
         print("❌ Timeout beim Abrufen der Webseite")
         return {'all_other': None, 'pre_cas': None, 'cas': None}
-    except _get_requests().exceptions.RequestException as e:
+    except requests.exceptions.RequestException as e:
         print(f"❌ Netzwerkfehler beim Abrufen der Webseite: {e}")
         return {'all_other': None, 'pre_cas': None, 'cas': None}
     except Exception as e:
@@ -2457,7 +1559,6 @@ def send_gmail(subject, body, recipients):
     
     success_count = 0
     for recipient in recipients:
-        smtplib, MIMEText = _get_email_modules()
         msg = MIMEText(body)
         msg['Subject'] = subject
         msg['From'] = gmail_user
@@ -2479,11 +1580,9 @@ def send_gmail(subject, body, recipients):
 def main():
     print("="*50)
     print(f"LSE Status Check - {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}")
-    print(f"ACTIVE_STREAM={ACTIVE_STREAM}")
-    print(f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)")
     
     # Zeige ob erweiterte Regression verfügbar ist
-    if get_advanced_regression_status():
+    if ADVANCED_REGRESSION:
         print("✅ Erweiterte Regression aktiviert")
     else:
         print("⚠️ Erweiterte Regression nicht verfügbar (Standard-Regression wird verwendet)")
@@ -2546,100 +1645,105 @@ def main():
                     save_history(history)
     except Exception as _e:
         print(f"⚠️ Heartbeat-Logik übersprungen: {_e}")
-
-    # Stilles Tracking für AOA (keine primären Benachrichtigungen mehr)
-    if current_dates['all_other'] and current_dates['all_other'] != status.get('last_date'):
-        print(f"\n📝 AOA Änderung (stilles Tracking): {status.get('last_date') or 'Unbekannt'} → {current_dates['all_other']}")
-        history['changes'].append({
-            "timestamp": datetime.now().astimezone(UTC).isoformat(),
-            "date": current_dates['all_other'],
-            "from": status.get('last_date')
+# Stilles Tracking für Pre-CAS (keine Benachrichtigungen)
+    if current_dates['pre_cas'] and current_dates['pre_cas'] != status.get('pre_cas_date'):
+        print(f"\n📝 Pre-CAS Änderung (stilles Tracking): {status.get('pre_cas_date') or 'Unbekannt'} → {current_dates['pre_cas']}")
+        history['pre_cas_changes'].append({
+            "timestamp": datetime.utcnow().isoformat(),
+            "date": current_dates['pre_cas'],
+            "from": status.get('pre_cas_date')
         })
-        status['last_date'] = current_dates['all_other']
-        status['last_check'] = datetime.now().astimezone(UTC).isoformat()
-        if current_dates.get('last_updated_utc'):
-            status['last_updated_seen_utc'] = current_dates['last_updated_utc']
+        status['pre_cas_date'] = current_dates['pre_cas']
         # Speichere sofort
         save_history(history)
-        save_status(status)
     
     # Stilles Tracking für CAS (keine Benachrichtigungen)
     if current_dates['cas'] and current_dates['cas'] != status.get('cas_date'):
         print(f"\n📝 CAS Änderung (stilles Tracking): {status.get('cas_date') or 'Unbekannt'} → {current_dates['cas']}")
         history['cas_changes'].append({
-            "timestamp": datetime.now().astimezone(UTC).isoformat(),
+            "timestamp": datetime.utcnow().isoformat(),
             "date": current_dates['cas'],
             "from": status.get('cas_date')
         })
         status['cas_date'] = current_dates['cas']
-        status['last_check'] = datetime.now().astimezone(UTC).isoformat()
-        if current_dates.get('last_updated_utc'):
-            status['last_updated_seen_utc'] = current_dates['last_updated_utc']
         # Speichere sofort
         save_history(history)
-        save_status(status)
     
-    # Hauptlogik für Pre-CAS (mit primären Benachrichtigungen)
-    current_date = current_dates['pre_cas']
+    # Hauptlogik für "all other applicants" (mit Benachrichtigungen wie bisher)
+    current_date = current_dates['all_other']
     
     if current_date:
-        print(f"Aktuelles Datum für '{ACTIVE_STREAM}': {current_date}")
+        print(f"Aktuelles Datum für 'all other graduate applicants': {current_date}")
         
-        # WICHTIG: Prüfe ob sich das Pre-CAS Datum wirklich geändert hat
-        if current_date != status.get('pre_cas_date'):
-            print("\n🔔 PRE-CAS ÄNDERUNG ERKANNT!")
-            print(f"   Von: {status.get('pre_cas_date')}")
+        # Bei manuellem Check immer Status senden (NUR für all other applicants)
+        if IS_MANUAL:
+            # Berechne aktuellen Trend und erstelle vollständige Prognose
+            forecast = calculate_regression_forecast(history)
+            forecast_text = create_forecast_text(forecast) or ""
+            
+            telegram_msg = f"""<b>📊 LSE Status Check Ergebnis</b>
+
+<b>Aktuelles Datum:</b> {current_date}
+<b>Letzter Stand:</b> {status['last_date']}
+<b>Status:</b> {"🔔 ÄNDERUNG ERKANNT!" if current_date != status['last_date'] else "✅ Keine Änderung"}
+
+<b>Zeitpunkt:</b> {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
+{forecast_text}
+
+<a href="{URL}">📄 LSE Webseite öffnen</a>"""
+            
+            # Sende Text-Nachricht
+            send_telegram(telegram_msg)
+            
+            # Erstelle und sende Graph
+            graph_buffer = create_progression_graph(history, current_date, forecast)
+            if graph_buffer:
+                graph_caption = f"📈 Progression der LSE Verarbeitungsdaten\nAktuell: {current_date}"
+                send_telegram_photo(graph_buffer, graph_caption)
+        
+        # WICHTIG: Prüfe ob sich das Datum wirklich geändert hat
+        if current_date != status['last_date']:
+            print("\n🔔 ÄNDERUNG ERKANNT!")
+            print(f"   Von: {status['last_date']}")
             print(f"   Auf: {current_date}")
             
             # Sende einfache Nachricht an Mama
-            send_telegram_mama(status.get('pre_cas_date'), current_date)
+            send_telegram_mama(status['last_date'], current_date)
             
             # Sende einfache Nachricht an Papa
-            send_telegram_papa(status.get('pre_cas_date'), current_date)
+            send_telegram_papa(status['last_date'], current_date)
             
-            # Speichere in Pre-CAS Historie mit UTC Zeit (für Konsistenz)
-            history.setdefault('pre_cas_changes', []).append({
-                "timestamp": datetime.now().astimezone(UTC).isoformat(),
+            # Speichere in Historie mit UTC Zeit (für Konsistenz)
+            history["changes"].append({
+                "timestamp": datetime.utcnow().isoformat(),
                 "date": current_date,
-                "from": status.get('pre_cas_date')
+                "from": status['last_date']
             })
             
             # Speichere Historie sofort
             if not save_history(history):
                 print("❌ Fehler beim Speichern der Historie!")
             
-            # Berechne Prognose basierend auf Pre-CAS Historie
-            active_history = get_active_history(history)
-            forecast = calculate_regression_forecast(active_history)
-            
-            # Use ALT/NEU enhanced forecast with fallback for compatibility
-            try:
-                forecast_text = create_enhanced_forecast_text(forecast, active_history) or ""
-            except Exception:
-                try:
-                    forecast_text = create_forecast_text(forecast) or ""
-                except Exception:
-                    forecast_text = ""
+            # Berechne Prognose
+            forecast = calculate_regression_forecast(history)
+            forecast_text = create_forecast_text(forecast) or ""
             
             # Erstelle E-Mail-Inhalt
-            subject = f"LSE Pre-CAS Status Update: Neues Datum {current_date}"
+            subject = f"LSE Status Update: Neues Datum {current_date}"
             
             # Bei manuellem Check: Hinweis in E-Mail
             manual_hint = "\n\n(Änderung durch manuellen Check via Telegram entdeckt)" if IS_MANUAL else ""
             
             # Basis-E-Mail für alle
-            base_body = f"""Das Verarbeitungsdatum für Pre-CAS hat sich geändert!
-
-ACTIVE STREAM: {ACTIVE_STREAM}
-TARGET: {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)
+            base_body = f"""Das Verarbeitungsdatum für "all other graduate applicants" hat sich geändert!
 
 ÄNDERUNG:
-Von: {status.get('pre_cas_date')}
+Von: {status['last_date']}
 Auf: {current_date}
 
 Zeitpunkt der Erkennung: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 
-Link zur Seite: {LSE_URL}{manual_hint}"""
+Link zur Seite: {URL}{manual_hint}"""
             
             # E-Mail mit Prognose für Hauptempfänger
             body_with_forecast = base_body + f"\n{forecast_text}\n\nDiese E-Mail wurde automatisch von deinem GitHub Actions Monitor generiert."
@@ -2647,39 +1751,34 @@ Link zur Seite: {LSE_URL}{manual_hint}"""
             # E-Mail ohne Prognose für bedingte Empfänger
             body_simple = base_body + "\n\nDiese E-Mail wurde automatisch von deinem GitHub Actions Monitor generiert."
             
-# Telegram-Nachricht formatieren
+            # Telegram-Nachricht formatieren
             if not IS_MANUAL:
                 # Automatischer Check: Standard-Änderungsnachricht mit Graph
-                telegram_msg = f"""<b>🔔 LSE Pre-CAS Update</b>
+                telegram_msg = f"""<b>🔔 LSE Status Update</b>
 
-<b>PRE-CAS ÄNDERUNG ERKANNT!</b>
-Target: {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)
-Von: {status.get('pre_cas_date')}
+<b>ÄNDERUNG ERKANNT!</b>
+Von: {status['last_date']}
 Auf: <b>{current_date}</b>
 
 Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 {forecast_text}
 
-<a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
+<a href="{URL}">📄 LSE Webseite öffnen</a>"""
                 
-                # Use centralized function to send text + graph/placeholder
-                caption = (
-                    f"📈 Pre-CAS Progression Update\n"
-                    f"Aktuell: {current_date}\n"
-                    f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
-                )
-                text_success, graph_success = send_main_text_and_graph(
-                    telegram_msg, current_date, active_history, forecast, caption
-                )
-
+                send_telegram(telegram_msg)
+                
+                # Sende Graph als separates Bild
+                graph_buffer = create_progression_graph(history, current_date, forecast)
+                if graph_buffer:
+                    graph_caption = f"📈 Progression Update\nNeues Datum: {current_date}"
+                    send_telegram_photo(graph_buffer, graph_caption)
             else:
                 # Manueller Check: Spezielle Nachricht bei Änderung mit Graph
-                telegram_msg = f"""<b>🚨 PRE-CAS ÄNDERUNG GEFUNDEN!</b>
+                telegram_msg = f"""<b>🚨 ÄNDERUNG GEFUNDEN!</b>
 
-Dein manueller Check hat eine Pre-CAS Änderung entdeckt!
+Dein manueller Check hat eine Änderung entdeckt!
 
-Target: {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)
-Von: {status.get('pre_cas_date')}
+Von: {status['last_date']}
 Auf: <b>{current_date}</b>
 
 Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
@@ -2687,17 +1786,15 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 
 📧 E-Mails werden an die Hauptempfänger gesendet!
 
-<a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
+<a href="{URL}">📄 LSE Webseite öffnen</a>"""
                 
-                # Use centralized function to send text + graph/placeholder
-                caption = (
-                    f"📈 Pre-CAS Progression Update\n"
-                    f"Aktuell: {current_date}\n"
-                    f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
-                )
-                text_success, graph_success = send_main_text_and_graph(
-                    telegram_msg, current_date, active_history, forecast, caption
-                )
+                send_telegram(telegram_msg)
+                
+                # Sende Graph
+                graph_buffer = create_progression_graph(history, current_date, forecast)
+                if graph_buffer:
+                    graph_caption = f"📈 Änderung erkannt!\nVon {status['last_date']} auf {current_date}"
+                    send_telegram_photo(graph_buffer, graph_caption)
             
             # Sende E-Mails
             emails_sent = False
@@ -2707,35 +1804,33 @@ Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
                 if send_gmail(subject, body_with_forecast, always_notify):
                     emails_sent = True
             
-            # Check if target date reached for Pre-CAS
-            if conditional_notify and (current_date or '').lower() == TARGET_DATE_PRE_CAS.strftime('%d %B').lower():
-                print(f"\n🎯 Pre-CAS Zieldatum {current_date} erreicht! Benachrichtige zusätzliche Empfänger.")
+            # Bedingt benachrichtigen (nur bei 25 oder 28 July)
+            if conditional_notify and current_date in TARGET_DATES:
+                print(f"\n🎯 Zieldatum {current_date} erreicht! Benachrichtige zusätzliche Empfänger.")
                 if send_gmail(subject, body_simple, conditional_notify):
                     emails_sent = True
                 
-# Spezielle Telegram-Nachricht für Zieldatum
-                telegram_special = f"""<b>🎯 PRE-CAS ZIELDATUM ERREICHT!</b>
+                # Spezielle Telegram-Nachricht für Zieldatum mit Graph
+                telegram_special = f"""<b>🎯 ZIELDATUM ERREICHT!</b>
 
-Das Pre-CAS Datum <b>{current_date}</b> wurde erreicht!
+Das Datum <b>{current_date}</b> wurde erreicht!
 
-Target: {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)
+Dies ist eines der wichtigen Zieldaten für deine LSE-Bewerbung.
 
-Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
-
-<a href="{LSE_URL}">📄 Jetzt zur LSE Webseite</a>"""
+<a href="{URL}">📄 Jetzt zur LSE Webseite</a>"""
+                send_telegram(telegram_special)
                 
-                # Use centralized function to send text + graph/placeholder
-                caption = f"🎯 PRE-CAS ZIELDATUM ERREICHT: {current_date}!"
-                text_success, graph_success = send_main_text_and_graph(
-                    telegram_special, current_date, active_history, forecast, caption
-                )
-
+                # Sende speziellen Graph für Zieldatum
+                graph_buffer = create_progression_graph(history, current_date, forecast)
+                if graph_buffer:
+                    graph_caption = f"🎯 ZIELDATUM ERREICHT: {current_date}!"
+                    send_telegram_photo(graph_buffer, graph_caption)
             
             if emails_sent or os.environ.get('TELEGRAM_BOT_TOKEN'):
-                # KRITISCH: Update Pre-CAS Status IMMER nach einer erkannten Änderung
+                # KRITISCH: Update Status IMMER nach einer erkannten Änderung
                 # Update Status nur bei erfolgreicher Benachrichtigung
-                status['pre_cas_date'] = current_date
-                status['last_check'] = datetime.now().astimezone(UTC).isoformat()
+                status['last_date'] = current_date
+                status['last_check'] = datetime.utcnow().isoformat()
                 
                 # KRITISCH: Speichere Status mehrfach mit Verifikation
                 print("\n🔄 Speichere aktualisierten Status...")
@@ -2749,11 +1844,11 @@ Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
                     if save_status(status):
                         # Verifiziere durch erneutes Laden
                         verify_status = load_status()
-                        if verify_status.get('pre_cas_date') == current_date:
-                            print(f"✅ Pre-CAS Status erfolgreich gespeichert und verifiziert: {current_date}")
+                        if verify_status.get('last_date') == current_date:
+                            print(f"✅ Status erfolgreich gespeichert und verifiziert: {current_date}")
                             save_success = True
                         else:
-                            print(f"❌ Verifikation fehlgeschlagen! Erwartet: {current_date}, Geladen: {verify_status.get('pre_cas_date')}")
+                            print(f"❌ Verifikation fehlgeschlagen! Erwartet: {current_date}, Geladen: {verify_status.get('last_date')}")
                     else:
                         print(f"❌ Speichern fehlgeschlagen in Versuch {save_attempts}")
                     
@@ -2770,123 +1865,37 @@ Dies ist das wichtige Zieldatum für deine LSE Pre-CAS Bewerbung.
             else:
                 print("⚠️  Status wurde NICHT aktualisiert (keine Benachrichtigung erfolgreich)")
         else:
-            print("✅ Keine Pre-CAS Änderung - alles beim Alten.")
-            status['last_check'] = datetime.now().astimezone(UTC).isoformat()  # UTC für Konsistenz
-            
-            # Pre-CAS Heartbeat-Logik (analog zur AOA-Heartbeat-Logik)
-            try:
-                last_up_iso = current_dates.get('last_updated_utc')
-                if last_up_iso:
-                    prev_seen = status.get('last_updated_seen_utc')
-                    is_new_update = (prev_seen != last_up_iso)
-                else:
-                    is_new_update = False
-
-                if is_new_update:
-                    status['last_updated_seen_utc'] = last_up_iso
-                    current_pre_cas = current_dates.get('pre_cas')
-                    if current_pre_cas == status.get('pre_cas_date'):
-                        history.setdefault('observations', [])
-                        if not any(o.get('timestamp') == last_up_iso for o in history['observations']):
-                            history['observations'].append({
-                                'timestamp': last_up_iso,
-                                'date': current_pre_cas,
-                                'kind': 'heartbeat'
-                            })
-                            save_history(history)
-            except Exception as _e:
-                print(f"⚠️ Pre-CAS Heartbeat-Logik übersprungen: {_e}")
-            
-            # Calculate forecast for status message (for both manual and automatic)
-            active_history = get_active_history(history)
-            forecast = calculate_regression_forecast(active_history)
-            
-            # Use ALT/NEU enhanced forecast with fallback for compatibility
-            try:
-                forecast_text = create_enhanced_forecast_text(forecast, active_history) or ""
-            except Exception:
-                try:
-                    forecast_text = create_forecast_text(forecast) or ""
-                except Exception:
-                    forecast_text = ""
-            
-            # Send structured no-change status message 
-            if IS_MANUAL:
-                # Manual runs: send comprehensive status
-                telegram_msg = f"""<b>📊 LSE Status Check Ergebnis</b>
-
-<b>Aktuelles Datum:</b> {status.get('pre_cas_date')}
-<b>Letzter Stand:</b> {status.get('pre_cas_date')}
-<b>Status:</b> ✅ Keine Änderung
-
-<b>Zeitpunkt:</b> {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
-{forecast_text}
-
-<a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
-                                
-                # Use centralized function to send text + graph/placeholder
-                caption = (
-                    f"📊 Pre-CAS Status\n"
-                    f"Aktuell: {current_date}\n"
-                    f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
-                )
-                text_success, graph_success = send_main_text_and_graph(
-                    telegram_msg, current_date, active_history, forecast, caption
-                )
-
-            # Note: Scheduled runs with no change don't send notifications to main chat
-            
+            print("✅ Keine Änderung - alles beim Alten.")
+            status['last_check'] = datetime.utcnow().isoformat()  # UTC für Konsistenz
             # Speichere auch bei keiner Änderung den aktualisierten Timestamp
             save_status(status)
     else:
-        print(f"\n⚠️  WARNUNG: Konnte das Pre-CAS Datum nicht von der Webseite extrahieren!")
+        print("\n⚠️  WARNUNG: Konnte das Datum nicht von der Webseite extrahieren!")
         
         # Bei manueller Ausführung auch Fehler melden
         if IS_MANUAL:
-            telegram_error = f"""<b>❌ Manueller Pre-CAS Check fehlgeschlagen</b>
+            telegram_error = f"""<b>❌ Manueller Check fehlgeschlagen</b>
 
-Konnte das Pre-CAS Datum nicht von der Webseite extrahieren!
+Konnte das Datum nicht von der Webseite extrahieren!
 
-<b>Active stream:</b> {ACTIVE_STREAM}
 <b>Zeitpunkt:</b> {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
-<b>Letztes bekanntes Pre-CAS Datum:</b> {status.get('pre_cas_date')}
+<b>Letztes bekanntes Datum:</b> {status['last_date']}
 
 Bitte prüfe die Webseite manuell.
 
-<a href="{LSE_URL}">📄 LSE Webseite öffnen</a>"""
+<a href="{URL}">📄 LSE Webseite öffnen</a>"""
             
-            # Send error message with graph/placeholder using centralized function
-            try:
-                # Try to get history and forecast for error message graph  
-                active_history = get_active_history(history)
-                forecast = calculate_regression_forecast(active_history)
-                current_date_for_graph = status.get('pre_cas_date') or 'Unbekannt'
-                
-                caption = (
-                    f"❌ Error Report\n"
-                    f"Letztes bekanntes Datum: {current_date_for_graph}\n"
-                    f"Target: {TARGET_DATE_PRE_CAS.strftime('%d %b')}"
-                )
-                text_success, graph_success = send_main_text_and_graph(
-                    telegram_error, current_date_for_graph, active_history, forecast, caption
-                )
-            except Exception as e:
-                print(f"⚠️ Fehler beim Senden der Fehlernachricht mit Graph: {e}")
-                # Fallback to text-only if graph fails
-                send_telegram(telegram_error)
+            send_telegram(telegram_error)
         
         # Sende Warnung per E-Mail
-        subject = "LSE Pre-CAS Monitor WARNUNG: Datum nicht gefunden"
-        body = f"""WARNUNG: Der LSE Pre-CAS Monitor konnte das Datum nicht von der Webseite extrahieren!
-
-Active stream: {ACTIVE_STREAM}
-Target: {TARGET_DATE_PRE_CAS.strftime('%d %b %Y')} (LON)
+        subject = "LSE Monitor WARNUNG: Datum nicht gefunden"
+        body = f"""WARNUNG: Der LSE Monitor konnte das Datum nicht von der Webseite extrahieren!
 
 Zeitpunkt: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
-Letztes bekanntes Pre-CAS Datum: {status.get('pre_cas_date')}
+Letztes bekanntes Datum: {status['last_date']}
 
 Bitte überprüfe:
-1. Ist die Webseite erreichbar? {LSE_URL}
+1. Ist die Webseite erreichbar? {URL}
 2. Hat sich die Struktur der Seite geändert?
 
 Der Monitor wird weiterhin prüfen."""
@@ -2896,59 +1905,44 @@ Der Monitor wird weiterhin prüfen."""
         
         # Telegram-Warnung (nur bei automatischer Ausführung)
         if not IS_MANUAL:
-            telegram_warning = f"""<b>⚠️ LSE Pre-CAS Monitor WARNUNG</b>
+            telegram_warning = f"""<b>⚠️ LSE Monitor WARNUNG</b>
 
-Konnte das Pre-CAS Datum nicht von der Webseite extrahieren!
+Konnte das Datum nicht von der Webseite extrahieren!
 
-Active stream: <b>{ACTIVE_STREAM}</b>
-Letztes bekanntes Pre-CAS Datum: <b>{status.get('pre_cas_date')}</b>
+Letztes bekanntes Datum: <b>{status['last_date']}</b>
 Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 
 Mögliche Gründe:
-- Webseite nicht erreichbar
-- Struktur hat sich geändert
-- Netzwerkfehler
+• Webseite nicht erreichbar
+• Struktur hat sich geändert
+• Netzwerkfehler
 
-<a href="{LSE_URL}">📄 Webseite manuell prüfen</a>"""
+<a href="{URL}">📄 Webseite manuell prüfen</a>"""
             
-            # Sende Warnung (ohne Graph bei Warnung)
             send_telegram(telegram_warning)
         
         # Speichere trotzdem den Status (mit last_check Update)
-        status['last_check'] = datetime.now().astimezone(UTC).isoformat()
+        status['last_check'] = datetime.utcnow().isoformat()
         save_status(status)
     
     print("\n" + "="*50)
     
-    # Debug: Zeige finale Dateien (optimized - avoid expensive shell commands)
+    # Debug: Zeige finale Dateien
     print("\n📁 FINALE DATEIEN:")
     print("=== status.json ===")
-    try:
-        with open("status.json", 'r') as f:
-            print(f.read())
-    except Exception as e:
-        print(f"Fehler beim Lesen von status.json: {e}")
-        
+    os.system("cat status.json")
     print("\n=== history.json (letzte 3 Einträge) ===")
-    try:
-        with open("history.json", 'r') as f:
-            lines = f.readlines()
-            # Show last 20 lines efficiently
-            print(''.join(lines[-20:]))
-    except Exception as e:
-        print(f"Fehler beim Lesen von history.json: {e}")
+    os.system("tail -n 20 history.json | head -n 20")
     
-    # Finaler Status-Output für Debugging (use cached version)
+    # Finaler Status-Output für Debugging
     print("\n📊 FINALER STATUS:")
     try:
-        final_status = _cached_json_load(STATUS_FILE)
-        if final_status:
+        with open(STATUS_FILE, 'r') as f:
+            final_status = json.load(f)
             print(f"   last_date: {final_status.get('last_date')}")
             print(f"   last_check: {final_status.get('last_check')}")
             print(f"   pre_cas_date: {final_status.get('pre_cas_date') or 'Nicht getrackt'}")
             print(f"   cas_date: {final_status.get('cas_date') or 'Nicht getrackt'}")
-        else:
-            print("   Status file not found or invalid")
     except Exception as e:
         print(f"   Fehler beim Lesen des finalen Status: {e}")
 
