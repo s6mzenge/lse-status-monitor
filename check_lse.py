@@ -1469,33 +1469,36 @@ def create_progression_graph(history, current_date, forecast=None):
         dt = _days_to_dt(year, v)
         return dt.strftime('%d %b') if dt else ''
 
-    # exakter Schnittpunkt t* für Zielhöhe y_target auf y(t) = m * BD(t) + b
     def _solve_time_for_level(m, b, y_target, t0, t_hint, sign_positive=True):
+        """
+        Finde t*, so dass y(t*) = y_target auf y(t) = m * BD(t) + b.
+        Erweiterung des Suchfensters nach rechts, falls der Schnittpunkt
+        außerhalb des aktuellen Fensters liegt. Gibt datetime|None zurück.
+        """
         if m is None or m == 0:
             return None
-
+    
         def f(t):  # y(t)
             return m * _bizdays_float(t0, t) + b
-
-        # Bracketing um t_hint (heute) – expandieren bis Zielhöhe eingeschlossen ist
+    
+        # Startfenster um t_hint (typisch: "jetzt")
         low  = t_hint - timedelta(days=5)
         high = t_hint + timedelta(days=20)
-        max_expand = 20
-        if sign_positive:
-            while f(low)  > y_target and max_expand > 0:
-                low  -= timedelta(days=10); max_expand -= 1
-            while f(high) < y_target and max_expand > 0:
-                high += timedelta(days=10); max_expand -= 1
+    
+        # Dynamisches Bracketing: solange kein Vorzeichenwechsel, Fenster nach rechts schieben
+        # (begrenzt, damit wir nicht endlos laufen)
+        for _ in range(24):  # ~ 24 * 10 Tage = 240 Kalendertage max.
+            if (f(low) - y_target) * (f(high) - y_target) <= 0:
+                break
+            # bei positiver Steigung liegt das Target typischerweise rechts
+            high += timedelta(days=10)
+            # ein kleines Stück auch nach links ausdehnen, um Randfälle abzufangen
+            low  -= timedelta(days=2)
         else:
-            while f(low)  < y_target and max_expand > 0:
-                low  -= timedelta(days=10); max_expand -= 1
-            while f(high) > y_target and max_expand > 0:
-                high += timedelta(days=10); max_expand -= 1
-
-        if (f(low) - y_target) * (f(high) - y_target) > 0:
-            return None  # kein gültiges Intervall
-
-        # Bisektion
+            # selbst nach maximaler Erweiterung kein Wechsel → keine ETA im sinnvollen Horizont
+            return None
+    
+        # Bisektion auf [low, high]
         for _ in range(50):
             mid = low + (high - low) / 2
             val = f(mid)
@@ -1506,6 +1509,7 @@ def create_progression_graph(history, current_date, forecast=None):
             else:
                 high = mid
         return mid
+
 
     # ---------- Daten sammeln ----------
     # Stream-spezifische Datenauswahl
@@ -1715,11 +1719,23 @@ def create_progression_graph(history, current_date, forecast=None):
         _plot_eta("25", alt_eta.get("25 July"), neu_eta.get("25 July"))
         _plot_eta("28", alt_eta.get("28 July"), neu_eta.get("28 July"))
 
-    # ---------- Achsenbegrenzungen ----------
-    eta_dates = [p[0] for p in list(alt_eta.values()) + list(neu_eta.values()) if p]
-    right_edge = max(eta_dates) if eta_dates else change_ts[-1]
-    left_edge  = min(change_ts[0], now_de - timedelta(days=3))
-    ax.set_xlim(left_edge - timedelta(days=1), right_edge + timedelta(days=1))
+    # ---- Achsenbereich dynamisch an späteste ETA koppeln ----
+    eta_candidates = []
+    for d in (alt_eta, neu_eta):
+        for pt in d.values():
+            if pt:
+                eta_candidates.append(pt[0])
+    
+    margin = timedelta(days=2)  # kurz hinter der spätesten ETA
+    if eta_candidates:
+        right_edge = max(eta_candidates) + margin
+    else:
+        # Fallback: keine ETA gefunden → Blick etwas über "jetzt" hinaus
+        right_edge = now_de + timedelta(days=14)
+    
+    left_edge = min(change_ts[0], now_de - timedelta(days=3)) - timedelta(days=1)
+    ax.set_xlim(left_edge, right_edge)
+
 
     y_min = min(change_y)
     if ACTIVE_STREAM == "pre_cas":
