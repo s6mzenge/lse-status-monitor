@@ -1024,48 +1024,55 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
         if len(rows) >= REGRESSION_MIN_POINTS:
             cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=tuple([]))
             
-            # Verwende die gleichen Parameter wie in compute_integrated_model_metrics
+            # Trainiere das Modell
             imodel = IntegratedRegressor(cal=cal, loess_frac=0.6, tau_hours=12.0).fit(rows)
             
-            hours_per_day = (cal.end.hour - cal.start.hour) + (cal.end.minute - cal.start.minute) / 60.0
+            # WICHTIG: Verwende die gleiche Zeitberechnung wie beim Training!
+            t0_aware = imodel.t0_  # Das ist der Startzeitpunkt aus dem Training
             
-            # Berechne R² korrekt aus den Trainingsdaten
-            x_train = imodel.x_
-            y_train = imodel.y_
-            y_pred_train = np.array([imodel._blend_predict_scalar(float(x)) for x in x_train])
-            ss_res = np.sum((y_train - y_pred_train)**2)
-            ss_tot = np.sum((y_train - np.mean(y_train))**2)
-            r2_value = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
-            
-            # NEU: Verwende das vollständige Blend-Modell
+            # Berechne y-Werte für alle grid_ts Punkte
             y_new = []
             for t in grid_ts:
-                bd = _bizdays_float(first_ts, t)
-                x_hours = bd * hours_per_day
+                # Konvertiere t zu aware datetime in London Zeit
+                t_aware = t.replace(tzinfo=ZoneInfo("Europe/Berlin")).astimezone(cal.tz)
                 
-                # Prüfe ob x_hours im vernünftigen Bereich liegt
-                max_x = float(imodel.x_[-1]) if len(imodel.x_) > 0 else 1000
+                # Berechne business minutes genau wie beim Training
+                business_mins = cal.business_minutes_between(t0_aware, t_aware)
+                x_hours = business_mins / 60.0
                 
-                if x_hours < max_x + 100:  # Innerhalb oder nahe der Trainingsdaten
+                # Verwende das Modell zur Vorhersage
+                if x_hours >= 0:  # Nur für Zeiten nach t0
                     try:
+                        # Benutze die interne Blend-Methode des Modells
                         y_pred = imodel._blend_predict_scalar(x_hours)
                         y_new.append(y_pred)
                     except Exception as e:
-                        # Fallback: Verwende nur Theil-Sen für diesen Punkt
-                        y_pred = imodel.ts_.predict(x_hours)
-                        y_new.append(float(y_pred))
+                        # Fallback auf Theil-Sen
+                        y_pred = float(imodel.ts_.predict(x_hours))
+                        y_new.append(y_pred)
                 else:
-                    # Für weit entfernte Punkte: verwende nur Theil-Sen (linear)
-                    y_pred = imodel.ts_.predict(x_hours)
-                    y_new.append(float(y_pred))
+                    # Für Zeiten vor t0, verwende nur Theil-Sen Extrapolation
+                    y_pred = float(imodel.ts_.predict(x_hours))
+                    y_new.append(y_pred)
             
             if len(y_new) > 0:
                 y_new = np.array(y_new)
                 
-                # Zeichne die Blend-Kurve
+                # Berechne R² korrekt
+                x_train = imodel.x_
+                y_train = imodel.y_
+                y_pred_train = np.array([imodel._blend_predict_scalar(float(x)) for x in x_train])
+                ss_res = np.sum((y_train - y_pred_train)**2)
+                ss_tot = np.sum((y_train - np.mean(y_train))**2)
+                r2_value = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+                
+                # Zeichne die Kurve
                 ax.plot(grid_ts, y_new, linewidth=2.6, 
                         label=f"NEU: integrierte Regression (R²={r2_value:.2f})",
                         color=COL_NEU, alpha=0.95)
+                
+                # ETAs berechnen...
+                # (Rest des Codes bleibt gleich)
                 
                 # ETAs mit der predict_datetime Methode
                 for name, ty in target_map.items():
