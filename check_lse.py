@@ -1117,45 +1117,68 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
                     zorder=7, color=COL_ALT)
             ax.axvline(alt_pt[0], linestyle="--", linewidth=0.8, alpha=0.6, color=COL_ALT)
             
-            # Label am Stern (wie bisher)
             ax.annotate(f"ALT ETA {name}", (alt_pt[0], alt_pt[1]),
                         xytext=(6, 9), textcoords="offset points", ha="left", va="bottom", fontsize=9,
                         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
-            
-            # NEU: Vertikales Datum LINKS NEBEN der Linie UNTEN
-            date_str = alt_pt[0].strftime('%d. %B')
-            y_bottom = ax.get_ylim()[0]  # Unterer Rand des Graphs
-            
-            # Links von der Linie platzieren
-            ax.text(alt_pt[0] - timedelta(days=0.5), y_bottom + 0.5, date_str, 
-                    ha='right', va='bottom', fontsize=8, color=COL_ALT,
-                    rotation=90,  # Vertikal
-                    alpha=0.8)
         
         if neu_pt:
             ax.plot([neu_pt[0]], [neu_pt[1]], marker="*", markersize=12, linestyle="None",
                     zorder=7, color=COL_NEU)
             ax.axvline(neu_pt[0], linestyle="--", linewidth=0.8, alpha=0.6, color=COL_NEU)
             
-            # Label am Stern (wie bisher)
             ax.annotate(f"NEU ETA {name}", (neu_pt[0], neu_pt[1]),
                         xytext=(6, -12), textcoords="offset points", ha="left", va="top", fontsize=9,
                         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
+        
+        # Datumsbeschriftungen - OBERHALB der X-Achse im ersten Quadranten
+        y_range = ax.get_ylim()
+        y_min = y_range[0]
+        
+        # Position etwa 5-10% oberhalb des unteren Rands (innerhalb des Graphbereichs)
+        y_text_pos = y_min + (y_range[1] - y_min) * 0.08  # 8% von unten
+        
+        if alt_pt and neu_pt:
+            # Beide vorhanden - prüfe Abstand
+            days_diff = abs((neu_pt[0] - alt_pt[0]).days)
             
-            # NEU: Vertikales Datum LINKS NEBEN der Linie UNTEN
-            date_str = neu_pt[0].strftime('%d. %B')
-            y_bottom = ax.get_ylim()[0]  # Unterer Rand des Graphs
-            
-            # Links von der Linie platzieren
-            # Bei Überlappung etwas mehr nach links
-            x_offset = 0.5  # Standard: halber Tag links
-            if alt_pt and abs((neu_pt[0] - alt_pt[0]).days) < 2:
-                x_offset = 1.0  # Bei Nähe zu ALT: ganzer Tag links
-            
-            ax.text(neu_pt[0] - timedelta(days=x_offset), y_bottom + 0.5, date_str, 
+            if days_diff < 2:  # Zu nah beieinander
+                # EINE gemeinsame Beschriftung zwischen beiden Linien
+                date_alt = alt_pt[0].strftime('%d.')
+                date_neu = neu_pt[0].strftime('%d. %B')
+                combined_text = f"{date_alt}/{date_neu}"
+                x_pos = (alt_pt[0] + neu_pt[0]) / 2  # Mittig zwischen beiden
+                
+                # Kombinierte Beschriftung in schwarz oder grau
+                ax.text(x_pos, y_text_pos, combined_text,
+                        ha='center', va='bottom', fontsize=8, color='gray',
+                        rotation=90, alpha=0.9, weight='semibold')
+            else:
+                # ZWEI separate Beschriftungen
+                # ALT Beschriftung
+                ax.text(alt_pt[0] - timedelta(days=0.8), y_text_pos, 
+                        alt_pt[0].strftime('%d. %B'),
+                        ha='right', va='bottom', fontsize=8, color=COL_ALT,
+                        rotation=90, alpha=0.9)
+                
+                # NEU Beschriftung
+                ax.text(neu_pt[0] - timedelta(days=0.8), y_text_pos,
+                        neu_pt[0].strftime('%d. %B'),
+                        ha='right', va='bottom', fontsize=8, color=COL_NEU,
+                        rotation=90, alpha=0.9)
+        
+        elif alt_pt:
+            # Nur ALT vorhanden
+            ax.text(alt_pt[0] - timedelta(days=0.8), y_text_pos,
+                    alt_pt[0].strftime('%d. %B'),
+                    ha='right', va='bottom', fontsize=8, color=COL_ALT,
+                    rotation=90, alpha=0.9)
+        
+        elif neu_pt:
+            # Nur NEU vorhanden
+            ax.text(neu_pt[0] - timedelta(days=0.8), y_text_pos,
+                    neu_pt[0].strftime('%d. %B'),
                     ha='right', va='bottom', fontsize=8, color=COL_NEU,
-                    rotation=90,  # Vertikal
-                    alpha=0.8)
+                    rotation=90, alpha=0.9)
 
     # Für Pre-CAS nur ein Ziel
     if stream == "pre_cas":
