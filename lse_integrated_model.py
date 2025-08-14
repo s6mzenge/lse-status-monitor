@@ -185,12 +185,12 @@ class IntegratedRegressor:
     """Integrated model for LSE processing forecasts.
     
     - x: cumulative UK business hours since first observation
-    - y: processing date as days since base (2025-07-01)
+    - y: processing date as days since base (2025-01-01)
     - Model: distance-aware blend of Theil–Sen (global) and LOESS (local)
              y_hat(x) = (1-w)*TS(x) + w*LOESS(x), w = exp(-dist/tau)
     """
     cal: BusinessCalendar
-    base_date: date = date(2025,7,1)
+    base_date: date = date(2025,1,1)
     loess_frac: float = 0.6
     tau_hours: float = 12.0  # scale for blending; ~2 Geschäftstage à 6h
     # fitted:
