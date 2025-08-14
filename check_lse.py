@@ -65,11 +65,27 @@ def business_days_elapsed(start_dt, end_dt):
 def add_business_days(start_dt, n):
     '''
     Addiert n Arbeitstage (Mo–Fr) auf start_dt und gibt das resultierende Datum zurück.
-    n kann negativ sein. Bruchteile werden zur nächsten ganzen Zahl nach oben gerundet,
-    da Vorhersagen in ganzen Kalendertagen kommuniziert werden.
+    n kann negativ sein. 
+    
+    Rundungslogik:
+    - Runde nur auf, wenn es sehr spät am Tag wäre (nach ~15:30 London Zeit)
+    - Das entspricht einem Bruchteil >= 0.9 (da 0.9 * 6h = 5.4h → 15:24)
+    - Ansonsten verwende den ganzzahligen Teil (abrunden)
     '''
-    from math import ceil
-    steps = int(ceil(n)) if n >= 0 else -int(ceil(abs(n)))
+    from math import floor, ceil
+    
+    if n >= 0:
+        fraction = n - int(n)
+        # Nur aufrunden wenn sehr spät am Tag (0.9 = ca. 15:24 Uhr)
+        # Sie können diesen Wert anpassen: 0.9 für ~15:30, 0.95 für ~15:45
+        if fraction >= 0.9:
+            steps = int(ceil(n))
+        else:
+            steps = int(floor(n))
+    else:
+        # Für negative Werte
+        steps = -int(floor(abs(n)))
+    
     current = start_dt
     step = 1 if steps >= 0 else -1
     remaining = abs(steps)
