@@ -1146,7 +1146,7 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
                 date_str = alt_pt[0].strftime('%d. %B')
                 
                 # Position: Direkt an der ersten Linie (minimaler Abstand)
-                x_pos = alt_pt[0] - timedelta(days=0.15)  # Nur 0.15 Tage links
+                x_pos = alt_pt[0] - timedelta(days=0.02)  # Nur 0.15 Tage links
                 
                 # Eine Beschriftung für beide
                 ax.text(x_pos, y_text_pos, date_str,
@@ -1159,37 +1159,37 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
                 
                 if days_diff < 2:  # Zu nah für normale Platzierung
                     # Versetze vertikal, aber nah an den Linien
-                    ax.text(alt_pt[0] - timedelta(days=0.15), y_text_pos + 1.5,  # ALT höher
+                    ax.text(alt_pt[0] - timedelta(days=0.02), y_text_pos + 1.5,  # ALT höher
                             alt_pt[0].strftime('%d. %B'),
                             ha='right', va='bottom', fontsize=8, color=COL_ALT,
                             rotation=90, alpha=0.9)
                     
-                    ax.text(neu_pt[0] - timedelta(days=0.15), y_text_pos,  # NEU tiefer
+                    ax.text(neu_pt[0] - timedelta(days=0.02), y_text_pos,  # NEU tiefer
                             neu_pt[0].strftime('%d. %B'),
                             ha='right', va='bottom', fontsize=8, color=COL_NEU,
                             rotation=90, alpha=0.9)
                 else:
                     # Weit genug auseinander: normale Platzierung, aber näher
-                    ax.text(alt_pt[0] - timedelta(days=0.15), y_text_pos, 
+                    ax.text(alt_pt[0] - timedelta(days=0.02), y_text_pos, 
                             alt_pt[0].strftime('%d. %B'),
                             ha='right', va='bottom', fontsize=8, color=COL_ALT,
                             rotation=90, alpha=0.9)
                     
-                    ax.text(neu_pt[0] - timedelta(days=0.15), y_text_pos,
+                    ax.text(neu_pt[0] - timedelta(days=0.02), y_text_pos,
                             neu_pt[0].strftime('%d. %B'),
                             ha='right', va='bottom', fontsize=8, color=COL_NEU,
                             rotation=90, alpha=0.9)
         
         elif alt_pt:
             # Nur ALT vorhanden
-            ax.text(alt_pt[0] - timedelta(days=0.15), y_text_pos,
+            ax.text(alt_pt[0] - timedelta(days=0.02), y_text_pos,
                     alt_pt[0].strftime('%d. %B'),
                     ha='right', va='bottom', fontsize=8, color=COL_ALT,
                     rotation=90, alpha=0.9)
         
         elif neu_pt:
             # Nur NEU vorhanden
-            ax.text(neu_pt[0] - timedelta(days=0.15), y_text_pos,
+            ax.text(neu_pt[0] - timedelta(days=0.02), y_text_pos,
                     neu_pt[0].strftime('%d. %B'),
                     ha='right', va='bottom', fontsize=8, color=COL_NEU,
                     rotation=90, alpha=0.9)
