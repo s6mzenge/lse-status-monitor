@@ -1923,7 +1923,7 @@ Zeitpunkt der Erkennung: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}
 Link zur Seite: {URL}{manual_hint}"""
             
             # E-Mail mit Prognose für Hauptempfänger
-            body_with_forecast = base_body + f"\n{forecast_text}\n\nDiese E-Mail wurde automatisch von deinem GitHub Actions Monitor generiert."
+            body_with_forecast = base_body + f"\n{re.sub('<.*?>', '', forecast_text)}\n\nDiese E-Mail wurde automatisch von deinem GitHub Actions Monitor generiert."
             
             # E-Mail ohne Prognose für bedingte Empfänger
             body_simple = base_body + "\n\nDiese E-Mail wurde automatisch von deinem GitHub Actions Monitor generiert."
