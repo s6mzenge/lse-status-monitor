@@ -59,6 +59,11 @@
       "timestamp": "2025-08-14T16:10:44.507957",
       "date": "31 July",
       "from": "29 July"
+    },
+    {
+      "timestamp": "2025-08-15T09:40:37.618812",
+      "date": "01 August",
+      "from": "31 July"
     }
   ],
   "pre_cas_changes": [
@@ -142,11 +147,21 @@
       "timestamp": "2025-08-14T15:00:00+00:00",
       "date": "29 July",
       "kind": "heartbeat"
+    },
+    {
+      "timestamp": "2025-08-15T09:00:00+00:00",
+      "date": "31 July",
+      "kind": "heartbeat"
     }
   ],
   "cas_observations": [
     {
       "timestamp": "2025-08-14T15:00:00+00:00",
+      "date": "08 August",
+      "kind": "heartbeat"
+    },
+    {
+      "timestamp": "2025-08-15T09:00:00+00:00",
       "date": "08 August",
       "kind": "heartbeat"
     }
