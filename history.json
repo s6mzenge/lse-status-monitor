@@ -68,9 +68,24 @@
   ],
   "pre_cas_changes": [
     {
+      "timestamp": "2025-07-10T12:00:00.000000",
+      "date": "10 July",
+      "from": null
+    },
+    {
+      "timestamp": "2025-07-13T12:00:00.000000",
+      "date": "13 July",
+      "from": "10 July"
+    },
+    {
+      "timestamp": "2025-07-21T12:00:00.000000",
+      "date": "21 July",
+      "from": "13 July"
+    },
+    {
       "timestamp": "2025-08-08T15:00:00.000000",
       "date": "24 July",
-      "from": null
+      "from": "21 July"
     },
     {
       "timestamp": "2025-08-12T10:10:42.858638",
@@ -90,9 +105,34 @@
   ],
   "cas_changes": [
     {
+      "timestamp": "2025-07-11T12:00:00.000000",
+      "date": "11 July",
+      "from": null
+    },
+    {
+      "timestamp": "2025-07-14T12:00:00.000000",
+      "date": "14 July",
+      "from": "11 July"
+    },
+    {
+      "timestamp": "2025-07-23T12:00:00.000000",
+      "date": "23 July",
+      "from": "14 July"
+    },
+    {
+      "timestamp": "2025-07-30T12:00:00.000000",
+      "date": "30 July",
+      "from": "23 July"
+    },
+    {
+      "timestamp": "2025-07-31T12:00:00.000000",
+      "date": "31 July",
+      "from": "30 July"
+    },    
+    {
       "timestamp": "2025-08-08T15:00:00.000000",
       "date": "04 August",
-      "from": null
+      "from": "31 July"
     },
     {
       "timestamp": "2025-08-11T15:04:36.295811",
