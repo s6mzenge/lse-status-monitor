@@ -30,6 +30,7 @@ jobs:
     - name: Install dependencies
       run: |
         pip install requests beautifulsoup4 numpy matplotlib scipy scikit-learn
+        pip install scikit-optimize optuna
     
     - name: Check LSE Status
       id: check_status
