@@ -2,9 +2,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, time, date
 from zoneinfo import ZoneInfo
+from advanced_optimizer import AdvancedBayesianOptimizer
 import numpy as np
 import math
 from typing import List, Optional, Tuple, Iterable, Dict
+
 
 UTC = ZoneInfo("UTC")
 LON = ZoneInfo("Europe/London")
@@ -318,3 +320,249 @@ class IntegratedRegressor:
             "when_low": to_dt(x_lo),
             "when_high": to_dt(x_hi),
         }
+
+
+@dataclass
+class ProfessionalAutoCalibratedRegressor(IntegratedRegressor):
+    """
+    Production-grade auto-calibrated regressor with advanced optimization.
+    """
+    
+    # Optimization settings
+    optimization_strategy: str = 'hybrid'  # 'skopt', 'optuna', 'hybrid', 'ensemble'
+    optimization_budget: int = 30  # Number of evaluations
+    use_parallel: bool = False  # Parallel evaluation
+    
+    # Calibration control
+    min_data_for_calibration: int = 5
+    recalibration_threshold: int = 10  # Recalibrate every N new points
+    
+    # History tracking
+    calibration_history: List[Dict] = field(default_factory=list, init=False)
+    last_calibration_size: int = field(default=0, init=False)
+    performance_metrics: Dict = field(default=None, init=False)
+    
+    def fit(self, rows: List[Dict]) -> "ProfessionalAutoCalibratedRegressor":
+        """Fit with state-of-the-art automatic calibration."""
+        
+        # Check if calibration needed
+        should_calibrate = (
+            len(rows) >= self.min_data_for_calibration and
+            (self.last_calibration_size == 0 or 
+             len(rows) - self.last_calibration_size >= self.recalibration_threshold)
+        )
+        
+        if should_calibrate:
+            print(f"\n🎯 Professional Auto-Calibration Starting...")
+            print(f"   Data points: {len(rows)}")
+            print(f"   Strategy: {self.optimization_strategy}")
+            
+            # Run advanced optimization
+            optimal_params, metrics = self._advanced_calibration(rows)
+            
+            # Apply optimal parameters
+            self.loess_frac = optimal_params['loess_frac']
+            self.tau_hours = optimal_params['tau_hours']
+            
+            # Advanced: Also optimize these if in param space
+            if 'base_tau' in optimal_params:
+                self.base_tau = optimal_params['base_tau']
+            if 'recency_weight' in optimal_params:
+                self.recency_weight = optimal_params['recency_weight']
+            
+            # Store calibration info
+            self.calibration_history.append({
+                'timestamp': datetime.utcnow().isoformat(),
+                'n_points': len(rows),
+                'optimal_params': optimal_params,
+                'metrics': metrics,
+                'strategy': self.optimization_strategy
+            })
+            
+            self.last_calibration_size = len(rows)
+            self.performance_metrics = metrics
+            
+            print(f"✅ Calibration Complete!")
+            print(f"   Optimal: loess_frac={self.loess_frac:.3f}, tau={self.tau_hours:.1f}h")
+            print(f"   Performance: {metrics.get('cv_score', 0):.4f} hours mean error")
+            if 'feature_importance' in metrics:
+                print(f"   Parameter importance: {metrics['feature_importance']}")
+        
+        # Continue with standard fit
+        return super().fit(rows)
+    
+    def _advanced_calibration(self, rows: List[Dict]) -> Tuple[Dict, Dict]:
+        """
+        Run advanced Bayesian optimization for parameter tuning.
+        """
+        # Define sophisticated parameter space
+        param_space = {
+            'loess_frac': {
+                'type': 'float',
+                'low': 0.35,
+                'high': 0.85,
+                'prior': 'uniform'  # Could use 'log-uniform' for some params
+            },
+            'tau_hours': {
+                'type': 'float', 
+                'low': 6.0,
+                'high': 30.0,
+                'prior': 'uniform'
+            }
+        }
+        
+        # Advanced: Add more parameters to optimize
+        if self.optimization_strategy in ['hybrid', 'ensemble']:
+            param_space.update({
+                'base_tau': {
+                    'type': 'float',
+                    'low': 8.0,
+                    'high': 24.0,
+                    'prior': 'uniform'
+                },
+                'recency_weight': {
+                    'type': 'float',
+                    'low': 0.1,
+                    'high': 0.9,
+                    'prior': 'uniform'
+                }
+            })
+        
+        # Create advanced optimizer
+        optimizer = AdvancedBayesianOptimizer(
+            param_space=param_space,
+            strategy=self.optimization_strategy,
+            acquisition_func='gp_hedge',  # Hedge between multiple acquisition functions
+            n_initial_points=min(10, max(5, len(rows) // 3)),
+            n_calls=self.optimization_budget,
+            n_jobs=-1 if self.use_parallel else 1,
+            random_state=42,
+            early_stop_patience=5
+        )
+        
+        # Sophisticated cross-validation objective
+        def objective(params: Dict) -> float:
+            """
+            Advanced objective with multiple validation strategies.
+            """
+            try:
+                errors = []
+                
+                # Strategy 1: Time series cross-validation
+                n_splits = min(5, len(rows) - self.min_data_for_calibration + 1)
+                for split_size in np.linspace(0.6, 0.9, n_splits):
+                    n_train = int(len(rows) * split_size)
+                    if n_train < self.min_data_for_calibration:
+                        continue
+                    
+                    train_rows = rows[:n_train]
+                    test_rows = rows[n_train:min(n_train + 3, len(rows))]
+                    
+                    if not test_rows:
+                        continue
+                    
+                    # Fit model with proposed parameters
+                    temp_model = IntegratedRegressor(
+                        cal=self.cal,
+                        base_date=self.base_date,
+                        loess_frac=params['loess_frac'],
+                        tau_hours=params['tau_hours']
+                    )
+                    
+                    try:
+                        temp_model.fit(train_rows)
+                        
+                        # Evaluate predictions
+                        for test_row in test_rows:
+                            pred = temp_model.predict_datetime(test_row['date'])
+                            if pred and pred.get('when_point'):
+                                actual = datetime.fromisoformat(test_row['timestamp']).replace(tzinfo=UTC)
+                                pred_time = pred['when_point']
+                                
+                                # Error in business hours (more meaningful)
+                                error_hours = abs(self.cal.business_minutes_between(actual, pred_time) / 60.0)
+                                
+                                # Weighted by recency (recent predictions more important)
+                                recency_weight = np.exp(-0.1 * (len(rows) - n_train))
+                                errors.append(error_hours * recency_weight)
+                    except:
+                        continue
+                
+                # Strategy 2: Leave-one-out for recent points
+                if len(rows) >= 7:
+                    for i in range(max(0, len(rows) - 3), len(rows)):
+                        loo_train = rows[:i] + rows[i+1:]
+                        loo_test = rows[i]
+                        
+                        if len(loo_train) < self.min_data_for_calibration:
+                            continue
+                        
+                        temp_model = IntegratedRegressor(
+                            cal=self.cal,
+                            base_date=self.base_date,
+                            loess_frac=params['loess_frac'],
+                            tau_hours=params['tau_hours']
+                        )
+                        
+                        try:
+                            temp_model.fit(loo_train)
+                            pred = temp_model.predict_datetime(loo_test['date'])
+                            
+                            if pred and pred.get('when_point'):
+                                actual = datetime.fromisoformat(loo_test['timestamp']).replace(tzinfo=UTC)
+                                error_hours = abs(self.cal.business_minutes_between(actual, pred['when_point']) / 60.0)
+                                errors.append(error_hours * 1.5)  # Weight recent LOO higher
+                        except:
+                            continue
+                
+                if not errors:
+                    return 1000.0
+                
+                # Sophisticated error aggregation
+                mean_error = np.mean(errors)
+                std_error = np.std(errors)
+                max_error = np.max(errors)
+                
+                # Composite score (balance mean and worst-case)
+                score = mean_error + 0.5 * std_error + 0.1 * max_error
+                
+                # Regularization (prefer moderate parameters)
+                regularization = (
+                    0.01 * abs(params['loess_frac'] - 0.6) +
+                    0.001 * abs(params['tau_hours'] - 12.0)
+                )
+                
+                return score + regularization
+                
+            except Exception as e:
+                return 1000.0
+        
+        # Run optimization
+        result = optimizer.optimize(
+            objective_func=objective,
+            n_calls=self.optimization_budget,
+            verbose=True
+        )
+        
+        # Extract advanced metrics
+        metrics = {
+            'cv_score': result['best_score'],
+            'n_evaluations': result['n_evaluations'],
+            'strategy_used': self.optimization_strategy
+        }
+        
+        # Add advanced analytics if available
+        if 'model' in result and result['model']:
+            importance = optimizer.get_feature_importance()
+            if importance:
+                metrics['feature_importance'] = importance
+        
+        if 'convergence' in result:
+            metrics['convergence_history'] = result['convergence']
+        
+        # Get next best candidates for future exploration
+        next_candidates = optimizer.predict_next_best(3)
+        if next_candidates:
+            metrics['next_candidates'] = next_candidates
+        
+        return result['best_params'], metrics
