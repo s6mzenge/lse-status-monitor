@@ -5,7 +5,7 @@ import os
 import re
 import smtplib
 from email.mime.text import MIMEText
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date  # date hinzugefügt
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -22,6 +22,16 @@ from config import (
     TARGET_DATES, REQUEST_TIMEOUT, REQUEST_HEADERS, GMAIL_SMTP_SERVER, 
     GMAIL_SMTP_PORT, TELEGRAM_API_BASE, ACTIVE_STREAM
 )
+
+# Advanced optimization imports
+try:
+    from advanced_optimizer import AdvancedBayesianOptimizer
+    from lse_integrated_model import ProfessionalAutoCalibratedRegressor
+    PROFESSIONAL_CALIBRATION_AVAILABLE = True
+    print("✅ Professional Auto-Calibration verfügbar")
+except ImportError as e:
+    PROFESSIONAL_CALIBRATION_AVAILABLE = False
+    print(f"⚠️ Professional Auto-Calibration nicht verfügbar: {e}")
 
 # Lazy imports for heavy dependencies - only loaded when needed
 _numpy = None
@@ -47,7 +57,6 @@ def _get_matplotlib():
         _matplotlib_dates = mdates
         _warnings = warnings
     return _matplotlib_plt, _matplotlib_dates
-
 
 # === Business-day helpers (x-axis skips weekends) ===
 
@@ -618,18 +627,24 @@ def _eta_backtest_score(rows_all, rows_changes, cal, loess_frac, tau_hours, tz_o
     return _median(errors_days)
 
 
-def compute_integrated_model_metrics(history, stream="all_other", return_model=False):
+def compute_integrated_model_metrics(history, stream="all_other", return_model=False,
+                                    use_professional_calibration=None):
     """
-    Integrierte Regression für den angegebenen Stream.
+    Integrierte Regression für den angegebenen Stream mit optionaler Professional Calibration.
     
     Args:
         history: Historie-Dictionary
         stream: "all_other", "pre_cas", oder "cas"
         return_model: Wenn True, gibt auch das trainierte Modell und Calendar zurück
+        use_professional_calibration: Wenn True, nutzt professionelle Auto-Kalibrierung
     """
     from lse_integrated_model import BusinessCalendar, IntegratedRegressor, LON, BER
     from datetime import time as _time
     _np = _get_numpy()  # Lazy load numpy
+    
+    # Auto-detect if professional calibration should be used
+    if use_professional_calibration is None:
+        use_professional_calibration = PROFESSIONAL_CALIBRATION_AVAILABLE
 
     # ---- Daten aufbereiten: Changes & Heartbeats für den gewählten Stream ----
     rows_all = []
@@ -690,34 +705,92 @@ def compute_integrated_model_metrics(history, stream="all_other", return_model=F
     cal = BusinessCalendar(tz=LON, start=_time(10, 0), end=_time(16, 0), holidays=UK_HOLIDAYS)
     tz_out = BER
 
-    # ---- (1) ETA-Backtest: kleines Grid ----
-    FRACS = [0.5, 0.6, 0.7]
-    TAUS  = [9.0, 12.0, 18.0]
+    # ---- Professional Calibration oder Standard ----
+    if use_professional_calibration and PROFESSIONAL_CALIBRATION_AVAILABLE and len(rows_all) >= 5:
+        print("\n    🚀 Verwende Professional Auto-Calibration...")
+        
+        # Wähle Strategie basierend auf Datenmenge
+        if len(rows_all) < 10:
+            strategy = 'skopt'
+            budget = 20
+            print(f"    📊 Kleine Datenmenge: Nutze Scikit-Optimize (Budget: {budget})")
+        elif len(rows_all) < 20:
+            strategy = 'hybrid'
+            budget = 30
+            print(f"    📊 Mittlere Datenmenge: Nutze Hybrid-Ansatz (Budget: {budget})")
+        else:
+            strategy = 'ensemble'
+            budget = 40
+            print(f"    📊 Große Datenmenge: Nutze Ensemble-Strategie (Budget: {budget})")
+        
+        # Erstelle professionell kalibriertes Modell
+        try:
+            imodel = ProfessionalAutoCalibratedRegressor(
+                cal=cal,
+                base_date=date(2025, 1, 1),
+                optimization_strategy=strategy,
+                optimization_budget=budget,
+                use_parallel=False  # GitHub Actions hat meist nur 2 Cores
+            ).fit(rows_all)
+            
+            # Extrahiere die verwendeten Parameter für Reporting
+            eff_frac = imodel.loess_frac
+            eff_tau = imodel.tau_hours
+            
+            print(f"    ✅ Optimale Parameter gefunden:")
+            print(f"       - LOESS Fraction: {eff_frac:.3f}")
+            print(f"       - Tau (hours): {eff_tau:.1f}")
+            
+            if hasattr(imodel, 'performance_metrics') and imodel.performance_metrics:
+                metrics = imodel.performance_metrics
+                if 'cv_score' in metrics:
+                    print(f"    📈 Performance:")
+                    print(f"       - Cross-Validation Error: {metrics['cv_score']:.2f} Stunden")
+                if 'feature_importance' in metrics:
+                    print(f"       - Parameter-Wichtigkeit:")
+                    for param, importance in metrics['feature_importance'].items():
+                        print(f"         • {param}: {importance:.1%}")
+        
+        except Exception as e:
+            print(f"    ❌ Professional Calibration fehlgeschlagen: {e}")
+            print("    ↩️ Fallback auf Standard-Methode...")
+            use_professional_calibration = False
+            # Set flag to continue with standard method
+            imodel = None
+    else:
+        use_professional_calibration = False
+        imodel = None
+    
+    # Standard-Methode wenn Professional Calibration nicht verwendet wird
+    if imodel is None:
+        # ---- (1) ETA-Backtest: kleines Grid ----
+        FRACS = [0.5, 0.6, 0.7]
+        TAUS  = [9.0, 12.0, 18.0]
 
-    best = {"score": float("inf"), "frac": 0.6, "tau": 12.0}
-    for frac in FRACS:
-        for tau in TAUS:
-            score = _eta_backtest_score(rows_all, rows_changes, cal, frac, tau, tz_out)
-            # Optional: leichte Regularisierung gegen zu hohe Glättung
-            score_reg = score + 0.02 * (frac - 0.6)**2 + 0.001 * (tau - 12.0)**2
-            if score_reg < best["score"]:
-                best = {"score": score_reg, "frac": frac, "tau": tau}
+        best = {"score": float("inf"), "frac": 0.6, "tau": 12.0}
+        for frac in FRACS:
+            for tau in TAUS:
+                score = _eta_backtest_score(rows_all, rows_changes, cal, frac, tau, tz_out)
+                # Optional: leichte Regularisierung gegen zu hohe Glättung
+                score_reg = score + 0.02 * (frac - 0.6)**2 + 0.001 * (tau - 12.0)**2
+                if score_reg < best["score"]:
+                    best = {"score": score_reg, "frac": frac, "tau": tau}
 
-    base_frac = best["frac"]
-    base_tau  = best["tau"]
+        base_frac = best["frac"]
+        base_tau  = best["tau"]
 
-    # ---- (3) Recency-Blend: Parameter dynamisch anpassen ----
-    last_change_ts = _to_aware_berlin(rows_changes[-1]["timestamp"])
-    h_since = _hours_since(last_change_ts)
-    w = _recency_weight(h_since, base_tau)  # 0..1
+        # ---- (3) Recency-Blend: Parameter dynamisch anpassen ----
+        last_change_ts = _to_aware_berlin(rows_changes[-1]["timestamp"])
+        h_since = _hours_since(last_change_ts)
+        w = _recency_weight(h_since, base_tau)  # 0..1
 
-    # Bei frischer Änderung (w~0) → weniger LOESS / kürzere Tau,
-    # bei langer Ruhe (w~1) → mehr LOESS / längere Tau
-    eff_frac = max(0.35, min(0.85, base_frac * (0.85 + 0.30 * w)))
-    eff_tau  = max(6.0,  min(24.0,  base_tau  * (0.80 + 0.50 * w)))
+        # Bei frischer Änderung (w~0) → weniger LOESS / kürzere Tau,
+        # bei langer Ruhe (w~1) → mehr LOESS / längere Tau
+        eff_frac = max(0.35, min(0.85, base_frac * (0.85 + 0.30 * w)))
+        eff_tau  = max(6.0,  min(24.0,  base_tau  * (0.80 + 0.50 * w)))
 
-    # ---- Final fit mit effektiven Parametern ----
-    imodel = IntegratedRegressor(cal=cal, loess_frac=eff_frac, tau_hours=eff_tau).fit(rows_all)
+        # ---- Final fit mit effektiven Parametern ----
+        imodel = IntegratedRegressor(cal=cal, loess_frac=eff_frac, tau_hours=eff_tau).fit(rows_all)
 
     # R² auf beobachteten Punkten (gegen die interne Blend-Vorhersage)
     x_obs = imodel.x_
@@ -757,12 +830,17 @@ def compute_integrated_model_metrics(history, stream="all_other", return_model=F
         "eta_target_dt": pred_target["when_point"] if pred_target else None,
         "heartbeats": heartbeats,
         # Debug/Transparenz (optional):
-        "params": {"base_frac": base_frac, "base_tau": base_tau, "eff_frac": eff_frac, "eff_tau": eff_tau, "recency_w": w, "h_since_change": h_since, "backtest_score_med_days": best["score"]},
+        "params": {
+            "loess_frac": eff_frac, 
+            "tau_hours": eff_tau,
+            "calibration_method": "professional" if use_professional_calibration else "standard"
+        },
     }
     
     if return_model:
         return result, imodel, cal  # Gebe auch das trainierte Modell und Calendar zurück
     return result
+
 
 def create_enhanced_forecast_text_precas(forecast):
     """Kompakte, mobilfreundliche Prognose für Pre-CAS (ALT vs. NEU) mit nur einem Zieldatum."""
@@ -783,10 +861,14 @@ def create_enhanced_forecast_text_precas(forecast):
 
     eta_old_dt = _old_eta_dt(forecast)
 
-    # Neue (integrierte) Metriken + echte ETA-Datetime
+# Neue (integrierte) Metriken + echte ETA-Datetime
     hist = get_history()
     try:
-        new_s = compute_integrated_model_metrics(hist, stream="pre_cas")
+        new_s = compute_integrated_model_metrics(
+            hist, 
+            stream="pre_cas",
+            use_professional_calibration=True  # Aktiviere Professional Calibration
+        )
     except Exception as e:
         print(f"⚠️ Integriertes Modell temporär deaktiviert: {e}")
         new_s = None
@@ -1049,7 +1131,12 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
     neu_eta = {}
     try:
         # WICHTIG: Hole das GLEICHE trainierte Modell wie für die Prognose
-        new_metrics_result = compute_integrated_model_metrics(history, stream=stream, return_model=True)
+        new_metrics_result = compute_integrated_model_metrics(
+            history, 
+            stream=stream, 
+            return_model=True,
+            use_professional_calibration=True  # Aktiviere Professional Calibration
+        )
         
         if new_metrics_result is not None:
             new_metrics, imodel, cal = new_metrics_result
@@ -1090,8 +1177,15 @@ def create_progression_graph(history, current_date, forecast=None, stream="all_o
                 # Plotte die Kurve
                 if y_new:
                     y_new = np.array(y_new)
+                    # Label anpassen je nach Kalibrierungsmethode
+                    calibration_info = new_metrics.get('params', {}).get('calibration_method', 'standard')
+                    if calibration_info == 'professional':
+                        label_suffix = " [Auto-Kalibriert]"
+                    else:
+                        label_suffix = ""
+                    
                     ax.plot(grid_ts, y_new, linewidth=2.6,
-                            label=f"NEU: integrierte Regression (R²={new_metrics['r2']:.2f})",
+                            label=f"NEU: integrierte Regression (R²={new_metrics['r2']:.2f}){label_suffix}",
                             color=COL_NEU, alpha=0.95)
                     
                     # ETAs mit dem GLEICHEN Modell
@@ -1741,6 +1835,11 @@ def main():
     else:
         print("⚠️ Erweiterte Regression nicht verfügbar (Standard-Regression wird verwendet)")
     
+    if PROFESSIONAL_CALIBRATION_AVAILABLE:
+        print("✅ Professional Auto-Calibration aktiviert")
+    else:
+        print("ℹ️ Professional Auto-Calibration nicht verfügbar (Standard-Kalibrierung wird verwendet)")
+        
     # Migriere JSON-Dateien falls nötig
     migrate_json_files()
     
