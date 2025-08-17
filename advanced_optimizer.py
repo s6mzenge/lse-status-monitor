@@ -112,116 +112,118 @@ class AdvancedBayesianOptimizer:
         else:
             raise ValueError(f"Unknown strategy: {self.strategy}")
     
-    def _optimize_skopt(self, objective_func: Callable, n_calls: int, 
-                       callback: Optional[Callable], verbose: bool) -> Dict:
-        """
-        Scikit-Optimize: Best Gaussian Process implementation.
-        """
-        if verbose:
-            print("🔬 Running Scikit-Optimize Bayesian Optimization...")
-            print(f"   Acquisition: {self.acquisition_func}")
-            print(f"   Kernel: {self.kernel}")
+def _optimize_skopt(self, objective_func: Callable, n_calls: int, 
+                   callback: Optional[Callable], verbose: bool) -> Dict:
+    """
+    Scikit-Optimize: Best Gaussian Process implementation.
+    """
+    if verbose:
+        print("🔬 Running Scikit-Optimize Bayesian Optimization...")
+        print(f"   Acquisition: {self.acquisition_func}")
+        print(f"   Kernel: {self.kernel}")
+    
+    # Convert param_space to skopt format
+    dimensions = []
+    param_names = []
+    
+    for name, spec in self.param_space.items():
+        param_names.append(name)
+        if isinstance(spec, tuple) and len(spec) == 2:
+            dimensions.append(Real(spec[0], spec[1], name=name))
+        elif isinstance(spec, dict):
+            if spec['type'] == 'float':
+                dimensions.append(Real(spec['low'], spec['high'], name=name, 
+                                     prior=spec.get('prior', 'uniform')))
+            elif spec['type'] == 'int':
+                dimensions.append(Integer(spec['low'], spec['high'], name=name))
+            elif spec['type'] == 'categorical':
+                dimensions.append(Categorical(spec['choices'], name=name))
+    
+    # Create sophisticated objective wrapper
+    @use_named_args(dimensions=dimensions)
+    def wrapped_objective(**params):
+        score = objective_func(params)
         
-        # Convert param_space to skopt format
-        dimensions = []
-        param_names = []
+        # Store in history
+        self.optimization_history_.append({
+            'params': params.copy(),
+            'score': score,
+            'iteration': len(self.optimization_history_)
+        })
         
-        for name, spec in self.param_space.items():
-            param_names.append(name)
-            if isinstance(spec, tuple) and len(spec) == 2:
-                dimensions.append(Real(spec[0], spec[1], name=name))
-            elif isinstance(spec, dict):
-                if spec['type'] == 'float':
-                    dimensions.append(Real(spec['low'], spec['high'], name=name, 
-                                         prior=spec.get('prior', 'uniform')))
-                elif spec['type'] == 'int':
-                    dimensions.append(Integer(spec['low'], spec['high'], name=name))
-                elif spec['type'] == 'categorical':
-                    dimensions.append(Categorical(spec['choices'], name=name))
+        # Update best
+        if score < self.best_score_:
+            self.best_score_ = score
+            self.best_params_ = params.copy()
+            if verbose:
+                print(f"   ⭐ New best at iteration {len(self.optimization_history_)}: {score:.6f}")
         
-        # Create sophisticated objective wrapper
-        @use_named_args(dimensions=dimensions)
-        def wrapped_objective(**params):
-            score = objective_func(params)
-            
-            # Store in history
-            self.optimization_history_.append({
-                'params': params.copy(),
-                'score': score,
-                'iteration': len(self.optimization_history_)
-            })
-            
-            # Update best
-            if score < self.best_score_:
-                self.best_score_ = score
-                self.best_params_ = params.copy()
-                if verbose:
-                    print(f"   ⭐ New best at iteration {len(self.optimization_history_)}: {score:.6f}")
-            
-            # Callback
-            if callback:
-                callback(params, score)
-            
-            return score
+        # Callback
+        if callback:
+            callback(params, score)
         
-        # Select acquisition function
-        if self.acquisition_func == 'gp_hedge':
-            # Hedge between multiple acquisition functions
-            acq_func = 'gp_hedge'
-            acq_func_kwargs = {'xi': 0.01, 'kappa': 1.96}
-        elif self.acquisition_func == 'EI':
-            acq_func = gaussian_ei
-            acq_func_kwargs = {'xi': 0.01}
-        elif self.acquisition_func == 'LCB':
-            acq_func = gaussian_lcb
-            acq_func_kwargs = {'kappa': 1.96}
-        elif self.acquisition_func == 'PI':
-            acq_func = gaussian_pi
-            acq_func_kwargs = {'xi': 0.01}
-        else:
-            acq_func = 'gp_hedge'
-            acq_func_kwargs = {}
-        
-        # Run optimization
-        result = gp_minimize(
-            func=wrapped_objective,
-            dimensions=dimensions,
-            n_calls=n_calls,
-            n_initial_points=self.n_initial_points,
-            acq_func=acq_func,
-            acq_func_kwargs=acq_func_kwargs,
-            acq_optimizer=self.acq_optimizer,
-            acq_optimizer_kwargs=self.acq_optimizer_kwargs,
-            random_state=self.random_state,
-            n_jobs=self.n_jobs,
-            noise=self.alpha,
-            verbose=verbose,
-            callback=None,  # We handle callbacks internally
-            x0=None,  # Could provide initial guess
-            y0=None,  # Could provide initial observations
-            model_queue_size=1,  # Keep only latest model
-        )
-        
-        # Store the GP model
-        self.model_ = result.models[-1] if result.models else None
-        
-        # Extract results
-        best_params = dict(zip(param_names, result.x))
-        
-        if verbose:
-            print(f"\n✅ Optimization complete!")
-            print(f"   Best score: {result.fun:.6f}")
-            print(f"   Best params: {self._format_params(best_params)}")
-            print(f"   Convergence: {result.func_vals[-5:] if len(result.func_vals) >= 5 else result.func_vals}")
-        
-        return {
-            'best_params': best_params,
-            'best_score': result.fun,
-            'n_evaluations': len(result.func_vals),
-            'convergence': result.func_vals,
-            'model': self.model_,
-            'result_object': result
-        }
+        return score
+    
+    # KORRIGIERT: Korrekte Handhabung von acq_func
+    # Prepare kwargs for gp_minimize
+    gp_minimize_kwargs = {
+        'func': wrapped_objective,
+        'dimensions': dimensions,
+        'n_calls': n_calls,
+        'n_initial_points': self.n_initial_points,
+        'acq_optimizer': self.acq_optimizer,
+        'acq_optimizer_kwargs': self.acq_optimizer_kwargs,
+        'random_state': self.random_state,
+        'n_jobs': self.n_jobs,
+        'noise': self.alpha,
+        'verbose': verbose,
+        'callback': None,  # We handle callbacks internally
+        'x0': None,  # Could provide initial guess
+        'y0': None,  # Could provide initial observations
+        'model_queue_size': 1,  # Keep only latest model
+    }
+    
+    # Handle acquisition function correctly
+    if self.acquisition_func == 'gp_hedge':
+        # For gp_hedge, just pass the string - NO acq_func_kwargs!
+        gp_minimize_kwargs['acq_func'] = 'gp_hedge'
+    elif self.acquisition_func == 'EI':
+        # For explicit functions, pass the function object and kwargs
+        gp_minimize_kwargs['acq_func'] = gaussian_ei
+        gp_minimize_kwargs['acq_func_kwargs'] = {'xi': 0.01}
+    elif self.acquisition_func == 'LCB':
+        gp_minimize_kwargs['acq_func'] = gaussian_lcb
+        gp_minimize_kwargs['acq_func_kwargs'] = {'kappa': 1.96}
+    elif self.acquisition_func == 'PI':
+        gp_minimize_kwargs['acq_func'] = gaussian_pi
+        gp_minimize_kwargs['acq_func_kwargs'] = {'xi': 0.01}
+    else:
+        # Default to gp_hedge
+        gp_minimize_kwargs['acq_func'] = 'gp_hedge'
+    
+    # Run optimization
+    result = gp_minimize(**gp_minimize_kwargs)
+    
+    # Store the GP model
+    self.model_ = result.models[-1] if result.models else None
+    
+    # Extract results
+    best_params = dict(zip(param_names, result.x))
+    
+    if verbose:
+        print(f"\n✅ Optimization complete!")
+        print(f"   Best score: {result.fun:.6f}")
+        print(f"   Best params: {self._format_params(best_params)}")
+        print(f"   Convergence: {result.func_vals[-5:] if len(result.func_vals) >= 5 else result.func_vals}")
+    
+    return {
+        'best_params': best_params,
+        'best_score': result.fun,
+        'n_evaluations': len(result.func_vals),
+        'convergence': result.func_vals,
+        'model': self.model_,
+        'result_object': result
+    }
     
     def _optimize_optuna(self, objective_func: Callable, n_calls: int,
                         callback: Optional[Callable], verbose: bool) -> Dict:
