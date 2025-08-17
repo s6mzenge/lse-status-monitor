@@ -172,7 +172,6 @@ class AdvancedBayesianOptimizer:
             'n_calls': n_calls,
             'n_initial_points': self.n_initial_points,
             'acq_optimizer': self.acq_optimizer,
-            'acq_optimizer_kwargs': self.acq_optimizer_kwargs,
             'random_state': self.random_state,
             'n_jobs': self.n_jobs,
             'noise': self.alpha,
