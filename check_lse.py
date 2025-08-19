@@ -1985,10 +1985,27 @@ def main():
             print(f"   Auf: {current_date}")
             
             # Sende einfache Nachricht an Mama
-            send_telegram_mama("Pre-CAS", status.get('pre_cas_date', 'Unbekannt'), current_date)
+            mama_sent = send_telegram_mama("Pre-CAS", status.get('pre_cas_date', 'Unbekannt'), current_date)
             
             # Sende einfache Nachricht an Papa
-            send_telegram_papa("Pre-CAS", status.get('pre_cas_date', 'Unbekannt'), current_date)
+            papa_sent = send_telegram_papa("Pre-CAS", status.get('pre_cas_date', 'Unbekannt'), current_date)
+            
+            # NEU: Wenn Eltern-Benachrichtigungen fehlschlagen, informiere den Hauptbot
+            if not mama_sent or not papa_sent:
+                warning_msg = f"""<b>⚠️ WARNUNG: Eltern-Benachrichtigung fehlgeschlagen!</b>
+            
+            Pre-CAS Änderung: {status.get('pre_cas_date', 'Unbekannt')} → {current_date}
+            
+            Status der Benachrichtigungen:
+            - Mama: {'✅ Erfolgreich' if mama_sent else '❌ FEHLGESCHLAGEN'}
+            - Papa: {'✅ Erfolgreich' if papa_sent else '❌ FEHLGESCHLAGEN'}
+            
+            <b>Bitte informiere deine Eltern manuell!</b>
+            
+            Zeit: {get_german_time().strftime('%d.%m.%Y %H:%M:%S')}"""
+                
+                send_telegram(warning_msg)
+                print("⚠️ Warnung an Hauptbot gesendet wegen fehlgeschlagener Eltern-Benachrichtigung")
             
             # Speichere in Historie mit UTC Zeit (für Konsistenz)
             history["pre_cas_changes"].append({
