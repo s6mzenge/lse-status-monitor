@@ -352,32 +352,8 @@ def calculate_advanced_regression_forecast(history, current_date=None, stream="a
     if advanced_available:
         # 2. ROBUST REGRESSION (Outlier-resistent)
         try:
-            # In calculate_advanced_regression_forecast()
-            def optimize_huber_epsilon(x, y, cv_folds=3):
-                """Optimiere Epsilon durch Cross-Validation"""
-                epsilons = np.linspace(1.0, 2.5, 10)
-                best_epsilon = 1.5
-                best_score = float('inf')
-                
-                for epsilon in epsilons:
-                    scores = []
-                    for train_idx, val_idx in time_series_split(len(x), cv_folds):
-                        huber = HuberRegressor(epsilon=epsilon)
-                        huber.fit(x[train_idx], y[train_idx])
-                        pred = huber.predict(x[val_idx])
-                        scores.append(np.mean(np.abs(y[val_idx] - pred)))
-                    
-                    if np.mean(scores) < best_score:
-                        best_score = np.mean(scores)
-                        best_epsilon = epsilon
-                
-                return best_epsilon
-            
-            # Verwendung:
-            optimal_epsilon = optimize_huber_epsilon(x, y)
-            huber = HuberRegressor(epsilon=optimal_epsilon)
+            huber = HuberRegressor(epsilon=1.5)
             huber.fit(x, y)
-            print(f"   Optimales Huber Epsilon: {optimal_epsilon:.2f}")
             slope_robust = huber.coef_[0]
             intercept_robust = huber.intercept_
             y_pred_robust = huber.predict(x)
@@ -395,31 +371,8 @@ def calculate_advanced_regression_forecast(history, current_date=None, stream="a
         
         # 3. GEWICHTETE REGRESSION (neuere Daten wichtiger)
         try:
-            # Adaptiver Exponent basierend auf Datenvariabilität
-            def calculate_weight_exponent(x_flat, y):
-                """Berechne optimalen Exponenten für Gewichtung"""
-                # Analysiere wie stark sich die Steigung über Zeit ändert
-                window = max(3, len(x_flat) // 4)
-                local_slopes = []
-                
-                for i in range(len(x_flat) - window):
-                    local_slope = np.polyfit(x_flat[i:i+window], y[i:i+window], 1)[0]
-                    local_slopes.append(local_slope)
-                
-                if local_slopes:
-                    slope_variability = np.std(local_slopes) / (np.mean(np.abs(local_slopes)) + 1e-6)
-                    # Höhere Variabilität → stärkere Gewichtung neuerer Daten
-                    weight_exp = 1.0 + 3.0 * np.tanh(slope_variability)
-                else:
-                    weight_exp = 2.0  # Fallback
-                
-                return weight_exp
-            
-            # Verwendung:
-            weight_exp = calculate_weight_exponent(x_flat, y)
-            weights = np.exp(x_flat / np.max(x_flat) * weight_exp)
+            weights = np.exp(x_flat / np.max(x_flat) * 2)  # Exponentiell steigende Gewichte
             weighted_slope, weighted_intercept = np.polyfit(x_flat, y, 1, w=weights)
-            print(f"   Adaptiver Gewichtungsexponent: {weight_exp:.2f}")
             y_pred_weighted = weighted_slope * x_flat + weighted_intercept
             r2_weighted = 1 - np.sum((y - y_pred_weighted)**2) / ss_tot if ss_tot > 0 else 0
             models_comparison["weighted"] = {"slope": weighted_slope, "r2": r2_weighted}
@@ -455,31 +408,9 @@ def calculate_advanced_regression_forecast(history, current_date=None, stream="a
                 velocities.append(dy / dx)
         
         if velocities:
-            def adaptive_window_size(velocities, data_points):
-                """Berechne optimale Fenstergröße basierend auf Datenmenge und Volatilität"""
-                n = len(velocities)
-                if n < 2:
-                    return n
-                
-                # Basis: Wurzel aus Anzahl (klassische Heuristik)
-                base_window = int(np.sqrt(n))
-                
-                # Anpassung basierend auf Volatilität
-                velocity_std = np.std(velocities)
-                velocity_mean = np.mean(np.abs(velocities))
-                cv = velocity_std / (velocity_mean + 1e-6)  # Variationskoeffizient
-                
-                # Höhere Volatilität → größeres Fenster für Stabilität
-                window = int(base_window * (1 + 0.5 * np.tanh(cv - 0.5)))
-                
-                # Begrenzen auf sinnvollen Bereich
-                return max(2, min(window, min(10, n)))
-            
-            # Verwendung:
-            window_size = adaptive_window_size(velocities, len(data_points))
-            recent_velocities = velocities[-window_size:] if len(velocities) >= window_size else velocities
+            # Verwende die letzten 3 Geschwindigkeiten für kurzfristigen Trend
+            recent_velocities = velocities[-3:] if len(velocities) >= 3 else velocities
             recent_avg_velocity = np.mean(recent_velocities)
-            print(f"   Adaptive Fenstergröße: {window_size}")
             
             if advanced_available:
                 # Gewichteter Moving Average (neuere wichtiger)
@@ -517,55 +448,10 @@ def calculate_advanced_regression_forecast(history, current_date=None, stream="a
         if target_days and best_slope > 0:
             days_until = (target_days - current_predicted_days) / best_slope
             
-            def bootstrap_confidence_intervals(data_points, target_days, n_bootstrap=500):
-                """Bootstrap-basierte Konfidenzintervalle"""
-                predictions = []
-                
-                for _ in range(n_bootstrap):
-                    # Resample mit Replacement
-                    n = len(data_points)
-                    indices = np.random.choice(n, n, replace=True)
-                    resampled = [data_points[i] for i in indices]
-                    
-                    # Fit model auf resampled data
-                    x_resamp = np.array([p[0] for p in resampled]).reshape(-1, 1)
-                    y_resamp = np.array([p[1] for p in resampled])
-                    
-                    if len(np.unique(x_resamp)) > 1:  # Vermeid degenerierte Samples
-                        slope, intercept = np.polyfit(x_resamp.flatten(), y_resamp, 1)
-                        
-                        # Vorhersage
-                        current_x = data_points[-1][0]
-                        if slope > 0:
-                            days_until = (target_days - (slope * current_x + intercept)) / slope
-                            predictions.append(days_until)
-                
-                if predictions:
-                    # Quantile für 95% Konfidenzintervall
-                    days_until_lower = np.percentile(predictions, 2.5)
-                    days_until_upper = np.percentile(predictions, 97.5)
-                    days_until_median = np.median(predictions)
-                    
-                    return {
-                        'median': days_until_median,
-                        'lower': days_until_lower,
-                        'upper': days_until_upper,
-                        'std': np.std(predictions)
-                    }
-                else:
-                    # Fallback auf alte Methode
-                    return {
-                        'median': days_until,
-                        'lower': days_until_lower,
-                        'upper': days_until_upper,
-                        'std': std_error / abs(best_slope) if best_slope != 0 else 0
-                    }
-            
-            # Verwendung:
-            ci = bootstrap_confidence_intervals(data_points, target_days)
-            days_until_lower = max(0, ci['lower'])
-            days_until_upper = ci['upper']
-            days_until = ci['median']
+            # Konfidenzintervall (95%)
+            confidence_margin = (CONFIDENCE_LEVEL * std_error / abs(best_slope)) if best_slope != 0 else 0
+            days_until_lower = max(0, days_until - confidence_margin)
+            days_until_upper = days_until + confidence_margin
             
             predictions[target_name] = {
                 "days": days_until,
@@ -583,35 +469,14 @@ def calculate_advanced_regression_forecast(history, current_date=None, stream="a
     # 8. TREND-ANALYSE
     trend_analysis = "unbekannt"
     if len(velocities) >= 2:
-        def calculate_trend_threshold(velocities, sensitivity=1.5):
-            """Dynamische Trendschwelle basierend auf Geschwindigkeitsvariabilität"""
-            if len(velocities) < 3:
-                return 0.1  # Fallback
-            
-            # Berechne Änderungen zwischen aufeinanderfolgenden Geschwindigkeiten
-            velocity_changes = np.diff(velocities)
-            
-            # Robuste Streuungsschätzung (Median Absolute Deviation)
-            mad = np.median(np.abs(velocity_changes - np.median(velocity_changes)))
-            robust_std = 1.4826 * mad  # Konversion zu Standardabweichung
-            
-            # Schwelle als Vielfaches der robusten Streuung
-            threshold = sensitivity * robust_std
-            
-            # Sinnvolle Grenzen
-            return np.clip(threshold, 0.05, 0.3)
-        
-        # Verwendung:
-        trend_threshold = calculate_trend_threshold(velocities)
+        # Ist der Trend beschleunigend oder verlangsamend?
         recent_acceleration = recent_avg_velocity - weighted_avg_velocity
-        
-        if recent_acceleration > trend_threshold:
+        if recent_acceleration > 0.1:
             trend_analysis = "beschleunigend"
-        elif recent_acceleration < -trend_threshold:
+        elif recent_acceleration < -0.1:
             trend_analysis = "verlangsamend"
         else:
             trend_analysis = "konstant"
-        print(f"   Adaptive Trendschwelle: {trend_threshold:.3f}")
     
     return {
         # Basis-Informationen (für Kompatibilität)
@@ -899,126 +764,30 @@ def compute_integrated_model_metrics(history, stream="all_other", return_model=F
     # Standard-Methode wenn Professional Calibration nicht verwendet wird
     if imodel is None:
         # ---- (1) ETA-Backtest: kleines Grid ----
-        def generate_adaptive_grid(n_data_points, data_variance=None):
-            """Erstelle adaptives Grid basierend auf Datenmenge und Varianz"""
-            # Mehr Punkte bei mehr Daten
-            if n_data_points < 10:
-                grid_density = 3
-                frac_range = (0.5, 0.7)
-                tau_range = (9.0, 18.0)
-            elif n_data_points < 20:
-                grid_density = 5
-                frac_range = (0.45, 0.75)
-                tau_range = (8.0, 20.0)
-            else:
-                grid_density = 7
-                frac_range = (0.4, 0.8)
-                tau_range = (6.0, 24.0)
-            
-            # Optional: Anpassung basierend auf Varianz
-            if data_variance is not None and data_variance > np.median(data_variance):
-                # Erweitere Suchraum bei hoher Varianz
-                frac_range = (frac_range[0] - 0.05, frac_range[1] + 0.05)
-                tau_range = (tau_range[0] - 2, tau_range[1] + 4)
-            
-            FRACS = np.linspace(frac_range[0], frac_range[1], grid_density)
-            TAUS = np.linspace(tau_range[0], tau_range[1], grid_density)
-            
-            return FRACS, TAUS
-        
-        # Verwendung:
-        FRACS, TAUS = generate_adaptive_grid(len(rows_all))
-        print(f"   Adaptives Grid: {len(FRACS)}×{len(TAUS)} Punkte")
-        
-        # Oder mit Bayesscher Optimierung statt Grid:
-        from skopt import gp_minimize
-        
-        def objective(params):
-            frac, tau = params
-            return _eta_backtest_score(rows_all, rows_changes, cal, frac, tau, tz_out)
-        
-        result = gp_minimize(
-            func=objective,
-            dimensions=[(0.4, 0.8), (6.0, 24.0)],  # Suchraum
-            n_calls=20,  # Weniger Evaluierungen als Grid
-            random_state=42
-        )
-        base_frac, base_tau = result.x
+        FRACS = [0.5, 0.6, 0.7]
+        TAUS  = [9.0, 12.0, 18.0]
+
+        best = {"score": float("inf"), "frac": 0.6, "tau": 12.0}
+        for frac in FRACS:
+            for tau in TAUS:
+                score = _eta_backtest_score(rows_all, rows_changes, cal, frac, tau, tz_out)
+                # Optional: leichte Regularisierung gegen zu hohe Glättung
+                score_reg = score + 0.02 * (frac - 0.6)**2 + 0.001 * (tau - 12.0)**2
+                if score_reg < best["score"]:
+                    best = {"score": score_reg, "frac": frac, "tau": tau}
+
+        base_frac = best["frac"]
+        base_tau  = best["tau"]
 
         # ---- (3) Recency-Blend: Parameter dynamisch anpassen ----
         last_change_ts = _to_aware_berlin(rows_changes[-1]["timestamp"])
         h_since = _hours_since(last_change_ts)
         w = _recency_weight(h_since, base_tau)  # 0..1
 
-        def learn_blend_parameters(history_data, base_frac, base_tau):
-            """Lerne optimale Blend-Parameter aus historischen Daten"""
-            
-            # Sammle Fehler für verschiedene Parameterkombinationen
-            param_combinations = []
-            
-            for frac_base_mult in np.linspace(0.7, 1.0, 5):
-                for frac_w_mult in np.linspace(0.2, 0.5, 5):
-                    for tau_base_mult in np.linspace(0.6, 1.0, 5):
-                        for tau_w_mult in np.linspace(0.3, 0.7, 5):
-                            # Backtest mit diesen Parametern
-                            errors = []
-                            for split in rolling_splits(history_data):
-                                w = calculate_recency_weight(split['hours_since'])
-                                test_frac = base_frac * (frac_base_mult + frac_w_mult * w)
-                                test_tau = base_tau * (tau_base_mult + tau_w_mult * w)
-                                
-                                error = evaluate_prediction(split['train'], split['test'], test_frac, test_tau)
-                                errors.append(error)
-                            
-                            param_combinations.append({
-                                'params': (frac_base_mult, frac_w_mult, tau_base_mult, tau_w_mult),
-                                'error': np.mean(errors)
-                            })
-            
-            # Beste Parameter
-            best = min(param_combinations, key=lambda x: x['error'])
-            return best['params']
-        
-        # Wenn keine Historie für Lernen vorhanden, nutze adaptive Defaults:
-        def get_adaptive_blend_params(n_points, hours_since_change):
-            """Adaptive Default-Parameter basierend auf Datensituation"""
-            # Grenzen basierend auf Datenmenge
-            if n_points < 10:
-                frac_bounds = (0.4, 0.75)
-                tau_bounds = (8.0, 20.0)
-            else:
-                frac_bounds = (0.35, 0.85)
-                tau_bounds = (6.0, 24.0)
-            
-            # Faktoren basierend auf Zeit seit letzter Änderung
-            if hours_since_change < 24:  # Sehr frisch
-                frac_mults = (0.9, 0.2)
-                tau_mults = (0.85, 0.3)
-            elif hours_since_change < 72:  # Mittel
-                frac_mults = (0.85, 0.3)
-                tau_mults = (0.8, 0.5)
-            else:  # Älter
-                frac_mults = (0.8, 0.4)
-                tau_mults = (0.75, 0.6)
-            
-            return frac_bounds, tau_bounds, frac_mults, tau_mults
-        
-        # Verwendung:
-        if len(history_data) > 20:  # Genug Daten zum Lernen
-            frac_base_mult, frac_w_mult, tau_base_mult, tau_w_mult = learn_blend_parameters(
-                history_data, base_frac, base_tau
-            )
-        else:  # Adaptive Defaults
-            frac_bounds, tau_bounds, frac_mults, tau_mults = get_adaptive_blend_params(
-                len(rows_all), h_since
-            )
-            frac_base_mult, frac_w_mult = frac_mults
-            tau_base_mult, tau_w_mult = tau_mults
-        
-        eff_frac = max(frac_bounds[0], min(frac_bounds[1], 
-                        base_frac * (frac_base_mult + frac_w_mult * w)))
-        eff_tau = max(tau_bounds[0], min(tau_bounds[1], 
-                       base_tau * (tau_base_mult + tau_w_mult * w)))
+        # Bei frischer Änderung (w~0) → weniger LOESS / kürzere Tau,
+        # bei langer Ruhe (w~1) → mehr LOESS / längere Tau
+        eff_frac = max(0.35, min(0.85, base_frac * (0.85 + 0.30 * w)))
+        eff_tau  = max(6.0,  min(24.0,  base_tau  * (0.80 + 0.50 * w)))
 
         # ---- Final fit mit effektiven Parametern ----
         imodel = IntegratedRegressor(cal=cal, loess_frac=eff_frac, tau_hours=eff_tau).fit(rows_all)
