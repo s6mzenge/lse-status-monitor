@@ -1412,9 +1412,10 @@ def send_telegram_message(message, chat_type='main', photo_buffer=None, caption=
             url = f"{TELEGRAM_API_BASE}{bot_token}/sendMessage"
             data = {
                 "chat_id": chat_id,
-                "text": message,
-                "parse_mode": parse_mode
+                "text": message
             }
+            if parse_mode:
+                data["parse_mode"] = parse_mode
             response = requests.post(url, json=data)
         
         if response.status_code == 200:
